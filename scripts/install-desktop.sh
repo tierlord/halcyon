@@ -54,7 +54,7 @@ Comment=E-Mail mit Komfort
 Exec=$BIN_DIR/halcyon-desktop
 Icon=halcyon
 Terminal=false
-Categories=Network;Email;Office;
+Categories=Network;Email;
 Keywords=Mail;E-Mail;IMAP;
 StartupWMClass=halcyon-desktop
 DESKTOP_ENTRY
