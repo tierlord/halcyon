@@ -34,7 +34,10 @@
 - [ ] Einmalcodes mit einem Klick kopieren
 - [ ] Snooze
 - [ ] „Wartet auf Antwort"-Erinnerungen
-- [ ] Lokale KI für die Einordnung (kein Cloud-Dienst)
+- [ ] Optionales KI-Paket (in der App nachladbar, App läuft ohne KI):
+      Ähnlichkeitssuche, später lokales LLM, Rechner im Heimnetz oder
+      Cloud-KI mit eigenem API-Schlüssel (opt-in, pro Konto, maskiert) –
+      siehe [docs/design/klassifizierung.md](docs/design/klassifizierung.md)
 
 ## Plattformen
 
