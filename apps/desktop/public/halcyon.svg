@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <clipPath id="head"><circle cx="26" cy="32" r="20"/></clipPath>
+  </defs>
+  <!-- beak -->
+  <path d="M40 26 L62 33 L40 37 Z" fill="#3c6b74"/>
+  <g clip-path="url(#head)">
+    <rect x="0" y="0" width="64" height="64" fill="#1dc6ee"/>
+    <!-- orange throat and belly -->
+    <path d="M6 38 Q26 30 48 36 L48 64 L0 64 Z" fill="#f79d65"/>
+    <!-- darker crown / back -->
+    <path d="M2 12 Q22 6 40 16 Q24 18 10 30 Z" fill="#3c6b74"/>
+  </g>
+  <!-- eye -->
+  <circle cx="32" cy="28" r="4" fill="#fdfdfe"/>
+  <circle cx="33" cy="28" r="2" fill="#15110e"/>
+</svg>

@@ -1,0 +1,58 @@
+// Mirrors the serde types of halcyon-core and the Tauri commands.
+
+export interface MessageHeader {
+  uid: number
+  message_id: string | null
+  in_reply_to: string | null
+  references: string[]
+  subject: string | null
+  from_name: string | null
+  from_addr: string | null
+  reply_to: string | null
+  to: string[]
+  cc: string[]
+  /** Unix timestamp in seconds. */
+  date: number | null
+  size: number | null
+  flags: string[]
+  list_id: string | null
+  list_unsubscribe: string[]
+  list_unsubscribe_post: boolean
+}
+
+export interface MessageSummary {
+  id: number
+  account_id: number
+  account_email: string
+  folder_id: number
+  folder_path: string
+  header: MessageHeader
+}
+
+export interface AccountInfo {
+  id: number
+  email: string
+  display_name: string | null
+  unread_inbox: number
+}
+
+export interface Overview {
+  accounts: AccountInfo[]
+  unread_inbox: number
+}
+
+export type FolderRole = 'inbox' | 'sent' | 'drafts' | 'trash' | 'junk' | 'archive'
+
+/** What the message list shows. */
+export type View =
+  | { kind: 'unified'; role: FolderRole }
+  | { kind: 'account'; accountId: number; role: FolderRole }
+
+export type SyncUpdate =
+  | { kind: 'started' }
+  | { kind: 'account'; email: string }
+  | { kind: 'folder'; email: string; path: string; done: number; total: number }
+  | { kind: 'failed'; email: string; error: string }
+  | { kind: 'finished'; new_messages: number }
+
+export const isSeen = (m: MessageSummary) => m.header.flags.includes('\\Seen')

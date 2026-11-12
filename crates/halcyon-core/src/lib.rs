@@ -1,0 +1,15 @@
+//! Halcyon core: everything that is independent of the user interface.
+//!
+//! The core owns the local mail store (SQLite with full-text search), the
+//! account discovery and the IMAP synchronisation. Front ends (the desktop
+//! app, the development CLI and later mobile builds) only talk to this crate.
+
+pub mod autoconfig;
+pub mod error;
+pub mod imap;
+pub mod model;
+pub mod secrets;
+pub mod store;
+pub mod sync;
+
+pub use error::{Error, Result};

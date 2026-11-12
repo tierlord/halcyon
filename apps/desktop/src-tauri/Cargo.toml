@@ -1,0 +1,26 @@
+[package]
+name = "halcyon-desktop"
+description = "Halcyon desktop app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "halcyon_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "halcyon-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.7.4", features = [] }
+
+[dependencies]
+halcyon-core = { path = "../../../crates/halcyon-core" }
+serde = { version = "1.0", features = ["derive"] }
+tauri = { version = "2.12.5", features = [] }
+tokio = { version = "1", features = ["sync"] }
+directories = "6.0.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
