@@ -81,4 +81,7 @@ stammen.
 
 ## Ergebnis
 
-_(von Gemini auszufüllen)_
+- `regex` per `cargo add regex -p halcyon-core` in `crates/halcyon-core/Cargo.toml` ergänzt und `pub mod extract;` in `crates/halcyon-core/src/lib.rs` eingetragen.
+- `crates/halcyon-core/src/extract/otp.rs`: `find_codes` implementiert (4–8 Ziffern inkl. Leerzeichen/Bindestrich-Gruppierung, 6–8 Zeichen alphanumerisch in Großbuchstaben mit Ziffer, Schlüsselwort-Umfeld deutsch/englisch, Ausschluss von Jahreszahlen, Uhrzeiten, Daten, Preisen, Telefonnummern, PLZ und Bestell-/Rechnungs-/Kundennummern, Betreff-Priorisierung und Deduplizierung). 20 Unit-Tests (11 positiv, 9 negativ).
+- `crates/halcyon-core/src/extract/tracking.rs`: `find_shipments` für alle 9 `Carrier`-Varianten inkl. Tracking-URL-Extraktion und Prüfziffernvalidierung (UPS `1Z` Mod-10, GS1/DHL/USPS Mod-10, DHL Express Mod-7, UPU S10 Mod-11) mit Quellenangaben im Kommentar. 20 Unit-Tests (13 positiv, 7 negativ).
+- Prüfungen: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings` und `cargo test --workspace` (53/53 Tests) grün.
