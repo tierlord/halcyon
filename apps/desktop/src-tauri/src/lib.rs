@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use halcyon_core::autoconfig::{self, Candidate};
+use halcyon_core::content::{self, Attachment, Rendered};
 use halcyon_core::imap::{self, Credentials};
 use halcyon_core::model::{Account, AuthMethod, FolderRole, MessageSummary, ServerConfig};
 use halcyon_core::secrets::{self, SecretKind};
@@ -369,6 +370,12 @@ enum SyncUpdate {
         email: String,
         error: String,
     },
+    Bodies {
+        email: String,
+        path: String,
+        done: usize,
+        total: usize,
+    },
     Finished {
         new_messages: usize,
     },
@@ -463,6 +470,12 @@ async fn run_sync(app: &AppHandle, db_path: &std::path::Path) -> usize {
                     done,
                     total,
                 }),
+                SyncEvent::Bodies { path, done, total } => emit(SyncUpdate::Bodies {
+                    email: email.clone(),
+                    path: path.to_string(),
+                    done,
+                    total,
+                }),
                 SyncEvent::FolderFailed { path, error } => emit(SyncUpdate::Failed {
                     email: email.clone(),
                     error: format!("{path}: {error}"),
@@ -480,6 +493,127 @@ async fn run_sync(app: &AppHandle, db_path: &std::path::Path) -> usize {
         }
     }
     total_new
+}
+
+#[derive(Serialize)]
+struct MessageView {
+    rendered: Rendered,
+    attachments: Vec<Attachment>,
+}
+
+/// The raw message from the store, or downloaded now if it is not there yet.
+async fn raw_message(state: &State<'_, AppState>, message_id: i64) -> CmdResult<Vec<u8>> {
+    let (stored, message, account) = {
+        let store = state.store.lock().map_err(err)?;
+        let stored = store.body(message_id).map_err(err)?;
+        let message = store.message(message_id).map_err(err)?;
+        let account = match &message {
+            Some(m) => store
+                .accounts()
+                .map_err(err)?
+                .into_iter()
+                .find(|a| a.id == m.account_id),
+            None => None,
+        };
+        (stored, message, account)
+    };
+    if let Some(raw) = stored {
+        return Ok(raw);
+    }
+    let message = message.ok_or("Nachricht nicht gefunden.")?;
+    let account = account.ok_or("Konto nicht gefunden.")?;
+    let email = account.email.clone();
+    let password = tauri::async_runtime::spawn_blocking(move || {
+        secrets::load(&email, SecretKind::ImapPassword)
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?
+    .ok_or("Kein Passwort im Schlüsselbund.")?;
+    let raw = sync::download_message(
+        &account,
+        &Credentials::Password(password),
+        &message.folder_path,
+        message.header.uid,
+    )
+    .await
+    .map_err(err)?;
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .store_body(message_id, &raw)
+        .map_err(err)?;
+    Ok(raw)
+}
+
+/// Content of a message as a sandbox-ready document. Remote images load only
+/// with `allow_remote`, which the user sets per message.
+#[tauri::command]
+async fn message_content(
+    state: State<'_, AppState>,
+    id: i64,
+    allow_remote: bool,
+) -> CmdResult<MessageView> {
+    let raw = raw_message(&state, id).await?;
+    let parsed = content::parse(&raw);
+    Ok(MessageView {
+        rendered: content::render(&parsed, allow_remote),
+        attachments: parsed.attachments.clone(),
+    })
+}
+
+/// Opens a link from a message in the system browser or mail handler.
+/// Only web and mail links: anything else (file:, custom app schemes) could
+/// start programs.
+#[tauri::command]
+fn open_link(url: String) -> CmdResult<()> {
+    let lower = url.trim().to_ascii_lowercase();
+    if !(lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("mailto:"))
+    {
+        return Err("Dieser Link-Typ wird nicht geöffnet.".into());
+    }
+    tauri_plugin_opener::open_url(url.trim(), None::<&str>).map_err(err)
+}
+
+/// Saves an attachment to the downloads folder (never overwriting) and shows
+/// it in the file manager. Attachments are not opened directly, so a
+/// disguised program cannot start with one click.
+#[tauri::command]
+async fn save_attachment(state: State<'_, AppState>, id: i64, part: u32) -> CmdResult<String> {
+    let raw = raw_message(&state, id).await?;
+    let parsed = content::parse(&raw);
+    let info = parsed
+        .attachments
+        .iter()
+        .find(|a| a.part == part)
+        .ok_or("Anhang nicht gefunden.")?;
+    let data = content::attachment_data(&raw, part).ok_or("Anhang nicht lesbar.")?;
+    let dir = directories::UserDirs::new()
+        .and_then(|d| d.download_dir().map(|p| p.to_path_buf()))
+        .ok_or("Kein Download-Ordner gefunden.")?;
+    let path = unique_path(&dir, &content::safe_file_name(&info.name));
+    std::fs::write(&path, data).map_err(err)?;
+    let _ = tauri_plugin_opener::reveal_item_in_dir(&path);
+    Ok(path.display().to_string())
+}
+
+/// `name.pdf`, else `name (2).pdf`, `name (3).pdf`, …
+fn unique_path(dir: &std::path::Path, name: &str) -> PathBuf {
+    let candidate = dir.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (name.to_string(), String::new()),
+    };
+    (2..)
+        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
+        .find(|p| !p.exists())
+        .expect("an unused name exists")
 }
 
 fn default_db_path() -> PathBuf {
@@ -519,7 +653,10 @@ pub fn run() {
             discover_account,
             check_server,
             save_account,
-            delete_account
+            delete_account,
+            message_content,
+            open_link,
+            save_attachment
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Halcyon app");

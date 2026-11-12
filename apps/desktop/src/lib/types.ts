@@ -26,6 +26,10 @@ export interface MessageSummary {
   account_email: string
   folder_id: number
   folder_path: string
+  folder_name: string
+  preview: string | null
+  has_attachments: boolean
+  has_body: boolean
   header: MessageHeader
 }
 
@@ -86,7 +90,21 @@ export type SyncUpdate =
   | { kind: 'started' }
   | { kind: 'account'; email: string }
   | { kind: 'folder'; email: string; path: string; done: number; total: number }
+  | { kind: 'bodies'; email: string; path: string; done: number; total: number }
   | { kind: 'failed'; email: string; error: string }
   | { kind: 'finished'; new_messages: number }
+
+export interface Attachment {
+  part: number
+  name: string
+  mime_type: string
+  size: number
+  inline: boolean
+}
+
+export interface MessageView {
+  rendered: { document: string; remote_blocked: number; is_html: boolean }
+  attachments: Attachment[]
+}
 
 export const isSeen = (m: MessageSummary) => m.header.flags.includes('\\Seen')

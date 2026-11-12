@@ -1,6 +1,7 @@
 // Made-up sample data for developing the UI in a browser.
 
 import type {
+  MessageView,
   Account,
   AccountInfo,
   DiscoverResult,
@@ -84,6 +85,10 @@ function msg(
     account_email: account.email,
     folder_id: accountId * 10,
     folder_path: 'INBOX',
+    folder_name: 'Posteingang',
+    preview: previewFor(subject),
+    has_attachments: /Rechnung|Vertrag/.test(subject),
+    has_body: true,
     header: {
       uid: id,
       message_id: `${id}@example.invalid`,
@@ -255,4 +260,54 @@ export function deleteAccount(id: number): Promise<void> {
   const infoIdx = accounts.findIndex((a) => a.id === id)
   if (infoIdx >= 0) accounts.splice(infoIdx, 1)
   return delay(undefined, 150)
+}
+
+function previewFor(subject: string): string {
+  if (/Rechnung/.test(subject)) return 'Guten Tag, anbei erhalten Sie Ihre aktuelle Rechnung als PDF. Der Betrag wird am 15. abgebucht.'
+  if (/Kleinanzeigen|Anzeige/.test(subject)) return 'Hallo, ist das Rennrad noch zu haben? Ich könnte es am Samstag abholen.'
+  if (/Code/.test(subject)) return 'Gib diesen Code ein, um die Anmeldung zu bestätigen. Er ist 10 Minuten gültig.'
+  return 'Hallo Max, kurze Info vorab – Details findest du weiter unten.'
+}
+
+const escapeHtml = (s: string) =>
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+function mockDocument(body: string, allowRemote: boolean): string {
+  const img = allowRemote ? 'data: https:' : 'data:'
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${img}; style-src 'unsafe-inline'; script-src 'none'"><style>body{margin:16px;font:14px/1.5 system-ui,sans-serif;color:#15110e;background:#fdfdfe}a{color:#3c6b74}img{max-width:100%}</style></head><body>${body}</body></html>`
+}
+
+export function messageContent(id: number, allowRemote: boolean): Promise<MessageView> {
+  const m = all.find((x) => x.id === id)
+  const subject = escapeHtml(m?.header.subject ?? '')
+  const isNewsletter = !!m?.header.list_unsubscribe.length
+  let body: string
+  let blocked = 0
+  if (isNewsletter) {
+    blocked = allowRemote ? 0 : 2
+    const banner = allowRemote
+      ? '<img alt="Banner" src="https://picsum.photos/560/120">'
+      : '<div style="height:120px;background:#eee;border-radius:8px"></div>'
+    body = `${banner}<h2 style="color:#c0392b">${subject}</h2><p>Nur diese Woche: Spare auf ausgewählte Artikel.</p><p><a href="https://shop.example/angebote">Zu den Angeboten</a> · <a href="https://tracking.evil.example/r?id=1">https://shop.example/konto</a></p>`
+  } else {
+    body = `<p>Hallo Max,</p><p>${escapeHtml(m?.preview ?? '')}</p><p>Mehr Infos: <a href="https://example.org/info">https://example.org/info</a></p><blockquote style="border-left:3px solid #1dc6ee;margin:0;padding-left:8px;color:#3c6b74">Am Montag schrieb jemand:<br>Wie ist der Stand?</blockquote><p>Viele Grüße</p>`
+  }
+  return delay(
+    {
+      rendered: { document: mockDocument(body, allowRemote), remote_blocked: blocked, is_html: true },
+      attachments: m?.has_attachments
+        ? [{ part: 3, name: 'Rechnung-2026-11.pdf', mime_type: 'application/pdf', size: 48_213, inline: false }]
+        : [],
+    },
+    150,
+  )
+}
+
+export function openLink(url: string): Promise<void> {
+  window.open(url, '_blank', 'noopener,noreferrer')
+  return delay(undefined, 0)
+}
+
+export function saveAttachment(_id: number, _part: number): Promise<string> {
+  return delay('~/Downloads/Rechnung-2026-11.pdf', 200)
 }

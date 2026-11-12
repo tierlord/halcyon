@@ -14,6 +14,15 @@ use crate::store::Store;
 /// Messages fetched per round trip.
 const FETCH_CHUNK: usize = 250;
 
+/// Content of messages from this many days is downloaded during sync;
+/// older messages are fetched when opened.
+const PREFETCH_DAYS: i64 = 90;
+/// Larger messages (usually because of attachments) are fetched on demand.
+const PREFETCH_MAX_SIZE: u32 = 2 * 1024 * 1024;
+/// Upper bounds for one round trip of content downloads.
+const BODY_BATCH_BYTES: u64 = 8 * 1024 * 1024;
+const BODY_BATCH_MESSAGES: usize = 50;
+
 #[derive(Debug)]
 pub enum SyncEvent<'a> {
     FolderStarted {
@@ -33,12 +42,19 @@ pub enum SyncEvent<'a> {
         path: &'a str,
         error: &'a crate::Error,
     },
+    /// Message content downloaded in the background.
+    Bodies {
+        path: &'a str,
+        done: usize,
+        total: usize,
+    },
 }
 
 #[derive(Debug, Default)]
 pub struct SyncReport {
     pub folders: usize,
     pub new_messages: usize,
+    pub bodies: usize,
     pub failed_folders: Vec<(String, String)>,
 }
 
@@ -73,8 +89,21 @@ pub async fn sync_account(
             continue;
         }
         report.folders += 1;
-        match sync_folder(store, &mut session, folder.id, &rf.path, &mut on_event).await {
-            Ok(n) => report.new_messages += n,
+        let skip_bodies = matches!(folder.role, Some(FolderRole::Trash));
+        match sync_folder(
+            store,
+            &mut session,
+            folder.id,
+            &rf.path,
+            skip_bodies,
+            &mut on_event,
+        )
+        .await
+        {
+            Ok((n, b)) => {
+                report.new_messages += n;
+                report.bodies += b;
+            }
             Err(e) => {
                 on_event(SyncEvent::FolderFailed {
                     path: &rf.path,
@@ -100,8 +129,9 @@ async fn sync_folder(
     session: &mut ImapSession,
     folder_id: i64,
     path: &str,
+    skip_bodies: bool,
     on_event: &mut impl FnMut(SyncEvent<'_>),
-) -> Result<usize> {
+) -> Result<(usize, usize)> {
     let mailbox = session.examine(path).await?;
     // Servers without UIDVALIDITY violate RFC 3501; treat them as constant.
     if store.set_uid_validity(folder_id, mailbox.uid_validity.unwrap_or(0))? {
@@ -112,7 +142,7 @@ async fn sync_folder(
             path,
             new_messages: 0,
         });
-        return Ok(0);
+        return Ok((0, 0));
     }
 
     let last_seen = store
@@ -154,7 +184,93 @@ async fn sync_folder(
     if let Some(&max) = uids.first() {
         store.mark_synced_up_to(folder_id, max)?;
     }
-    Ok(uids.len())
+
+    let bodies = if skip_bodies {
+        0
+    } else {
+        prefetch_bodies(store, session, folder_id, path, on_event).await?
+    };
+    Ok((uids.len(), bodies))
+}
+
+/// Downloads the content of recent messages that do not have it yet.
+async fn prefetch_bodies(
+    store: &mut Store,
+    session: &mut ImapSession,
+    folder_id: i64,
+    path: &str,
+    on_event: &mut impl FnMut(SyncEvent<'_>),
+) -> Result<usize> {
+    let since = unix_now() - PREFETCH_DAYS * 24 * 3600;
+    let missing = store.messages_without_body(folder_id, since, PREFETCH_MAX_SIZE, usize::MAX)?;
+    if missing.is_empty() {
+        return Ok(0);
+    }
+    let sizes = store.message_sizes(&missing.iter().map(|(id, _)| *id).collect::<Vec<_>>())?;
+    let total = missing.len();
+    let mut done = 0;
+    for batch in size_batches(&missing, &sizes) {
+        let uids: Vec<u32> = batch.iter().map(|(_, uid)| *uid).collect();
+        let fetched = imap::fetch_raw(session, &uid_set(&uids)).await?;
+        for (uid, raw) in fetched {
+            if let Some((id, _)) = batch.iter().find(|(_, u)| *u == uid) {
+                store.store_body(*id, &raw)?;
+            }
+        }
+        done += batch.len();
+        on_event(SyncEvent::Bodies { path, done, total });
+    }
+    Ok(done)
+}
+
+/// Splits messages into round trips of bounded size and count.
+fn size_batches<'a>(
+    messages: &'a [(i64, u32)],
+    sizes: &std::collections::HashMap<i64, u32>,
+) -> Vec<&'a [(i64, u32)]> {
+    let mut batches = Vec::new();
+    let mut start = 0;
+    let mut bytes = 0u64;
+    for (i, (id, _)) in messages.iter().enumerate() {
+        let size = u64::from(sizes.get(id).copied().unwrap_or(0));
+        if i > start && (bytes + size > BODY_BATCH_BYTES || i - start >= BODY_BATCH_MESSAGES) {
+            batches.push(&messages[start..i]);
+            start = i;
+            bytes = 0;
+        }
+        bytes += size;
+    }
+    if start < messages.len() {
+        batches.push(&messages[start..]);
+    }
+    batches
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Downloads one complete message (e.g. when an old or large message is
+/// opened). Takes no store, so callers can hold their database connection
+/// only briefly around it.
+pub async fn download_message(
+    account: &Account,
+    credentials: &Credentials,
+    folder_path: &str,
+    uid: u32,
+) -> Result<Vec<u8>> {
+    let (mut session, _) = imap::login(&account.imap, credentials).await?;
+    session.examine(folder_path).await?;
+    let fetched = imap::fetch_raw(&mut session, &uid.to_string()).await?;
+    let _ = session.logout().await;
+    fetched
+        .into_iter()
+        .find(|(u, _)| *u == uid)
+        .map(|(_, raw)| raw)
+        .ok_or_else(|| crate::Error::Other("the message no longer exists on the server".into()))
 }
 
 /// Compresses UIDs into an IMAP sequence set: `[9, 3, 4, 5, 1]` → `1,3:5,9`.
@@ -187,5 +303,21 @@ mod tests {
         assert_eq!(uid_set(&[9, 3, 4, 5, 1]), "1,3:5,9");
         assert_eq!(uid_set(&[7]), "7");
         assert_eq!(uid_set(&[2, 2, 1]), "1:2");
+    }
+
+    #[test]
+    fn batches_respect_size_and_count() {
+        let msgs: Vec<(i64, u32)> = (1..=5).map(|i| (i, i as u32)).collect();
+        let mut sizes = std::collections::HashMap::new();
+        sizes.insert(1, 5 * 1024 * 1024);
+        sizes.insert(2, 5 * 1024 * 1024);
+        sizes.insert(3, 100);
+        sizes.insert(4, 100);
+        sizes.insert(5, 100);
+        let b = super::size_batches(&msgs, &sizes);
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[0].len(), 1);
+        assert_eq!(b[1].len(), 4);
+        assert!(super::size_batches(&[], &sizes).is_empty());
     }
 }

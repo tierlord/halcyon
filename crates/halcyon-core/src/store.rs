@@ -15,7 +15,8 @@ use crate::model::{
 
 /// Schema migrations, applied in order. The index + 1 is stored in
 /// `PRAGMA user_version`, so new migrations must only ever be appended.
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE accounts (
     id              INTEGER PRIMARY KEY,
     email           TEXT NOT NULL UNIQUE,
@@ -89,7 +90,55 @@ CREATE TRIGGER messages_au AFTER UPDATE OF subject, from_name, from_addr, to_add
     INSERT INTO messages_fts(rowid, subject, from_name, from_addr, to_addrs)
     VALUES (new.id, new.subject, new.from_name, new.from_addr, new.to_addrs);
 END;
-"#];
+"#,
+    // 2: message content. The raw message is kept (compressed) so features
+    // added later can re-read it without downloading again. The extracted text
+    // joins the full-text index.
+    r#"
+ALTER TABLE messages ADD COLUMN body_text TEXT;
+ALTER TABLE messages ADD COLUMN preview TEXT;
+ALTER TABLE messages ADD COLUMN has_attachments INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE message_bodies (
+    message_id  INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    raw_zstd    BLOB NOT NULL,
+    raw_size    INTEGER NOT NULL,
+    fetched_at  INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+DROP TRIGGER messages_ai;
+DROP TRIGGER messages_ad;
+DROP TRIGGER messages_au;
+DROP TABLE messages_fts;
+CREATE VIRTUAL TABLE messages_fts USING fts5(
+    subject, from_name, from_addr, to_addrs, body_text,
+    content = 'messages', content_rowid = 'id',
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, subject, from_name, from_addr, to_addrs, body_text)
+    VALUES (new.id, new.subject, new.from_name, new.from_addr, new.to_addrs, new.body_text);
+END;
+CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, subject, from_name, from_addr, to_addrs, body_text)
+    VALUES ('delete', old.id, old.subject, old.from_name, old.from_addr, old.to_addrs, old.body_text);
+END;
+CREATE TRIGGER messages_au AFTER UPDATE OF subject, from_name, from_addr, to_addrs, body_text ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, subject, from_name, from_addr, to_addrs, body_text)
+    VALUES ('delete', old.id, old.subject, old.from_name, old.from_addr, old.to_addrs, old.body_text);
+    INSERT INTO messages_fts(rowid, subject, from_name, from_addr, to_addrs, body_text)
+    VALUES (new.id, new.subject, new.from_name, new.from_addr, new.to_addrs, new.body_text);
+END;
+INSERT INTO messages_fts(messages_fts) VALUES ('rebuild');
+"#,
+];
+
+/// Compression level for stored messages: fast, and mail text compresses
+/// well even at low levels.
+const ZSTD_LEVEL: i32 = 3;
+
+/// Characters of text kept as list preview.
+const PREVIEW_CHARS: usize = 180;
 
 pub struct Store {
     conn: Connection,
@@ -409,11 +458,98 @@ impl Store {
             "{SUMMARY_SELECT}
              JOIN messages_fts ON messages_fts.rowid = m.id
              WHERE messages_fts MATCH ?1
-             ORDER BY bm25(messages_fts), m.date DESC LIMIT ?2"
+             ORDER BY bm25(messages_fts, 8.0, 4.0, 4.0, 2.0, 1.0), m.date DESC LIMIT ?2"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![fts_query, limit as i64], summary_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Stores the raw message and the text extracted from it.
+    pub fn store_body(&self, message_id: i64, raw: &[u8]) -> Result<()> {
+        let content = crate::content::parse(raw);
+        let text = content.text.unwrap_or_default();
+        let preview = make_preview(&text);
+        let has_attachments = content.attachments.iter().any(|a| !a.inline);
+        let compressed = zstd::bulk::compress(raw, ZSTD_LEVEL)?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO message_bodies (message_id, raw_zstd, raw_size) VALUES (?1, ?2, ?3)
+             ON CONFLICT (message_id) DO UPDATE SET
+                raw_zstd = excluded.raw_zstd, raw_size = excluded.raw_size,
+                fetched_at = unixepoch()",
+            params![message_id, compressed, raw.len() as i64],
+        )?;
+        tx.execute(
+            "UPDATE messages SET body_text = ?2, preview = ?3, has_attachments = ?4 WHERE id = ?1",
+            params![message_id, text, preview, has_attachments],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The raw message, if its content was downloaded.
+    pub fn body(&self, message_id: i64) -> Result<Option<Vec<u8>>> {
+        let row: Option<(Vec<u8>, i64)> = self
+            .conn
+            .query_row(
+                "SELECT raw_zstd, raw_size FROM message_bodies WHERE message_id = ?1",
+                [message_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        match row {
+            Some((compressed, size)) => Ok(Some(zstd::bulk::decompress(
+                &compressed,
+                size.max(0) as usize,
+            )?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Messages of a folder without downloaded content, newest first: those
+    /// dated after `since` and not larger than `max_size`.
+    pub fn messages_without_body(
+        &self,
+        folder_id: i64,
+        since: i64,
+        max_size: u32,
+        limit: usize,
+    ) -> Result<Vec<(i64, u32)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id, m.uid FROM messages m
+             WHERE m.folder_id = ?1 AND COALESCE(m.date, 0) >= ?2
+               AND COALESCE(m.size, 0) <= ?3
+               AND NOT EXISTS (SELECT 1 FROM message_bodies b WHERE b.message_id = m.id)
+             ORDER BY m.date DESC LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(params![folder_id, since, max_size, limit as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Server-reported sizes of the given messages.
+    pub fn message_sizes(&self, ids: &[i64]) -> Result<std::collections::HashMap<i64, u32>> {
+        let mut out = std::collections::HashMap::new();
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT COALESCE(size, 0) FROM messages WHERE id = ?1")?;
+        for id in ids {
+            if let Some(size) = stmt.query_row([id], |r| r.get::<_, u32>(0)).optional()? {
+                out.insert(*id, size);
+            }
+        }
+        Ok(out)
+    }
+
+    /// One message by id.
+    pub fn message(&self, message_id: i64) -> Result<Option<MessageSummary>> {
+        let sql = format!("{SUMMARY_SELECT} WHERE m.id = ?1");
+        Ok(self
+            .conn
+            .query_row(&sql, [message_id], summary_from_row)
+            .optional()?)
     }
 
     pub fn message_count(&self, folder_id: i64) -> Result<i64> {
@@ -425,8 +561,14 @@ impl Store {
     }
 }
 
+// Lists the columns instead of `m.*` so lists never load the full body text.
 const SUMMARY_SELECT: &str = "
-    SELECT m.*, f.account_id AS account_id, f.path AS folder_path, a.email AS account_email
+    SELECT m.id, m.folder_id, m.uid, m.message_id, m.in_reply_to, m.refs, m.subject,
+           m.from_name, m.from_addr, m.reply_to, m.to_addrs, m.cc_addrs, m.date, m.size,
+           m.flags, m.list_id, m.list_unsubscribe, m.list_unsubscribe_post,
+           m.preview, m.has_attachments,
+           EXISTS (SELECT 1 FROM message_bodies b WHERE b.message_id = m.id) AS has_body,
+           f.account_id AS account_id, f.path AS folder_path, a.email AS account_email
     FROM messages m
     JOIN folders f ON f.id = m.folder_id
     JOIN accounts a ON a.id = f.account_id";
@@ -439,6 +581,30 @@ fn fts_prefix_query(input: &str) -> Option<String> {
         .map(|w| format!("\"{}\"*", w.replace('"', "\"\"")))
         .collect();
     (!terms.is_empty()).then(|| terms.join(" "))
+}
+
+/// First characters of the text with whitespace collapsed and quoted lines
+/// and signatures left out, for the message list.
+fn make_preview(text: &str) -> Option<String> {
+    let mut out = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line == "--" || line == "-- " {
+            break;
+        }
+        if line.is_empty() || line.starts_with('>') {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&line.split_whitespace().collect::<Vec<_>>().join(" "));
+        if out.chars().count() >= PREVIEW_CHARS {
+            break;
+        }
+    }
+    let preview: String = out.chars().take(PREVIEW_CHARS).collect();
+    (!preview.is_empty()).then_some(preview)
 }
 
 fn json(v: &[String]) -> String {
@@ -504,7 +670,11 @@ fn summary_from_row(row: &Row<'_>) -> rusqlite::Result<MessageSummary> {
         account_id: row.get("account_id")?,
         account_email: row.get("account_email")?,
         folder_id: row.get("folder_id")?,
+        folder_name: crate::utf7::decode(&row.get::<_, String>("folder_path")?),
         folder_path: row.get("folder_path")?,
+        preview: row.get("preview")?,
+        has_attachments: row.get("has_attachments")?,
+        has_body: row.get("has_body")?,
         header: MessageHeader {
             uid: row.get("uid")?,
             message_id: row.get("message_id")?,
@@ -676,5 +846,56 @@ mod tests {
         assert_eq!(loaded.display_name.as_deref(), Some("Max Muster"));
         assert_eq!(loaded.imap.host, "mail.example.org");
         assert_eq!(loaded.imap.port, 143);
+    }
+
+    #[test]
+    fn bodies_are_stored_compressed_and_searchable() {
+        let mut store = Store::open_in_memory().unwrap();
+        let a = store.add_account(&account("a@example.org")).unwrap();
+        let f = store
+            .upsert_folder(a.id, "INBOX", None, Some(FolderRole::Inbox), true)
+            .unwrap();
+        store
+            .insert_messages(f.id, &[header(1, "Hallo", "x@example.org", 100)])
+            .unwrap();
+        let id = store.recent_messages(None, 1).unwrap()[0].id;
+        assert!(!store.message(id).unwrap().unwrap().has_body);
+        assert_eq!(
+            store.messages_without_body(f.id, 0, 10_000, 10).unwrap(),
+            vec![(id, 1)]
+        );
+
+        let raw = b"Subject: Hallo\r\nContent-Type: text/plain\r\n\r\nDie Lieferung kommt Donnerstag.\r\n> altes Zitat\r\n-- \r\nSignatur\r\n";
+        store.store_body(id, raw).unwrap();
+        assert_eq!(store.body(id).unwrap().unwrap(), raw.to_vec());
+        let m = store.message(id).unwrap().unwrap();
+        assert!(m.has_body);
+        assert_eq!(
+            m.preview.as_deref(),
+            Some("Die Lieferung kommt Donnerstag.")
+        );
+        assert!(
+            store
+                .messages_without_body(f.id, 0, 10_000, 10)
+                .unwrap()
+                .is_empty()
+        );
+        // Body text is searchable, prefix and diacritics as for headers.
+        assert_eq!(store.search("lieferu donnerst", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn folder_names_are_decoded_for_display() {
+        let mut store = Store::open_in_memory().unwrap();
+        let a = store.add_account(&account("a@example.org")).unwrap();
+        let f = store
+            .upsert_folder(a.id, "Entw&APw-rfe", None, None, true)
+            .unwrap();
+        store
+            .insert_messages(f.id, &[header(1, "x", "y@example.org", 1)])
+            .unwrap();
+        let m = &store.recent_messages(None, 1).unwrap()[0];
+        assert_eq!(m.folder_path, "Entw&APw-rfe");
+        assert_eq!(m.folder_name, "Entwürfe");
     }
 }

@@ -349,9 +349,10 @@ async fn run_sync(store: &mut Store, only: Option<&str>) -> Result<()> {
             .await;
         match report {
             Ok(r) => println!(
-                "   {} folders, {} new messages{}",
+                "   {} folders, {} new messages, {} contents downloaded{}",
                 r.folders,
                 r.new_messages,
+                r.bodies,
                 if r.failed_folders.is_empty() {
                     String::new()
                 } else {

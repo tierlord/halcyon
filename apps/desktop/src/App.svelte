@@ -82,6 +82,9 @@
       case 'folder':
         syncStatus = `${accountLabel(u.email)} · ${u.path} ${u.done}/${u.total}`
         break
+      case 'bodies':
+        syncStatus = `${accountLabel(u.email)} · lade Inhalte ${u.done}/${u.total}`
+        break
       case 'failed':
         errors = [...errors, `${u.email ? accountLabel(u.email) + ': ' : ''}${u.error}`]
         break

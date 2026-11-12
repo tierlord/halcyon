@@ -6,6 +6,7 @@ import { listen } from '@tauri-apps/api/event'
 import type {
   Account,
   DiscoverResult,
+  MessageView,
   MessageSummary,
   Overview,
   ServerConfig,
@@ -62,4 +63,21 @@ export function saveAccount(account: Account, password: string | null): Promise<
 
 export function deleteAccount(id: number): Promise<void> {
   return native ? invoke('delete_account', { id }) : mock.deleteAccount(id)
+}
+
+/** Message content as a sandbox-ready document. */
+export function messageContent(id: number, allowRemote: boolean): Promise<MessageView> {
+  return native
+    ? invoke('message_content', { id, allowRemote })
+    : mock.messageContent(id, allowRemote)
+}
+
+/** Opens a web or mail link outside the app. */
+export function openLink(url: string): Promise<void> {
+  return native ? invoke('open_link', { url }) : mock.openLink(url)
+}
+
+/** Saves an attachment to the downloads folder; resolves with its path. */
+export function saveAttachment(id: number, part: number): Promise<string> {
+  return native ? invoke('save_attachment', { id, part }) : mock.saveAttachment(id, part)
 }

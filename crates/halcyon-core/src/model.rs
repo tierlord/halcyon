@@ -262,8 +262,15 @@ pub struct MessageSummary {
     pub account_id: i64,
     pub account_email: String,
     pub folder_id: i64,
+    /// Mailbox name as the server knows it (modified UTF-7).
     pub folder_path: String,
+    /// Mailbox name for display.
+    pub folder_name: String,
     pub header: MessageHeader,
+    /// Start of the text, once the content is downloaded.
+    pub preview: Option<String>,
+    pub has_attachments: bool,
+    pub has_body: bool,
 }
 
 impl MessageSummary {

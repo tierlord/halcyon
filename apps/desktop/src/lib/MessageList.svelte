@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './Icon.svelte'
   import { accountLabel, listDate } from './format'
   import { isSeen, type MessageSummary } from './types'
 
@@ -51,7 +52,10 @@
           <span class="dot" aria-label={unread ? 'ungelesen' : undefined}></span>
           <span class="from">{m.header.from_name ?? m.header.from_addr ?? 'Unbekannt'}</span>
           <time>{listDate(m.header.date)}</time>
-          <span class="subject">{m.header.subject ?? '(kein Betreff)'}</span>
+          <span class="subject">
+            {#if m.has_attachments}<Icon name="paperclip" size={13} />{/if}
+            {m.header.subject ?? '(kein Betreff)'}{#if m.preview}<span class="preview"> – {m.preview}</span>{/if}
+          </span>
           {#if showAccount}<span class="account">{accountLabel(m.account_email)}</span>{/if}
         </button>
       </li>
@@ -163,6 +167,14 @@
   }
   .unread .subject {
     color: var(--text);
+  }
+  .subject :global(svg) {
+    vertical-align: -2px;
+    color: var(--text-muted);
+  }
+  .preview {
+    font-weight: 400;
+    color: var(--text-muted);
   }
   .account {
     grid-area: account;

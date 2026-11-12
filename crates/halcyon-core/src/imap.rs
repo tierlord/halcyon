@@ -215,6 +215,22 @@ pub async fn probe(server: &ServerConfig, credentials: &Credentials) -> Result<C
     Ok(caps)
 }
 
+/// Downloads complete messages (`BODY.PEEK[]`, which leaves them unread) for
+/// the given UIDs of the currently selected mailbox.
+pub async fn fetch_raw(session: &mut ImapSession, uids: &str) -> Result<Vec<(u32, Vec<u8>)>> {
+    use futures::TryStreamExt;
+
+    let fetches: Vec<_> = session
+        .uid_fetch(uids, "(UID BODY.PEEK[])")
+        .await?
+        .try_collect()
+        .await?;
+    Ok(fetches
+        .iter()
+        .filter_map(|f| Some((f.uid?, f.body()?.to_vec())))
+        .collect())
+}
+
 /// A folder as reported by `LIST`.
 #[derive(Clone, Debug)]
 pub struct RemoteFolder {
