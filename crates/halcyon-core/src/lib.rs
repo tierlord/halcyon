@@ -6,10 +6,12 @@
 
 pub mod autoconfig;
 pub mod error;
+pub mod extract;
 pub mod imap;
 pub mod model;
 pub mod secrets;
 pub mod store;
 pub mod sync;
+pub mod utf7;
 
 pub use error::{Error, Result};

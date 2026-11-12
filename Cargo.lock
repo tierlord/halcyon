@@ -1901,6 +1901,7 @@ dependencies = [
  "hickory-resolver",
  "keyring",
  "mail-parser",
+ "regex",
  "reqwest",
  "roxmltree",
  "rusqlite",
