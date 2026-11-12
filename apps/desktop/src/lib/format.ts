@@ -28,7 +28,7 @@ export function initials(name: string | null, addr: string | null): string {
   return source[0]?.toUpperCase() ?? '?'
 }
 
-/** Short label for an account, e.g. "t-online.de". */
+/** Short label for an account, e.g. "example.org". */
 export function accountLabel(email: string): string {
   return email.split('@')[1] ?? email
 }

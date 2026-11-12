@@ -3,9 +3,9 @@
 import type { AccountInfo, MessageSummary, Overview, SyncUpdate } from './types'
 
 const accounts: AccountInfo[] = [
-  { id: 1, email: 'max.muster@t-online.de', display_name: null, unread_inbox: 0 },
-  { id: 2, email: 'max@muster-werkstatt.de', display_name: null, unread_inbox: 0 },
-  { id: 3, email: 'maxmuster@gmail.com', display_name: null, unread_inbox: 0 },
+  { id: 1, email: 'max@mail.example.org', display_name: null, unread_inbox: 0 },
+  { id: 2, email: 'max@werkstatt.example.com', display_name: null, unread_inbox: 0 },
+  { id: 3, email: 'max.muster@example.net', display_name: null, unread_inbox: 0 },
 ]
 
 const now = Math.floor(Date.now() / 1000)

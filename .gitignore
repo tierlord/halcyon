@@ -1,4 +1,87 @@
-/target
+# ---------------------------------------------------------------------------
+# Halcyon – nothing personal may ever end up in this repository.
+# Mail data, databases, credentials and local tool settings stay local.
+# ---------------------------------------------------------------------------
+
+# --- Mail data and local databases -----------------------------------------
 *.db
-*.db-wal
-*.db-shm
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.mbox
+*.mbx
+*.maildir/
+*.pst
+*.ost
+*.msg
+# Real mails must not be committed; only synthetic test fixtures are allowed.
+*.eml
+!crates/*/tests/fixtures/**/*.eml
+# Exported or downloaded attachments
+/attachments/
+/exports/
+
+# --- Credentials and secrets -----------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.keystore
+*.jks
+*.gpg
+*.asc
+secrets.json
+secrets.toml
+secrets.yaml
+credentials.json
+credentials.toml
+client_secret*.json
+token*.json
+
+# --- Logs, dumps, crash reports --------------------------------------------
+*.log
+logs/
+*.trace
+core
+core.*
+*.dmp
+
+# --- Rust ------------------------------------------------------------------
+/target/
+**/*.rs.bk
+*.profraw
+
+# --- Node / frontend --------------------------------------------------------
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+coverage/
+
+# --- Tauri ------------------------------------------------------------------
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/target/
+
+# --- Local AI agent settings and scratch files ------------------------------
+.claude/settings.local.json
+.claude/*.local.*
+.gemini/
+.aider*
+/scratch/
+/tmp/
+
+# --- Editors and OS ---------------------------------------------------------
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
