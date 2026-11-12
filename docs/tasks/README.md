@@ -28,8 +28,9 @@ parallel dazu laufen können.
 
 | Nr. | Aufgabe | Status |
 |-----|---------|--------|
-| 01 | [Modifiziertes UTF-7 für Ordnernamen](01-utf7-folder-names.md) | offen |
-| 02 | [Testkorpus für Mail-Header](02-header-fixtures.md) | offen |
-| 03 | [Einmalcodes und Sendungsnummern erkennen](03-extractors.md) | offen |
+| 01 | [Modifiziertes UTF-7 für Ordnernamen](01-utf7-folder-names.md) | erledigt |
+| 02 | [Testkorpus für Mail-Header](02-header-fixtures.md) | erledigt |
+| 03 | [Einmalcodes und Sendungsnummern erkennen](03-extractors.md) | erledigt (mit Review-Fixes) |
+| 04 | [Bösartige HTML-Mails als Testkorpus](04-hostile-html.md) | offen |
 
 Reihenfolge ist frei; jede Aufgabe ist für sich abgeschlossen.
