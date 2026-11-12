@@ -82,4 +82,13 @@ Liste gefundener Lücken im Ergebnis steht.
 
 ## Ergebnis
 
-_(von Gemini auszufüllen)_
+- `scraper` (`0.29.0`) als `dev-dependency` zu `crates/halcyon-core/Cargo.toml` hinzugefügt.
+- 48 bösartige HTML-Fixtures unter `crates/halcyon-core/tests/fixtures/html/*.html` angelegt (ausschließlich `*.example`-Domains): `<script>`-Varianten, Event-Handler, gefährliche URLs (`javascript:`, `vbscript:`, `data:text/html`, Entities, Tabs, Leerzeichen), verbotene Tags (`meta`, `base`, `link`, `iframe`, `frame`, `object`, `embed`, `applet`, `form`, `input`, `button formaction`, `a ping`), CSS-Angriffe, Mutations-XSS, Tracking-Pixel und Robustheitsfälle.
+- `crates/halcyon-core/tests/html_safety.rs` prüft per `scraper::Html::parse_fragment` das bereinigte DOM, die CSS-Deobfuskierung sowie die CSP-Direktiven (`script-src 'none'`, `img-src data:;`) in `render(..., false)`. 42 von 48 Tests bestehen direkt.
+- Gefundene Lücken (mit `#[ignore = "Lücke: …"]` markiert):
+  1. `robust_deep_nesting_completes_fast`: 10 000 verschachtelte `<div>`-Tags benötigen ~17,1 s im Debug-Build (> 2 s Zielwert). **CSP hilft nicht**, da der DoS im Sanitizer passiert.
+  2. `track_srcset_blocked`: `ammonia` entfernt `srcset` zuverlässig, aber `remote_blocked` bleibt `0` (die UI erkennt also nicht, dass ein Tracking-`srcset` blockiert wurde). **CSP** blockt ohnehin (`img-src data:;`).
+  3. `css_url_escaped`: CSS-escapetes `\75\72\6c(...)` und `u/**/rl(...)` bleiben im Output und werden auch nicht in `remote_blocked` gezählt. **CSP** (`default-src 'none'; img-src data:;`) stoppt den Abruf bei `allow_remote = false`.
+  4. `track_style_attr_url_blocked` & `track_style_block_url_blocked`: `sanitize_html` belässt `url(https://...)` absichtlich im CSS und zählt es nur (`blocked > 0`); bei `allow_remote = false` **stoppt die CSP** (`img-src data:;`) den Abruf.
+  5. `css_import_variants`: `@import` wird durch `/* import removed */` ersetzt, sodass dahinter stehendes `url("https://...")` als ungültige CSS-Syntax im `<style>`-Block stehen bleibt. **CSP** (`default-src 'none'; style-src 'unsafe-inline'`) verhindert das Nachladen externer Stylesheets.
+- Prüfungen: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings` und `cargo test --workspace` grün (42 passed, 6 ignored in `html_safety`).
