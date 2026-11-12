@@ -1,0 +1,8 @@
+From: erster@mail.example
+From: zweiter@mail.example
+To: max.muster@mail.example
+Subject: Erster Betreff
+Subject: Zweiter Betreff
+Date: Thu, 12 Nov 2026 12:45:00 +0100
+Message-ID: <broken-dup@system.example>
+
