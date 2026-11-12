@@ -1,4 +1,18 @@
 //! Extractor for parcel and letter tracking numbers and public tracking URLs.
+//!
+//! Evidence, strongest first:
+//!
+//! 1. **Carrier link**: the number sits in a link to the carrier's own
+//!    tracking page. Shops and carriers almost always include one, and a
+//!    link is far harder to confuse with an order or invoice number than
+//!    free text.
+//! 2. **Check digit**: formats with a published check digit (UPS 1Z, UPU S10,
+//!    GS1/SSCC, USPS IMPB, DHL Express) are accepted on their own or with
+//!    light context.
+//! 3. **Context**: formats without a check digit (DPD, Hermes, GLS, FedEx)
+//!    need a tracking keyword next to the number, or a link to that carrier
+//!    somewhere in the message, and must not be labelled as an order,
+//!    invoice, customer or similar number.
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
@@ -19,6 +33,15 @@ pub enum Carrier {
     DeutschePostBrief,
 }
 
+/// Why a number was accepted; callers may treat [`Evidence::Context`] as
+/// weaker (e.g. show it, but not auto-categorise on it alone).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Evidence {
+    CarrierLink,
+    CheckDigit,
+    Context,
+}
+
 /// A detected shipment tracking number with its carrier and public tracking URL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Shipment {
@@ -26,6 +49,7 @@ pub struct Shipment {
     pub tracking_number: String,
     /// Public tracking page for this number.
     pub url: String,
+    pub evidence: Evidence,
 }
 
 // Unambiguous formats (can match without carrier context):
@@ -53,145 +77,180 @@ static RE_DEUTSCHE_POST_MATRIX: LazyLock<Regex> =
 static RE_URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"https?://[^\s<>"'\)]+"#).unwrap());
 
 static RE_GENERIC_TRACKING_CTX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(sendungsnummer|sendungs-?id|paketnummer|tracking(\s+number|\s*id)?|verfolgung|sendungsverfolgung|waybill|awb)\b").unwrap()
+    Regex::new(r"(?i)\b(sendungsnummer|sendungs-?id|paketnummer|paket-?nr\.?|tracking(\s+number|\s*id|\s*nr\.?)?|track(ing)?-?code|sendungsverfolgung|verfolgen|verfolgung|waybill|awb)\b").unwrap()
 });
 
+// Labels that mark a number as something other than a tracking number.
+static RE_NOT_TRACKING_LABEL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"(?i)\b(",
+        r"bestellnummer|bestell-?nr\.?|bestellung|auftragsnummer|auftrags-?nr\.?|auftrag|",
+        r"rechnungsnummer|rechnungs-?nr\.?|rechnung|belegnummer|beleg-?nr\.?|",
+        r"kundennummer|kunden-?nr\.?|vertragsnummer|vertrags-?nr\.?|artikelnummer|artikel-?nr\.?|",
+        r"vorgangsnummer|aktenzeichen|mandatsreferenz|referenz|",
+        r"order(\s+number|\s+no\.?|\s+id|\s*#)?|invoice(\s+number|\s+no\.?|\s*#)?|",
+        r"customer(\s+number|\s+id)?|account(\s+number)?|",
+        r"konto(nummer)?|iban|bic|telefon|tel\.?|phone|fax|mobil|handy",
+        r")\b",
+    ))
+    .unwrap()
+});
+
+// Carriers mentioned as words (substring matches would hit "Backups", "Gruppe"
+// or "Priorität").
+static RE_CARRIER_WORDS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(dhl|dpd|hermes|gls|fedex|federal express|usps|deutsche post|einschreiben|warenpost)\b").unwrap()
+});
+
+/// Which carriers a message mentions or links to.
+#[derive(Default)]
+struct Mentions {
+    dhl: bool,
+    dhl_express: bool,
+    dpd: bool,
+    hermes: bool,
+    gls: bool,
+    fedex: bool,
+    usps: bool,
+    dp_brief: bool,
+}
+
+impl Mentions {
+    fn from_text(text: &str) -> Self {
+        let mut m = Mentions::default();
+        for cap in RE_CARRIER_WORDS.captures_iter(text) {
+            match cap[1].to_ascii_lowercase().as_str() {
+                "dhl" => m.dhl = true,
+                "dpd" => m.dpd = true,
+                "hermes" => m.hermes = true,
+                "gls" => m.gls = true,
+                "fedex" | "federal express" => m.fedex = true,
+                "usps" => m.usps = true,
+                _ => m.dp_brief = true,
+            }
+        }
+        let lower = text.to_ascii_lowercase();
+        m.dhl_express = lower.contains("dhl express") || (m.dhl && lower.contains("waybill"));
+        m
+    }
+
+    fn add_link(&mut self, carrier: Carrier) {
+        match carrier {
+            Carrier::Dhl => self.dhl = true,
+            Carrier::DhlExpress => self.dhl_express = true,
+            Carrier::Dpd => self.dpd = true,
+            Carrier::Hermes => self.hermes = true,
+            Carrier::Gls => self.gls = true,
+            Carrier::FedEx => self.fedex = true,
+            Carrier::Usps => self.usps = true,
+            Carrier::DeutschePostBrief => self.dp_brief = true,
+            Carrier::Ups => {}
+        }
+    }
+}
+
 /// Finds shipment tracking numbers in a message's subject and plain-text body.
-///
-/// Unambiguous formats (such as UPS `1Z...`, UPU S10 `...DE`, and USPS `9[2-5]...`)
-/// and known carrier tracking URLs are recognized without extra context; all other
-/// numeric formats require a carrier name or tracking keyword nearby.
 pub fn find_shipments(subject: &str, body_text: &str) -> Vec<Shipment> {
+    find_shipments_with_links(subject, body_text, &[])
+}
+
+/// Like [`find_shipments`], with additional link targets (e.g. the `href`s of
+/// an HTML body, which never appear in the plain text).
+pub fn find_shipments_with_links(subject: &str, body_text: &str, links: &[&str]) -> Vec<Shipment> {
     let mut seen: HashSet<(Carrier, String)> = HashSet::new();
     let mut out = Vec::new();
 
     let combined = format!("{subject}\n{body_text}");
 
-    // 1. Extract from explicit tracking URLs first.
-    extract_from_urls(&combined, &mut seen, &mut out);
+    // 1. Links: numbers in carrier links, and which carriers are linked at all.
+    let mut urls: Vec<String> = RE_URL
+        .find_iter(&combined)
+        .map(|m| m.as_str().to_string())
+        .collect();
+    urls.extend(links.iter().map(|l| l.to_string()));
+    let mut mentions = Mentions::from_text(&combined);
+    for url in &urls {
+        for target in unwrap_redirects(url) {
+            if let Some(carrier) = link_carrier(&target) {
+                mentions.add_link(carrier);
+            }
+            extract_from_url(&target, &mut seen, &mut out);
+        }
+    }
 
-    // 2. Scan lines for unambiguous formats and context-backed numbers.
+    // 2. Text: check-digit formats and context-backed numbers.
     let lines: Vec<&str> = combined.lines().collect();
-    let doc_has_dhl = contains_ci(&combined, "dhl");
-    let doc_has_dhl_express =
-        contains_ci(&combined, "dhl express") || (doc_has_dhl && contains_ci(&combined, "waybill"));
-    let doc_has_dpd = contains_ci(&combined, "dpd");
-    let doc_has_hermes = contains_ci(&combined, "hermes");
-    let doc_has_gls = contains_ci(&combined, "gls");
-    let doc_has_ups = contains_ci(&combined, "ups");
-    let doc_has_fedex =
-        contains_ci(&combined, "fedex") || contains_ci(&combined, "federal express");
-    let doc_has_usps = contains_ci(&combined, "usps");
-    let doc_has_dp_brief = contains_ci(&combined, "deutsche post")
-        || contains_ci(&combined, "einschreiben")
-        || contains_ci(&combined, "prio");
-
     for (idx, line) in lines.iter().enumerate() {
         let prev = idx.checked_sub(1).map(|i| lines[i]).unwrap_or("");
         let window = format!("{prev}\n{line}");
         let has_tracking_kw = RE_GENERIC_TRACKING_CTX.is_match(&window);
 
-        // Unambiguous: UPS 1Z
         for cap in RE_UPS_1Z.captures_iter(line) {
             let num = cap[1].to_ascii_uppercase();
             if is_valid_ups_1z(&num) {
-                push_shipment(Carrier::Ups, num, &mut seen, &mut out);
+                push(Carrier::Ups, num, Evidence::CheckDigit, &mut seen, &mut out);
             }
         }
 
-        // Unambiguous: UPU S10 (...DE)
         for cap in RE_UPU_S10_DE.captures_iter(line) {
             let num = cap[1].to_ascii_uppercase();
             if is_valid_upu_s10(&num) {
-                let carrier = if doc_has_dhl && !doc_has_dp_brief {
+                let carrier = if mentions.dhl && !mentions.dp_brief {
                     Carrier::Dhl
                 } else {
                     Carrier::DeutschePostBrief
                 };
-                push_shipment(carrier, num, &mut seen, &mut out);
+                push(carrier, num, Evidence::CheckDigit, &mut seen, &mut out);
             }
         }
 
-        // Unambiguous: USPS 20/22-digit IMPB starting with 92/93/94/95 (with Mod-10 check digit)
         for cap in RE_USPS_IMPB.captures_iter(line) {
-            let num = cap[1].to_string();
-            if is_valid_gs1_mod10(&num) {
-                push_shipment(Carrier::Usps, num, &mut seen, &mut out);
+            let m = cap.get(1).unwrap();
+            if is_valid_gs1_mod10(m.as_str()) && !is_labelled_as_other(line, m.start()) {
+                push(
+                    Carrier::Usps,
+                    m.as_str().to_string(),
+                    Evidence::CheckDigit,
+                    &mut seen,
+                    &mut out,
+                );
             }
         }
 
-        // Context-backed: DHL JJD...
-        if doc_has_dhl || has_tracking_kw {
+        if mentions.dhl || has_tracking_kw {
             for cap in RE_DHL_JJD.captures_iter(line) {
-                push_shipment(
+                push(
                     Carrier::Dhl,
                     cap[1].to_ascii_uppercase(),
+                    Evidence::Context,
                     &mut seen,
                     &mut out,
                 );
             }
         }
 
-        // Context-backed: Deutsche Post Matrixcode (A00... / F00...)
-        if doc_has_dp_brief || has_tracking_kw {
+        if mentions.dp_brief || has_tracking_kw {
             for cap in RE_DEUTSCHE_POST_MATRIX.captures_iter(line) {
-                push_shipment(
+                push(
                     Carrier::DeutschePostBrief,
                     cap[1].to_ascii_uppercase(),
+                    Evidence::Context,
                     &mut seen,
                     &mut out,
                 );
             }
-        }
-
-        // Context-backed numeric formats
-        if !(has_tracking_kw
-            || doc_has_dhl
-            || doc_has_dpd
-            || doc_has_hermes
-            || doc_has_gls
-            || doc_has_ups
-            || doc_has_fedex
-            || doc_has_usps)
-        {
-            continue;
         }
 
         for cap in RE_TOKEN_DIGITS.captures_iter(line) {
-            let num = &cap[1];
-            // Skip numbers inside URLs (already handled above)
-            if is_inside_url(line, cap.get(1).unwrap().start()) {
+            let m = cap.get(1).unwrap();
+            let num = m.as_str();
+            if is_inside_url(line, m.start()) || is_labelled_as_other(line, m.start()) {
                 continue;
             }
-
-            // Determine best matching carrier based on context + format + check digit.
-            if (doc_has_dhl_express || (doc_has_dhl && contains_ci(&window, "express")))
-                && num.len() == 10
-                && is_valid_dhl_express_mod7(num)
+            if let Some((carrier, evidence)) =
+                classify_number(num, &mentions, has_tracking_kw, &window)
             {
-                push_shipment(Carrier::DhlExpress, num.to_string(), &mut seen, &mut out);
-            } else if doc_has_dhl
-                && ((num.len() == 20 && num.starts_with("00")) || num.len() == 12)
-                && is_valid_gs1_mod10(num)
-            {
-                push_shipment(Carrier::Dhl, num.to_string(), &mut seen, &mut out);
-            } else if doc_has_dpd && num.len() == 14 {
-                push_shipment(Carrier::Dpd, num.to_string(), &mut seen, &mut out);
-            } else if doc_has_hermes && matches!(num.len(), 12 | 14 | 16) {
-                push_shipment(Carrier::Hermes, num.to_string(), &mut seen, &mut out);
-            } else if doc_has_gls && matches!(num.len(), 11 | 12) {
-                push_shipment(Carrier::Gls, num.to_string(), &mut seen, &mut out);
-            } else if doc_has_fedex && matches!(num.len(), 12 | 15 | 20) {
-                push_shipment(Carrier::FedEx, num.to_string(), &mut seen, &mut out);
-            } else if doc_has_usps && matches!(num.len(), 20 | 22) && is_valid_gs1_mod10(num) {
-                push_shipment(Carrier::Usps, num.to_string(), &mut seen, &mut out);
-            } else if has_tracking_kw
-                && num.len() == 20
-                && num.starts_with("00")
-                && is_valid_gs1_mod10(num)
-            {
-                // 00 + 18-digit SSCC with valid GS1 check digit is standard DHL Paket in Germany
-                push_shipment(Carrier::Dhl, num.to_string(), &mut seen, &mut out);
+                push(carrier, num.to_string(), evidence, &mut seen, &mut out);
             }
         }
     }
@@ -199,73 +258,223 @@ pub fn find_shipments(subject: &str, body_text: &str) -> Vec<Shipment> {
     out
 }
 
-fn extract_from_urls(text: &str, seen: &mut HashSet<(Carrier, String)>, out: &mut Vec<Shipment>) {
-    for m in RE_URL.find_iter(text) {
-        let url = m.as_str().trim_end_matches(['.', ',', ';']);
+/// Decides which carrier a bare number belongs to, if any.
+fn classify_number(
+    num: &str,
+    m: &Mentions,
+    has_tracking_kw: bool,
+    window: &str,
+) -> Option<(Carrier, Evidence)> {
+    let len = num.len();
+    let sscc = len == 20 && num.starts_with("00") && is_valid_gs1_mod10(num);
+
+    if (m.dhl_express || (m.dhl && contains_ci(window, "express")))
+        && len == 10
+        && is_valid_dhl_express_mod7(num)
+    {
+        return Some((Carrier::DhlExpress, Evidence::CheckDigit));
+    }
+    if m.dhl && (sscc || (len == 12 && is_valid_gs1_mod10(num))) {
+        return Some((Carrier::Dhl, Evidence::CheckDigit));
+    }
+    if m.usps && matches!(len, 20 | 22) && is_valid_gs1_mod10(num) {
+        return Some((Carrier::Usps, Evidence::CheckDigit));
+    }
+    if has_tracking_kw && sscc {
+        // 00 + 18-digit SSCC with valid GS1 check digit is standard DHL Paket in Germany.
+        return Some((Carrier::Dhl, Evidence::CheckDigit));
+    }
+
+    // No check digit: a carrier mention alone is not enough, since shop mails
+    // name the carrier next to order and invoice numbers. A tracking keyword
+    // next to the number is.
+    if !has_tracking_kw {
+        return None;
+    }
+    if m.dpd && len == 14 {
+        Some((Carrier::Dpd, Evidence::Context))
+    } else if m.hermes && matches!(len, 12 | 14 | 16) {
+        Some((Carrier::Hermes, Evidence::Context))
+    } else if m.gls && matches!(len, 11 | 12) {
+        Some((Carrier::Gls, Evidence::Context))
+    } else if m.fedex && matches!(len, 12 | 15 | 20) {
+        Some((Carrier::FedEx, Evidence::Context))
+    } else {
+        None
+    }
+}
+
+/// True if the nearest label before `pos` on this line marks the number as an
+/// order, invoice, customer, phone or similar number.
+fn is_labelled_as_other(line: &str, pos: usize) -> bool {
+    let prefix = &line[..pos];
+    let Some(other) = RE_NOT_TRACKING_LABEL.find_iter(prefix).last() else {
+        return false;
+    };
+    // A tracking keyword after the other label wins ("Bestellung 123 – Sendungsnummer 456").
+    !RE_GENERIC_TRACKING_CTX.is_match(&prefix[other.end()..])
+}
+
+/// The link itself plus any target URL embedded in redirect parameters
+/// (newsletter click trackers). Redirects are decoded, never followed: opening
+/// them would tell the sender the mail was read.
+fn unwrap_redirects(url: &str) -> Vec<String> {
+    let mut out = vec![url.trim_end_matches(['.', ',', ';']).to_string()];
+    let mut current = out[0].clone();
+    for _ in 0..3 {
+        let Some(inner) = embedded_url(&current) else {
+            break;
+        };
+        out.push(inner.clone());
+        current = inner;
+    }
+    out
+}
+
+fn embedded_url(url: &str) -> Option<String> {
+    let (_, query) = url.split_once('?')?;
+    for pair in query.split('&') {
+        let Some((_, value)) = pair.split_once('=') else {
+            continue;
+        };
+        let decoded = percent_decode(value);
+        if decoded.starts_with("http://") || decoded.starts_with("https://") {
+            return Some(decoded);
+        }
+    }
+    None
+}
+
+fn percent_decode(s: &str) -> String {
+    fn hex(b: u8) -> Option<u8> {
+        (b as char).to_digit(16).map(|d| d as u8)
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
+        {
+            out.push(hi << 4 | lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Host of a URL, lower-cased, without credentials or port.
+fn host(url: &str) -> Option<String> {
+    let rest = url.split_once("://")?.1;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit('@').next()?.split(':').next()?;
+    Some(host.to_ascii_lowercase())
+}
+
+fn host_is(url: &str, domains: &[&str]) -> bool {
+    host(url).is_some_and(|h| {
+        domains
+            .iter()
+            .any(|d| h == *d || h.ends_with(&format!(".{d}")))
+    })
+}
+
+fn link_carrier(url: &str) -> Option<Carrier> {
+    Some(if host_is(url, &["ups.com"]) {
+        Carrier::Ups
+    } else if host_is(url, &["dhl.de", "dhl.com"]) {
+        if url.to_ascii_lowercase().contains("express") {
+            Carrier::DhlExpress
+        } else {
+            Carrier::Dhl
+        }
+    } else if host_is(url, &["dpd.de", "dpd.com"]) {
+        Carrier::Dpd
+    } else if host_is(url, &["myhermes.de", "hermesworld.com", "hermes-europe.de"]) {
+        Carrier::Hermes
+    } else if host_is(url, &["gls-pakete.de", "gls-group.com", "gls-group.eu"]) {
+        Carrier::Gls
+    } else if host_is(url, &["fedex.com"]) {
+        Carrier::FedEx
+    } else if host_is(url, &["usps.com"]) {
+        Carrier::Usps
+    } else if host_is(url, &["deutschepost.de"]) {
+        Carrier::DeutschePostBrief
+    } else {
+        return None;
+    })
+}
+
+fn extract_from_url(url: &str, seen: &mut HashSet<(Carrier, String)>, out: &mut Vec<Shipment>) {
+    {
         let lower = url.to_ascii_lowercase();
 
-        if lower.contains("ups.com") {
+        if host_is(url, &["ups.com"]) {
             if let Some(val) = query_param(url, &["tracknum", "inquirynumber1"]) {
                 let num = val.to_ascii_uppercase();
                 if num.starts_with("1Z") && is_valid_ups_1z(&num) {
-                    push_shipment(Carrier::Ups, num, seen, out);
+                    push_link(Carrier::Ups, num, seen, out);
                 }
             }
-        } else if lower.contains("dhl.de") || lower.contains("dhl.com") {
+        } else if host_is(url, &["dhl.de", "dhl.com"]) {
             if let Some(val) = query_param(url, &["piececode", "tracking-id", "idc"]) {
                 let num = val.to_ascii_uppercase();
                 if lower.contains("tracking-express")
                     && num.len() == 10
                     && is_valid_dhl_express_mod7(&num)
                 {
-                    push_shipment(Carrier::DhlExpress, num, seen, out);
+                    push_link(Carrier::DhlExpress, num, seen, out);
                 } else if is_valid_dhl_url_number(&num) {
-                    push_shipment(Carrier::Dhl, num, seen, out);
+                    push_link(Carrier::Dhl, num, seen, out);
                 }
             }
-        } else if lower.contains("dpd.de") || lower.contains("dpd.com") {
+        } else if host_is(url, &["dpd.de", "dpd.com"]) {
             if let Some(val) = query_param(url, &["parcelno", "query"])
                 .or_else(|| path_segment_after(url, "parcel"))
                 && val.len() == 14
                 && val.chars().all(|c| c.is_ascii_alphanumeric())
             {
-                push_shipment(Carrier::Dpd, val.to_ascii_uppercase(), seen, out);
+                push_link(Carrier::Dpd, val.to_ascii_uppercase(), seen, out);
             }
-        } else if lower.contains("myhermes.de") || lower.contains("hermesworld.com") {
+        } else if host_is(url, &["myhermes.de", "hermesworld.com", "hermes-europe.de"]) {
             if let Some(val) = query_param(url, &["trackingid", "shipmentid"])
                 .or_else(|| url.split('#').nth(1).map(str::to_string))
                 && matches!(val.len(), 11..=16)
                 && val.chars().all(|c| c.is_ascii_digit())
             {
-                push_shipment(Carrier::Hermes, val, seen, out);
+                push_link(Carrier::Hermes, val, seen, out);
             }
-        } else if lower.contains("gls-pakete.de") || lower.contains("gls-group.") {
+        } else if host_is(url, &["gls-pakete.de", "gls-group.com", "gls-group.eu"]) {
             if let Some(val) = query_param(url, &["match", "tracking"])
                 && matches!(val.len(), 8..=12)
                 && val.chars().all(|c| c.is_ascii_alphanumeric())
             {
-                push_shipment(Carrier::Gls, val.to_ascii_uppercase(), seen, out);
+                push_link(Carrier::Gls, val.to_ascii_uppercase(), seen, out);
             }
-        } else if lower.contains("fedex.com") {
+        } else if host_is(url, &["fedex.com"]) {
             if let Some(val) = query_param(url, &["trknbr", "tracknumbers"])
                 && matches!(val.len(), 12 | 15 | 20)
                 && val.chars().all(|c| c.is_ascii_digit())
             {
-                push_shipment(Carrier::FedEx, val, seen, out);
+                push_link(Carrier::FedEx, val, seen, out);
             }
-        } else if lower.contains("usps.com") {
+        } else if host_is(url, &["usps.com"]) {
             if let Some(val) = query_param(url, &["tlabels"])
                 && matches!(val.len(), 20 | 22)
                 && is_valid_gs1_mod10(&val)
             {
-                push_shipment(Carrier::Usps, val, seen, out);
+                push_link(Carrier::Usps, val, seen, out);
             }
-        } else if lower.contains("deutschepost.de")
+        } else if host_is(url, &["deutschepost.de"])
             && let Some(val) = query_param(url, &["piececode"])
         {
             let num = val.to_ascii_uppercase();
             if is_valid_upu_s10(&num) || RE_DEUTSCHE_POST_MATRIX.is_match(&num) {
-                push_shipment(Carrier::DeutschePostBrief, num, seen, out);
+                push_link(Carrier::DeutschePostBrief, num, seen, out);
             }
         }
     }
@@ -318,9 +527,19 @@ fn contains_ci(haystack: &str, needle: &str) -> bool {
     haystack.to_ascii_lowercase().contains(needle)
 }
 
-fn push_shipment(
+fn push_link(
     carrier: Carrier,
     tracking_number: String,
+    seen: &mut HashSet<(Carrier, String)>,
+    out: &mut Vec<Shipment>,
+) {
+    push(carrier, tracking_number, Evidence::CarrierLink, seen, out);
+}
+
+fn push(
+    carrier: Carrier,
+    tracking_number: String,
+    evidence: Evidence,
     seen: &mut HashSet<(Carrier, String)>,
     out: &mut Vec<Shipment>,
 ) {
@@ -330,6 +549,7 @@ fn push_shipment(
             carrier,
             tracking_number,
             url,
+            evidence,
         });
     }
 }
@@ -458,7 +678,7 @@ fn is_valid_upu_s10(num: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Carrier, find_shipments};
+    use super::{Carrier, Evidence, find_shipments, find_shipments_with_links};
 
     /// Helper to append a valid GS1 Mod-10 check digit to a numeric prefix.
     fn with_gs1_check(prefix: &str) -> String {
@@ -677,5 +897,105 @@ mod tests {
     fn rejects_phone_numbers_and_iban_digits() {
         let body = "Telefon: 00493012345678\nKonto: 12345678901234";
         assert!(find_shipments("Kontakt", body).is_empty());
+    }
+
+    // --- Review additions: links as evidence, order/invoice numbers ---
+
+    #[test]
+    fn order_and_invoice_numbers_are_not_shipments() {
+        assert!(
+            find_shipments(
+                "Ihre Bestellung",
+                "Ihre Bestellung 123456789012 wird mit Hermes versendet."
+            )
+            .is_empty()
+        );
+        assert!(
+            find_shipments(
+                "Versand",
+                "Rechnungsnummer 12345678901234, Versand mit DPD."
+            )
+            .is_empty()
+        );
+        assert!(find_shipments("FedEx", "Order number 781234567890 shipped via FedEx.").is_empty());
+    }
+
+    #[test]
+    fn tracking_keyword_after_order_label_wins() {
+        let s = find_shipments(
+            "Versandbestätigung",
+            "Bestellung 4711 – Hermes Sendungsnummer: 72104810293841",
+        );
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].carrier, Carrier::Hermes);
+        assert_eq!(s[0].evidence, Evidence::Context);
+    }
+
+    #[test]
+    fn carrier_name_alone_is_not_enough_without_check_digit() {
+        assert!(
+            find_shipments("Ihr Paket", "Wir versenden mit DPD. Nr. 01501234567890").is_empty()
+        );
+    }
+
+    #[test]
+    fn carrier_words_need_word_boundaries() {
+        // "ups" in "Backups", "gls" in nothing, "prio" in "Priorität".
+        assert!(find_shipments("Backups", "Your backups 1234567890123 are done.").is_empty());
+        let s = find_shipments("Priorität hoch", "Einschreiben RT123456785DE");
+        assert_eq!(s[0].carrier, Carrier::DeutschePostBrief);
+    }
+
+    #[test]
+    fn link_is_strongest_evidence() {
+        let s = find_shipments(
+            "Ihre Bestellung 2026-0417",
+            "Bestellnummer 123456789012\n\
+             Paket verfolgen: https://tracking.dpd.de/status/de_DE/parcel/01501234567890",
+        );
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].carrier, Carrier::Dpd);
+        assert_eq!(s[0].tracking_number, "01501234567890");
+        assert_eq!(s[0].evidence, Evidence::CarrierLink);
+    }
+
+    #[test]
+    fn decodes_click_tracker_redirects_without_following_them() {
+        let target = "https%3A%2F%2Fwww.myhermes.de%2Fempfangen%2Fsendungsverfolgung%3FtrackingId%3D72104810293841";
+        let body = format!(
+            "Sendung verfolgen: https://click.mailer.example/ls/click?upn=abc&url={target}"
+        );
+        let s = find_shipments("Dein Paket kommt", &body);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].carrier, Carrier::Hermes);
+        assert_eq!(s[0].evidence, Evidence::CarrierLink);
+    }
+
+    #[test]
+    fn html_links_count_like_text_links() {
+        let s = find_shipments_with_links(
+            "Versandbestätigung",
+            "Klicken Sie auf „Sendung verfolgen“.",
+            &[
+                "https://www.dhl.de/de/privatkunden/pakete-empfangen/verfolgen.html?piececode=JJD141020304050",
+            ],
+        );
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].carrier, Carrier::Dhl);
+        assert_eq!(s[0].evidence, Evidence::CarrierLink);
+    }
+
+    #[test]
+    fn lookalike_domains_are_not_carrier_links() {
+        let s = find_shipments(
+            "Paket",
+            "https://dhl.de.example/verfolgen?piececode=JJD141020304050",
+        );
+        assert!(s.iter().all(|x| x.evidence != Evidence::CarrierLink));
+    }
+
+    #[test]
+    fn broken_percent_escapes_do_not_panic() {
+        let _ = find_shipments("x", "https://click.example/?url=%E4%%zz%ä");
     }
 }

@@ -26,7 +26,8 @@ static RE_POSITIVE_KEYWORD: LazyLock<Regex> = LazyLock::new(|| {
         r"verifizierungscode|verifizierung|prüfungscode|pruefungscode|zugangscode|",
         r"freischaltcode|anmeldecode|security\s+code|login\s+code|auth\s+code|",
         r"authentication\s+code|verification\s+code|verification|passcode|",
-        r"one[- ]time(\s+password|\s+code)?|otp|tan|pin|2fa|mfa|code|verify",
+        r"one[- ]time(\s+password|\s+code)?|otp|tan|pin|2fa|mfa|code|verify|",
+        r"sign[- ]?in|log[- ]?in|einloggen|anmelden|anmeldung",
         r")\b",
     ))
     .unwrap()
@@ -42,6 +43,20 @@ static RE_NEGATIVE_LABEL: LazyLock<Regex> = LazyLock::new(|| {
         r"customer(\s+number|\s+id)?|reference|ref\.?|iban|bic|ust-?idnr|plz|postleitzahl|",
         r"tel\.?|telefon|phone|fax|mobil|handy",
         r")\b",
+    ))
+    .unwrap()
+});
+
+// Marketing context: voucher and discount codes look exactly like one-time
+// codes ("Mit dem Code HERBST24 sparst du 20 %"). Misreading them is costly,
+// because one-time codes go to a category that deletes itself.
+static RE_PROMO: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"(?i)(%|\b(",
+        r"gutschein\w*|rabatt\w*|angebot\w*|spar(e|en|st|t)|sale|deal|deals|",
+        r"coupon\w*|voucher\w*|promo\w*|discount\w*|bonus\w*|prämie\w*|geschenk\w*|",
+        r"versandkostenfrei|gratis|kostenlos|newsletter|abonnieren",
+        r")\b)",
     ))
     .unwrap()
 });
@@ -80,6 +95,9 @@ static RE_ADDRESS_PLZ: LazyLock<Regex> = LazyLock::new(|| {
 /// Results are deduplicated by normalized code and sorted by confidence.
 pub fn find_codes(subject: &str, body_text: &str) -> Vec<OneTimeCode> {
     let mut best: HashMap<String, f32> = HashMap::new();
+    if RE_PROMO.is_match(subject) {
+        return Vec::new();
+    }
     let subject_has_keyword = RE_POSITIVE_KEYWORD.is_match(subject);
 
     scan_block(subject, true, subject_has_keyword, &mut best);
@@ -110,6 +128,11 @@ fn scan_block(
     for line in lines {
         let trimmed = line.trim();
         if trimmed.is_empty() {
+            continue;
+        }
+
+        if RE_PROMO.is_match(trimmed) || prev_non_empty.is_some_and(|p| RE_PROMO.is_match(p)) {
+            prev_non_empty = Some(trimmed);
             continue;
         }
 
@@ -481,5 +504,34 @@ mod tests {
             "Ihr Code ist nicht diese lange Referenz 123456789.",
         );
         assert!(codes.is_empty());
+    }
+
+    // --- Review additions: marketing codes and sign-in wording ---
+
+    #[test]
+    fn ignores_discount_codes_in_newsletters() {
+        assert!(
+            find_codes(
+                "Dein Herbst-Angebot",
+                "Mit dem Code HERBST24 sparst du 20 % auf alles."
+            )
+            .is_empty()
+        );
+        assert!(find_codes("Nur heute", "Gutschein-Code: SOMMER25").is_empty());
+        assert!(find_codes("News", "Rabatt sichern!\nCode: 482913").is_empty());
+        assert!(find_codes("20 % auf alles", "Dein Code: K7Q2MX").is_empty());
+    }
+
+    #[test]
+    fn real_code_next_to_unrelated_promo_footer_is_kept() {
+        let body = "Dein Bestätigungscode lautet 482913.\n\n\nUnser Newsletter: jetzt abonnieren";
+        let codes = find_codes("Bestätige deine Anmeldung", body);
+        assert_eq!(codes.first().map(|c| c.code.as_str()), Some("482913"));
+    }
+
+    #[test]
+    fn detects_sign_in_wording_without_the_word_code() {
+        let codes = find_codes("Sign-in attempt", "Use 731940 to sign in.");
+        assert_eq!(codes.first().map(|c| c.code.as_str()), Some("731940"));
     }
 }
