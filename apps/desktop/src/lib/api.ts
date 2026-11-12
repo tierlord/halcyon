@@ -52,11 +52,12 @@ export function discoverAccount(email: string): Promise<DiscoverResult> {
 }
 
 export function testImapConnection(
+  email: string,
   server: ServerConfig,
   password: string | null,
 ): Promise<string> {
   return native
-    ? invoke('test_imap_connection', { server, password })
+    ? invoke('test_imap_connection', { email, server, password })
     : mock.testImapConnection(server, password)
 }
 

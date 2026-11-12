@@ -207,8 +207,10 @@ async fn add_account(
         bail!("{email} is already set up");
     }
 
-    let candidates: Vec<(ServerConfig, Option<ServerConfig>)> = match manual {
-        Some(imap) => vec![(imap, None)],
+    // The flag says whether the settings come from the user or the provider;
+    // guessed servers need consent before they get the password.
+    let candidates: Vec<(ServerConfig, Option<ServerConfig>, bool)> = match manual {
+        Some(imap) => vec![(imap, None, true)],
         None => {
             println!("Looking up server settings for {email} …");
             let found = autoconfig::discover(email).await?;
@@ -216,13 +218,14 @@ async fn add_account(
                 .into_iter()
                 .filter(|c| c.imap.auth == AuthMethod::Password)
                 .map(|mut c| {
+                    let trusted = c.source.is_authoritative();
                     if let Some(u) = &username {
                         c.imap.username = u.clone();
                         if let Some(s) = c.smtp.as_mut() {
                             s.username = u.clone();
                         }
                     }
-                    (c.imap, c.smtp)
+                    (c.imap, c.smtp, trusted)
                 })
                 .collect();
             if usable.is_empty() {
@@ -239,7 +242,11 @@ async fn add_account(
     let credentials = Credentials::Password(password.clone());
 
     let mut last_error = None;
-    for (imap_cfg, smtp_cfg) in candidates {
+    for (imap_cfg, smtp_cfg, trusted) in candidates {
+        if !trusted && !confirm_guessed_server(&imap_cfg)? {
+            println!("Skipping {}:{}.", imap_cfg.host, imap_cfg.port);
+            continue;
+        }
         print!(
             "Trying {}:{} ({}) … ",
             imap_cfg.host, imap_cfg.port, imap_cfg.security
@@ -286,6 +293,23 @@ async fn add_account(
     Err(last_error
         .map(anyhow::Error::from)
         .unwrap_or_else(|| anyhow::anyhow!("no server worked")))
+}
+
+/// Asks before sending the password to a server that was guessed rather than
+/// published by the provider.
+fn confirm_guessed_server(server: &ServerConfig) -> Result<bool> {
+    use std::io::Write;
+    print!(
+        "{}:{} ({}) is a guess, not published by your provider. Send your password there? [y/N] ",
+        server.host, server.port, server.security
+    );
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(matches!(
+        answer.trim().to_lowercase().as_str(),
+        "y" | "yes" | "j" | "ja"
+    ))
 }
 
 async fn run_sync(store: &mut Store, only: Option<&str>) -> Result<()> {

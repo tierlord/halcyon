@@ -222,7 +222,7 @@
     statusKind = 'idle'
     statusText = password ? 'Prüfe Verbindung und Anmeldung …' : 'Prüfe Serververbindung …'
     try {
-      const msg = await api.testImapConnection(imap, password || null)
+      const msg = await api.testImapConnection(email.trim(), imap, password || null)
       statusKind = 'ok'
       statusText = msg
     } catch (e) {
