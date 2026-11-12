@@ -51,14 +51,9 @@ export function discoverAccount(email: string): Promise<DiscoverResult> {
   return native ? invoke('discover_account', { email }) : mock.discoverAccount(email)
 }
 
-export function testImapConnection(
-  email: string,
-  server: ServerConfig,
-  password: string | null,
-): Promise<string> {
-  return native
-    ? invoke('test_imap_connection', { email, server, password })
-    : mock.testImapConnection(server, password)
+/** Checks reachability and TLS of a server without sending credentials. */
+export function checkServer(email: string, server: ServerConfig): Promise<string> {
+  return native ? invoke('check_server', { email, server }) : mock.checkServer(server)
 }
 
 export function saveAccount(account: Account, password: string | null): Promise<Account> {

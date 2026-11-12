@@ -11,15 +11,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use halcyon_core::autoconfig::{self, Candidate};
 use halcyon_core::imap::{self, Credentials};
-use halcyon_core::model::{
-    Account, AuthMethod, FolderRole, MessageSummary, Security, ServerConfig, split_address,
-};
+use halcyon_core::model::{Account, AuthMethod, FolderRole, MessageSummary, ServerConfig};
 use halcyon_core::secrets::{self, SecretKind};
 use halcyon_core::store::Store;
 use halcyon_core::sync::{self, SyncEvent};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 const LIST_LIMIT: usize = 500;
 
@@ -27,11 +24,15 @@ struct AppState {
     db_path: PathBuf,
     store: Mutex<Store>,
     syncing: AtomicBool,
-    /// Servers we may send a freshly typed password to without asking, per
-    /// lower-cased address: settings the provider published (autoconfig,
-    /// ISPDB, SRV) and servers the user confirmed in this session. Lives in
-    /// the backend so the web view cannot add entries.
-    trusted_servers: Mutex<HashMap<String, Vec<ServerConfig>>>,
+    /// Servers a freshly typed password may go to, per lower-cased address.
+    ///
+    /// The account dialog asks for the password only after the server check
+    /// passed; this list makes the backend enforce the same order, so no
+    /// front end can send a password to an unchecked host. IMAP entries got
+    /// here by a successful connection (TLS certificate valid for the host);
+    /// SMTP entries only if the provider published them, as there is no
+    /// SMTP check yet.
+    verified_servers: Mutex<HashMap<String, Vec<ServerConfig>>>,
 }
 
 /// Errors cross the IPC boundary as plain strings.
@@ -120,16 +121,17 @@ fn list_accounts(state: State<'_, AppState>) -> CmdResult<Vec<Account>> {
 #[tauri::command]
 async fn discover_account(state: State<'_, AppState>, email: String) -> CmdResult<DiscoverResult> {
     let candidates = autoconfig::discover(&email).await.map_err(err)?;
-    let published: Vec<ServerConfig> = candidates
+    let key = email.trim().to_lowercase();
+    let published_smtp: Vec<ServerConfig> = candidates
         .iter()
         .filter(|c| c.source.is_authoritative())
-        .flat_map(|c| std::iter::once(c.imap.clone()).chain(c.smtp.clone()))
+        .filter_map(|c| c.smtp.clone())
         .collect();
     state
-        .trusted_servers
+        .verified_servers
         .lock()
         .map_err(err)?
-        .insert(email.trim().to_lowercase(), published);
+        .insert(key.clone(), published_smtp);
     let mut reachable_index = None;
     let mut first_error = None;
 
@@ -138,6 +140,7 @@ async fn discover_account(state: State<'_, AppState>, email: String) -> CmdResul
             Ok(mut client) => {
                 let _ = client.run_command_and_check_ok("LOGOUT", None).await;
                 reachable_index = Some(idx);
+                mark_verified(&state, &key, &candidate.imap)?;
                 break;
             }
             Err(e) => {
@@ -159,122 +162,64 @@ async fn discover_account(state: State<'_, AppState>, email: String) -> CmdResul
     })
 }
 
-/// Asks the user in a native dialog – which the web view cannot draw or
-/// answer – before a password goes to a server that neither the provider
-/// published nor the account already uses. This keeps a compromised or
-/// buggy front end from sending passwords to arbitrary hosts.
-async fn confirm_password_target(
-    app: &AppHandle,
-    state: &State<'_, AppState>,
-    email: &str,
-    servers: &[&ServerConfig],
-) -> CmdResult<()> {
-    let key = email.trim().to_lowercase();
-    let unconfirmed: Vec<ServerConfig> = {
-        let trusted = state.trusted_servers.lock().map_err(err)?;
-        let known = trusted.get(&key);
-        let existing = state
-            .store
-            .lock()
-            .map_err(err)?
-            .account_by_email(&key)
-            .map_err(err)?;
-        servers
-            .iter()
-            .filter(|s| {
-                let published = known.is_some_and(|k| k.iter().any(|t| t.same_endpoint(s)));
-                let in_use = existing.as_ref().is_some_and(|a| {
-                    a.imap.same_endpoint(s) || a.smtp.as_ref().is_some_and(|m| m.same_endpoint(s))
-                });
-                !(published || in_use)
-            })
-            .map(|s| (*s).clone())
-            .collect()
-    };
-    if unconfirmed.is_empty() {
-        return Ok(());
+fn mark_verified(state: &State<'_, AppState>, email: &str, server: &ServerConfig) -> CmdResult<()> {
+    let mut verified = state.verified_servers.lock().map_err(err)?;
+    let list = verified.entry(email.trim().to_lowercase()).or_default();
+    if !list.iter().any(|s| s.same_endpoint(server)) {
+        list.push(server.clone());
     }
-
-    let domain = split_address(email)
-        .map(|(_, d)| d.to_string())
-        .unwrap_or_default();
-    let list: Vec<String> = unconfirmed
-        .iter()
-        .map(|s| {
-            let sec = match s.security {
-                Security::Tls => "verschlüsselt (TLS)",
-                Security::StartTls => "verschlüsselt (STARTTLS)",
-                Security::Plain => "UNVERSCHLÜSSELT",
-            };
-            format!("•  {}:{} – {sec}", s.host, s.port)
-        })
-        .collect();
-    let text = format!(
-        "Halcyon soll das Passwort für {email} an diesen Server senden:\n\n{}\n\n\
-         Diese Einstellung stammt nicht vom Anbieter von {domain}, sondern wurde geschätzt \
-         oder von Hand eingegeben. Sende dein Passwort nur, wenn du sicher bist, dass der \
-         Server zu deinem Mailanbieter gehört.",
-        list.join("\n")
-    );
-
-    let handle = app.clone();
-    let accepted = tauri::async_runtime::spawn_blocking(move || {
-        handle
-            .dialog()
-            .message(text)
-            .title("Passwort senden?")
-            .kind(MessageDialogKind::Warning)
-            .buttons(MessageDialogButtons::OkCancelCustom(
-                "Passwort senden".into(),
-                "Abbrechen".into(),
-            ))
-            .blocking_show()
-    })
-    .await
-    .map_err(err)?;
-    if !accepted {
-        return Err("Abgebrochen – das Passwort wurde nicht gesendet.".into());
-    }
-    state
-        .trusted_servers
-        .lock()
-        .map_err(err)?
-        .entry(key)
-        .or_default()
-        .extend(unconfirmed);
     Ok(())
 }
 
+/// Whether a freshly typed password may be sent to (or stored for) `server`:
+/// it passed the check in this session, or the account already uses it.
+fn may_receive_password(
+    state: &State<'_, AppState>,
+    email: &str,
+    server: &ServerConfig,
+) -> CmdResult<bool> {
+    let key = email.trim().to_lowercase();
+    if state
+        .verified_servers
+        .lock()
+        .map_err(err)?
+        .get(&key)
+        .is_some_and(|list| list.iter().any(|s| s.same_endpoint(server)))
+    {
+        return Ok(true);
+    }
+    let existing = state
+        .store
+        .lock()
+        .map_err(err)?
+        .account_by_email(&key)
+        .map_err(err)?;
+    Ok(existing.is_some_and(|a| {
+        a.imap.same_endpoint(server) || a.smtp.as_ref().is_some_and(|m| m.same_endpoint(server))
+    }))
+}
+
+/// Checks that the server is reachable, speaks IMAP and presents a valid TLS
+/// certificate for its name – without sending any credentials. Only servers
+/// that pass may receive the password afterwards.
 #[tauri::command]
-async fn test_imap_connection(
-    app: AppHandle,
+async fn check_server(
     state: State<'_, AppState>,
     email: String,
     server: ServerConfig,
-    password: Option<String>,
 ) -> CmdResult<String> {
     server.validate().map_err(err)?;
-    // Never trim passwords: leading/trailing spaces can be part of them.
-    let pw = password.filter(|s| !s.is_empty());
-    match pw {
-        Some(pw) => {
-            confirm_password_target(&app, &state, &email, &[&server]).await?;
-            imap::probe(&server, &Credentials::Password(pw))
-                .await
-                .map_err(err)?;
-            Ok("Verbindung und Anmeldung erfolgreich.".into())
-        }
-        None => {
-            let mut client = imap::connect(&server).await.map_err(err)?;
-            let _ = client.run_command_and_check_ok("LOGOUT", None).await;
-            Ok("Verbindung zum Server hergestellt.".into())
-        }
-    }
+    let mut client = imap::connect(&server).await.map_err(err)?;
+    let _ = client.run_command_and_check_ok("LOGOUT", None).await;
+    mark_verified(&state, &email, &server)?;
+    Ok(format!(
+        "{} ist erreichbar und sicher verbunden.",
+        server.host
+    ))
 }
 
 #[tauri::command]
 async fn save_account(
-    app: AppHandle,
     state: State<'_, AppState>,
     mut account: Account,
     password: Option<String>,
@@ -320,13 +265,21 @@ async fn save_account(
         }
     }
 
-    if pw.is_some() {
-        // The SMTP password is stored now and sent later, so it needs the
-        // same consent as the IMAP login.
-        let mut targets = vec![&account.imap];
-        targets.extend(account.smtp.as_ref());
-        confirm_password_target(&app, &state, &account.email, &targets).await?;
+    if pw.is_some() && !may_receive_password(&state, &account.email, &account.imap)? {
+        return Err(
+            "Bitte zuerst den Server prüfen – erst danach wird das Passwort gesendet.".into(),
+        );
     }
+    // The SMTP password is only stored now and sent later; keep it only for
+    // a server we have reason to trust: the IMAP host itself, a server the
+    // provider published, or the one the account already uses.
+    let smtp_trusted = match &account.smtp {
+        Some(smtp) => {
+            smtp.host.eq_ignore_ascii_case(&account.imap.host)
+                || may_receive_password(&state, &account.email, smtp)?
+        }
+        None => false,
+    };
 
     if let Some(ref pw) = pw
         && account.imap.auth == AuthMethod::Password
@@ -358,7 +311,7 @@ async fn save_account(
 
     if let Some(pw) = pw {
         let email = saved.email.clone();
-        let has_smtp = saved.smtp.is_some();
+        let has_smtp = smtp_trusted;
         tauri::async_runtime::spawn_blocking(move || -> halcyon_core::Result<()> {
             secrets::store(&email, SecretKind::ImapPassword, &pw)?;
             if has_smtp {
@@ -555,10 +508,8 @@ pub fn run() {
             db_path,
             store: Mutex::new(store),
             syncing: AtomicBool::new(false),
-            trusted_servers: Mutex::new(HashMap::new()),
+            verified_servers: Mutex::new(HashMap::new()),
         })
-        // Only used from Rust; the web view gets no dialog permissions.
-        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             overview,
             messages,
@@ -566,7 +517,7 @@ pub fn run() {
             start_sync,
             list_accounts,
             discover_account,
-            test_imap_connection,
+            check_server,
             save_account,
             delete_account
         ])

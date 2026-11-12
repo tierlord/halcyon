@@ -204,19 +204,23 @@ export function discoverAccount(email: string): Promise<DiscoverResult> {
           },
         },
       ],
-      reachable_index: 0,
-      probe_error: null,
+      // Addresses at "manuell.example" simulate a provider without autoconfig.
+      reachable_index: domain.startsWith('manuell') ? null : 0,
+      probe_error: domain.startsWith('manuell') ? 'Zeitüberschreitung' : null,
     },
     300,
   )
 }
 
-export function testImapConnection(server: ServerConfig, password: string | null): Promise<string> {
-  if (!server.host.trim()) return Promise.reject('Bitte einen IMAP-Server angeben.')
-  return delay(
-    password ? 'Verbindung und Anmeldung erfolgreich.' : 'Verbindung zum Server hergestellt.',
-    250,
-  )
+export function checkServer(server: ServerConfig): Promise<string> {
+  // Lets the "manual settings" path be tried in the browser: hosts containing
+  // "falsch" fail like an unreachable server.
+  if (!server.host.trim() || server.host.includes('falsch')) {
+    return new Promise((_, reject) =>
+      setTimeout(() => reject(`${server.host || 'Server'} ist nicht erreichbar.`), 250),
+    )
+  }
+  return delay(`${server.host} ist erreichbar und sicher verbunden.`, 250)
 }
 
 export function saveAccount(account: Account): Promise<Account> {

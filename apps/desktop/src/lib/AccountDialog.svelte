@@ -40,12 +40,20 @@
   let discoveryResult: DiscoverResult | null = $state(null)
   let selectedCandidate = $state(0)
   let lastDiscoveredEmail = $state('')
-  let testing = $state(false)
+  let checking = $state(false)
+  // Snapshot of the IMAP settings that passed the server check. Any edit to
+  // the settings no longer matches it, which hides the password field again.
+  let checkedServer: ServerConfig | null = $state(null)
   let saving = $state(false)
   let statusKind: 'idle' | 'ok' | 'warn' | 'err' = $state('idle')
   let statusText = $state('')
 
   const isNew = $derived(editingId === 0)
+  const serverOk = $derived(checkedServer !== null && sameServer(checkedServer, effectiveImap()))
+  let originalImap: ServerConfig | null = $state(null)
+  const serverChanged = $derived(
+    !isNew && originalImap !== null && !sameServer(originalImap, effectiveImap()),
+  )
   const emailValid = $derived(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()))
 
   function defaultServer(port: number): ServerConfig {
@@ -56,6 +64,26 @@
       username: '',
       auth: 'password',
     }
+  }
+
+  /// The IMAP settings as they will be saved (empty username means address).
+  function effectiveImap(): ServerConfig {
+    return {
+      ...imap,
+      host: imap.host.trim(),
+      port: Number(imap.port),
+      username: imap.username.trim() || email.trim(),
+    }
+  }
+
+  function sameServer(a: ServerConfig, b: ServerConfig): boolean {
+    return (
+      a.host.trim().toLowerCase() === b.host.trim().toLowerCase() &&
+      Number(a.port) === Number(b.port) &&
+      a.security === b.security &&
+      (a.username.trim() || email.trim()) === (b.username.trim() || email.trim()) &&
+      a.auth === b.auth
+    )
   }
 
   // Mirrors ServerConfig::validate in the core, which enforces it.
@@ -106,6 +134,8 @@
     discoveryResult = null
     selectedCandidate = 0
     lastDiscoveredEmail = ''
+    checkedServer = null
+    originalImap = null
     statusKind = 'idle'
     statusText = ''
   }
@@ -117,9 +147,12 @@
     displayName = acc.display_name ?? ''
     password = ''
     imap = { ...acc.imap }
+    // The account's current server is known to work.
+    checkedServer = { ...acc.imap }
+    originalImap = { ...acc.imap }
     useSmtp = acc.smtp !== null
     smtp = acc.smtp ? { ...acc.smtp } : defaultServer(465)
-    showServerDetails = true
+    showServerDetails = false
     discoveryResult = null
     selectedCandidate = 0
     lastDiscoveredEmail = acc.email
@@ -173,6 +206,7 @@
       if (seq !== discoverSeq) return
       discoveryResult = res
       if (res.candidates.length === 0) {
+        checkedServer = null
         showServerDetails = true
         statusKind = 'warn'
         statusText = 'Keine Einstellungen gefunden. Bitte Serverdaten manuell eingeben.'
@@ -188,12 +222,14 @@
         : sourceLabel(chosen.source)
 
       if (res.reachable_index !== null) {
+        checkedServer = effectiveImap()
         statusKind = 'ok'
-        statusText = `Verbindung zu ${chosen.imap.host}:${chosen.imap.port} (${src}) hergestellt – bitte Passwort eingeben.`
+        statusText = `Server gefunden: ${chosen.imap.host} (${src}).`
       } else {
+        checkedServer = null
         showServerDetails = true
         statusKind = 'warn'
-        statusText = `Einstellungen geladen (${src}), Verbindungstest fehlgeschlagen: ${res.probe_error ?? 'unbekannter Fehler'}`
+        statusText = `Der Server ${chosen.imap.host} antwortet nicht (${res.probe_error ?? 'unbekannter Fehler'}). Bitte die Servereinstellungen prüfen.`
       }
     } catch (e) {
       if (seq !== discoverSeq) return
@@ -217,25 +253,37 @@
     if (sec !== 'tls' && smtp.port === 465) smtp.port = 587
   }
 
-  async function testConnection() {
-    testing = true
+  // A success message must not outlive the settings it was about.
+  $effect(() => {
+    if (!serverOk && statusKind === 'ok') {
+      statusKind = 'idle'
+      statusText = ''
+    }
+  })
+
+  async function checkServer() {
+    checking = true
     statusKind = 'idle'
-    statusText = password ? 'Prüfe Verbindung und Anmeldung …' : 'Prüfe Serververbindung …'
+    statusText = 'Prüfe den Server …'
+    const target = effectiveImap()
     try {
-      const msg = await api.testImapConnection(email.trim(), imap, password || null)
+      const msg = await api.checkServer(email.trim(), target)
+      checkedServer = target
       statusKind = 'ok'
       statusText = msg
     } catch (e) {
+      checkedServer = null
       statusKind = 'err'
       statusText = String(e)
     } finally {
-      testing = false
+      checking = false
     }
   }
 
   async function submit(e: SubmitEvent) {
     e.preventDefault()
-    if (!emailValid || !imap.host.trim()) return
+    if (!emailValid || !serverOk) return
+    if (password === '' && (isNew || serverChanged)) return
     saving = true
     statusKind = 'idle'
     statusText = password ? 'Prüfe Anmeldung und speichere Konto …' : 'Speichere Konto …'
@@ -244,12 +292,7 @@
       id: editingId,
       email: email.trim(),
       display_name: displayName.trim() || null,
-      imap: {
-        ...imap,
-        host: imap.host.trim(),
-        port: Number(imap.port),
-        username: imap.username.trim() || email.trim(),
-      },
+      imap: effectiveImap(),
       smtp:
         useSmtp && smtp.host.trim()
           ? {
@@ -450,18 +493,6 @@
           </div>
         {/if}
 
-        <label class="field">
-          <span>Passwort</span>
-          <input
-            type="password"
-            bind:value={password}
-            placeholder={isNew
-              ? 'Passwort oder App-Passwort'
-              : 'Leer lassen, um es zu behalten (nicht bei geänderten Servern)'}
-            required={isNew && imap.auth === 'password'}
-            autocomplete="current-password"
-          />
-        </label>
 
         <label class="field">
           <span>Anzeigename <small>(optional)</small></span>
@@ -588,32 +619,64 @@
           {/if}
         {/if}
 
+        {#if serverOk}
+          <div class="password-step">
+            <label class="field">
+              <span>
+                Passwort für <strong>{effectiveImap().username}</strong> auf
+                <strong>{effectiveImap().host}</strong>
+              </span>
+              <input
+                type="password"
+                bind:value={password}
+                placeholder={isNew || serverChanged
+                  ? 'Passwort oder App-Passwort'
+                  : 'Leer lassen, um das gespeicherte Passwort zu behalten'}
+                required={isNew || serverChanged}
+                autocomplete="current-password"
+              />
+            </label>
+          </div>
+        {:else if emailValid && imap.host.trim() && !discovering}
+          <p class="muted small step-hint">
+            Das Passwort wird abgefragt, sobald der Server geprüft ist.
+          </p>
+        {/if}
+
         <footer class="form-footer">
           <button type="button" class="btn" onclick={() => (mode = 'list')} disabled={saving}>
             Zurück
           </button>
           <div class="spacer"></div>
-          <button
-            type="button"
-            class="btn"
-            onclick={testConnection}
-            disabled={!imap.host.trim() || testing || saving}
-          >
-            {testing ? 'Prüfe …' : 'Verbindung testen'}
-          </button>
+          {#if !serverOk}
+            <button
+              type="button"
+              class="btn primary"
+              onclick={checkServer}
+              disabled={!emailValid || !imap.host.trim() || checking || discovering}
+            >
+              {checking ? 'Prüfe …' : 'Server prüfen'}
+            </button>
+          {/if}
+{#if serverOk}
           <button
             type="submit"
             class="btn primary"
-            disabled={!emailValid || !imap.host.trim() || saving || discovering}
+            disabled={!emailValid ||
+              !serverOk ||
+              saving ||
+              discovering ||
+              (password === '' && (isNew || serverChanged))}
           >
             {#if saving}
-              Speichere …
+              Melde an …
             {:else if isNew}
               Konto hinzufügen
             {:else}
               Speichern
             {/if}
           </button>
+          {/if}
         </footer>
       </form>
     {/if}
@@ -621,6 +684,18 @@
 </div>
 
 <style>
+  .password-step {
+    padding: 12px;
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--sky-aqua) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--sky-aqua) 40%, transparent);
+  }
+  .password-step strong {
+    font-weight: 650;
+  }
+  .step-hint {
+    margin: 0;
+  }
   .backdrop {
     position: fixed;
     inset: 0;
