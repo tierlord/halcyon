@@ -1,0 +1,6 @@
+From: noreply@system.example
+To: max.muster@mail.example
+Subject: Nachricht mit kaputtem Datum
+Date: not-a-valid-date-at-all
+Message-ID: <broken-baddate@system.example>
+

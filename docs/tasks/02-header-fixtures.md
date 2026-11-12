@@ -53,4 +53,7 @@ Abweichungen im Ergebnis steht.
 
 ## Ergebnis
 
-_(von Gemini auszufüllen)_
+- 31 synthetische `.eml`-Header-Blöcke mit `\r\n`-Zeilenenden und abschließender Leerzeile unter `crates/halcyon-core/tests/fixtures/headers/` angelegt (alle Domains ausschließlich `*.example`).
+- Abgedeckt: Kleinanzeigen-Konversationen (2 getrennte Gespräche über `Reply-To`), Rechnungen & Mahnung, Bestell-/Versand-/Zustellkette, Einmalcodes & Login-Warnung, Newsletter (`One-Click`, nur `mailto:`, ohne `List-Unsubscribe`), Antwortketten (`In-Reply-To`/`References`), RFC-2047-Kodierungen (`UTF-8` B/Q, `ISO-8859-1` Q), gefaltete Header, Gruppenadressen, Mehrfachempfänger/`Cc` sowie fehlerhafte Header (fehlendes/ungültiges Datum, fehlende Adresse in `From`, doppelte Header, sehr langer Betreff).
+- Integrationstests in `crates/halcyon-core/tests/headers.rs` (10 Tests) gegen `parse_header_block`: Alle 10 Tests bestehen ohne `#[ignore]`; der bestehende Parser hat alle 31 Fälle sauber verarbeitet.
+- Prüfungen: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings` und `cargo test --workspace` (13 Unit- + 10 Integrationstests) grün.
