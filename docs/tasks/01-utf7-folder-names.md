@@ -65,4 +65,7 @@ Alle Prüfbefehle aus AGENTS.md grün sind und die Tests oben enthalten sind.
 
 ## Ergebnis
 
-_(von Gemini auszufüllen)_
+- Umgesetzt in `crates/halcyon-core/src/utf7.rs` (`decode`, `encode`, modifiziertes Base64 ohne externe Abhängigkeit, UTF-16BE inkl. Surrogatpaaren, Validierung gemäß RFC 3501 5.1.3) sowie `pub mod utf7;` in `crates/halcyon-core/src/lib.rs`.
+- Alle geforderten Testfälle (Bekannte Namen, Rundreise, ungültige Eingaben) ergänzt.
+- Prüfungen: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings` und `cargo test --workspace` (17/17 Tests) grün.
+- Offen: Einbindung in `imap.rs` / `store.rs` (wie vorgesehen durch Claude).
