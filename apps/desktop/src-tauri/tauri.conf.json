@@ -37,6 +37,8 @@
     ],
     "android": {
       "debugApplicationIdSuffix": ".debug"
-    }
+    },
+    "category": "Productivity",
+    "shortDescription": "E-Mail mit Komfort"
   }
 }
