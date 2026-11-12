@@ -22,7 +22,7 @@ use hickory_resolver::TokioResolver;
 use hickory_resolver::proto::rr::RData;
 use serde::Serialize;
 
-use crate::model::{AuthMethod, Security, ServerConfig, split_address};
+use crate::model::{AuthMethod, Security, ServerConfig, is_local_host, split_address};
 use crate::{Error, Result};
 
 const ISPDB_URL: &str = "https://live.thunderbird.net/autoconfig/v1.1/";
@@ -231,7 +231,7 @@ fn servers_from_node(node: roxmltree::Node<'_, '_>, email: &str) -> Vec<ServerCo
     let security = match child_text(node, "socketType") {
         Some("SSL") => Security::Tls,
         Some("STARTTLS") => Security::StartTls,
-        Some("plain") if is_local(&host) => Security::Plain,
+        Some("plain") if is_local_host(&host) => Security::Plain,
         _ => return Vec::new(),
     };
     let username = substitute(
@@ -285,10 +285,6 @@ fn security_rank(s: Security) -> u8 {
         Security::StartTls => 1,
         Security::Plain => 2,
     }
-}
-
-fn is_local(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 async fn mx_host(resolver: &TokioResolver, domain: &str) -> Option<String> {

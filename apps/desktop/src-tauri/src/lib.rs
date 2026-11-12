@@ -8,8 +8,9 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use halcyon_core::imap::Credentials;
-use halcyon_core::model::{FolderRole, MessageSummary};
+use halcyon_core::autoconfig::{self, Candidate};
+use halcyon_core::imap::{self, Credentials};
+use halcyon_core::model::{Account, AuthMethod, FolderRole, MessageSummary, ServerConfig};
 use halcyon_core::secrets::{self, SecretKind};
 use halcyon_core::store::Store;
 use halcyon_core::sync::{self, SyncEvent};
@@ -93,6 +94,188 @@ fn search(state: State<'_, AppState>, query: String) -> CmdResult<Vec<MessageSum
         .map_err(err)?
         .search(&query, LIST_LIMIT)
         .map_err(err)
+}
+
+#[derive(Serialize)]
+struct DiscoverResult {
+    candidates: Vec<Candidate>,
+    reachable_index: Option<usize>,
+    probe_error: Option<String>,
+}
+
+#[tauri::command]
+fn list_accounts(state: State<'_, AppState>) -> CmdResult<Vec<Account>> {
+    state.store.lock().map_err(err)?.accounts().map_err(err)
+}
+
+#[tauri::command]
+async fn discover_account(email: String) -> CmdResult<DiscoverResult> {
+    let candidates = autoconfig::discover(&email).await.map_err(err)?;
+    let mut reachable_index = None;
+    let mut first_error = None;
+
+    for (idx, candidate) in candidates.iter().take(5).enumerate() {
+        match imap::connect(&candidate.imap).await {
+            Ok(mut client) => {
+                let _ = client.run_command_and_check_ok("LOGOUT", None).await;
+                reachable_index = Some(idx);
+                break;
+            }
+            Err(e) => {
+                if first_error.is_none() {
+                    first_error = Some(e.to_string());
+                }
+            }
+        }
+    }
+
+    Ok(DiscoverResult {
+        candidates,
+        reachable_index,
+        probe_error: if reachable_index.is_some() {
+            None
+        } else {
+            first_error
+        },
+    })
+}
+
+#[tauri::command]
+async fn test_imap_connection(server: ServerConfig, password: Option<String>) -> CmdResult<String> {
+    server.validate().map_err(err)?;
+    // Never trim passwords: leading/trailing spaces can be part of them.
+    let pw = password.filter(|s| !s.is_empty());
+    match pw {
+        Some(pw) => {
+            imap::probe(&server, &Credentials::Password(pw))
+                .await
+                .map_err(err)?;
+            Ok("Verbindung und Anmeldung erfolgreich.".into())
+        }
+        None => {
+            let mut client = imap::connect(&server).await.map_err(err)?;
+            let _ = client.run_command_and_check_ok("LOGOUT", None).await;
+            Ok("Verbindung zum Server hergestellt.".into())
+        }
+    }
+}
+
+#[tauri::command]
+async fn save_account(
+    state: State<'_, AppState>,
+    mut account: Account,
+    password: Option<String>,
+) -> CmdResult<Account> {
+    account.email = account.email.trim().to_string();
+    account.display_name = account
+        .display_name
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let pw = password.filter(|s| !s.is_empty());
+
+    account.imap.validate().map_err(err)?;
+    if let Some(smtp) = &account.smtp {
+        smtp.validate().map_err(err)?;
+    }
+
+    // Editing an account must not silently send the stored password to a
+    // different server: changed connection settings require the password
+    // again. The address is the keychain key and cannot change.
+    if account.id != 0 {
+        let existing = state
+            .store
+            .lock()
+            .map_err(err)?
+            .accounts()
+            .map_err(err)?
+            .into_iter()
+            .find(|a| a.id == account.id)
+            .ok_or_else(|| "Konto nicht gefunden.".to_string())?;
+        account.email = existing.email.clone();
+        let imap_changed = !existing.imap.same_endpoint(&account.imap);
+        let smtp_changed = match (&existing.smtp, &account.smtp) {
+            (Some(a), Some(b)) => !a.same_endpoint(b),
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if (imap_changed || smtp_changed) && pw.is_none() {
+            return Err(
+                "Die Servereinstellungen wurden geändert. Bitte gib das Passwort erneut ein, \
+                 damit es nicht ungeprüft an einen anderen Server geht."
+                    .into(),
+            );
+        }
+    }
+
+    if let Some(ref pw) = pw
+        && account.imap.auth == AuthMethod::Password
+    {
+        imap::probe(&account.imap, &Credentials::Password(pw.clone()))
+            .await
+            .map_err(err)?;
+    } else if account.id == 0 {
+        let mut client = imap::connect(&account.imap).await.map_err(err)?;
+        let _ = client.run_command_and_check_ok("LOGOUT", None).await;
+    }
+
+    let saved = {
+        let store = state.store.lock().map_err(err)?;
+        if account.id == 0 {
+            if store
+                .account_by_email(&account.email)
+                .map_err(err)?
+                .is_some()
+            {
+                return Err(format!("Konto {} ist bereits eingerichtet.", account.email));
+            }
+            store.add_account(&account).map_err(err)?
+        } else {
+            store.update_account(&account).map_err(err)?;
+            account
+        }
+    };
+
+    if let Some(pw) = pw {
+        let email = saved.email.clone();
+        let has_smtp = saved.smtp.is_some();
+        tauri::async_runtime::spawn_blocking(move || -> halcyon_core::Result<()> {
+            secrets::store(&email, SecretKind::ImapPassword, &pw)?;
+            if has_smtp {
+                secrets::store(&email, SecretKind::SmtpPassword, &pw)?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(err)?
+        .map_err(err)?;
+    }
+
+    Ok(saved)
+}
+
+#[tauri::command]
+async fn delete_account(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
+    let email = {
+        let store = state.store.lock().map_err(err)?;
+        let accounts = store.accounts().map_err(err)?;
+        let acc = accounts
+            .into_iter()
+            .find(|a| a.id == id)
+            .ok_or_else(|| "Konto nicht gefunden.".to_string())?;
+        store.remove_account(id).map_err(err)?;
+        acc.email
+    };
+
+    tauri::async_runtime::spawn_blocking(move || -> halcyon_core::Result<()> {
+        secrets::delete(&email, SecretKind::ImapPassword)?;
+        secrets::delete(&email, SecretKind::SmtpPassword)?;
+        Ok(())
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+
+    Ok(())
 }
 
 #[derive(Clone, Serialize)]
@@ -253,7 +436,15 @@ pub fn run() {
             syncing: AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![
-            overview, messages, search, start_sync
+            overview,
+            messages,
+            search,
+            start_sync,
+            list_accounts,
+            discover_account,
+            test_imap_connection,
+            save_account,
+            delete_account
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Halcyon app");

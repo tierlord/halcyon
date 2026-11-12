@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import * as api from './lib/api'
+  import AccountDialog from './lib/AccountDialog.svelte'
   import Icon from './lib/Icon.svelte'
   import MessageList from './lib/MessageList.svelte'
   import ReadingPane from './lib/ReadingPane.svelte'
@@ -18,6 +19,7 @@
   let syncing = $state(false)
   let syncStatus = $state('')
   let errors: string[] = $state([])
+  let accountDialogOpen = $state(false)
 
   const selected = $derived(messages.find((m) => m.id === selectedId) ?? null)
   const searching = $derived(query.trim().length > 0)
@@ -103,6 +105,7 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
+    if (accountDialogOpen) return
     const typing = e.target instanceof HTMLInputElement
     if (e.key === 'Escape' && typing) {
       query = ''
@@ -142,7 +145,12 @@
 <svelte:window onkeydown={onKeydown} />
 
 <div class="app">
-  <Sidebar {overview} {view} onselect={selectView} />
+  <Sidebar
+    {overview}
+    {view}
+    onselect={selectView}
+    onmanageaccounts={() => (accountDialogOpen = true)}
+  />
 
   <main>
     <div class="toolbar">
@@ -201,6 +209,16 @@
     </div>
   </main>
 </div>
+
+{#if accountDialogOpen}
+  <AccountDialog
+    onclose={() => (accountDialogOpen = false)}
+    onchanged={async () => {
+      await refreshOverview()
+      await load()
+    }}
+  />
+{/if}
 
 <style>
   .app {

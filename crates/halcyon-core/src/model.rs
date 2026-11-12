@@ -83,6 +83,52 @@ pub struct ServerConfig {
     pub auth: AuthMethod,
 }
 
+impl ServerConfig {
+    /// Rejects settings that would expose the password: unencrypted
+    /// connections are only allowed to the local machine (e.g. a local
+    /// bridge such as a Proton Mail or Davmail gateway).
+    ///
+    /// Enforced in the core, not just the UI, so no front end – and no
+    /// compromised web view – can send a password in clear text.
+    pub fn validate(&self) -> crate::Result<()> {
+        let host = self.host.trim();
+        if host.is_empty() || host.contains(char::is_whitespace) {
+            return Err(Error::Other(format!("invalid server name {:?}", self.host)));
+        }
+        if self.port == 0 {
+            return Err(Error::Other("invalid port 0".into()));
+        }
+        if self.security == Security::Plain && !is_local_host(host) {
+            return Err(Error::Unsupported(
+                "unencrypted connections to remote servers",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether `other` would talk to the same server as the same user, so a
+    /// stored password may be reused for it.
+    pub fn same_endpoint(&self, other: &ServerConfig) -> bool {
+        self.host.trim().eq_ignore_ascii_case(other.host.trim())
+            && self.port == other.port
+            && self.security == other.security
+            && self.username == other.username
+            && self.auth == other.auth
+    }
+}
+
+/// `localhost`, `127.0.0.0/8` or `::1`.
+pub fn is_local_host(host: &str) -> bool {
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
+    }
+}
+
 /// A configured mail account.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Account {
@@ -264,5 +310,50 @@ mod tests {
         );
         assert!(split_address("max").is_err());
         assert!(split_address("@example.org").is_err());
+    }
+
+    fn server(host: &str, security: Security) -> ServerConfig {
+        ServerConfig {
+            host: host.into(),
+            port: 143,
+            security,
+            username: "max".into(),
+            auth: AuthMethod::Password,
+        }
+    }
+
+    #[test]
+    fn plain_text_only_to_local_machine() {
+        assert!(
+            server("imap.example.org", Security::Plain)
+                .validate()
+                .is_err()
+        );
+        assert!(server("10.0.0.5", Security::Plain).validate().is_err());
+        assert!(server("localhost", Security::Plain).validate().is_ok());
+        assert!(server("127.0.0.1", Security::Plain).validate().is_ok());
+        assert!(server("[::1]", Security::Plain).validate().is_ok());
+        assert!(
+            server("imap.example.org", Security::StartTls)
+                .validate()
+                .is_ok()
+        );
+        assert!(server("", Security::Tls).validate().is_err());
+        assert!(
+            server("imap example.org", Security::Tls)
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn endpoint_comparison_ignores_host_case_only() {
+        let a = server("imap.example.org", Security::Tls);
+        let mut b = server("IMAP.example.org", Security::Tls);
+        assert!(a.same_endpoint(&b));
+        b.port = 993;
+        assert!(!a.same_endpoint(&b));
+        let c = server("evil.example.net", Security::Tls);
+        assert!(!a.same_endpoint(&c));
     }
 }
