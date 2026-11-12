@@ -695,8 +695,8 @@
   .password-step {
     padding: 12px;
     border-radius: var(--radius);
-    background: color-mix(in srgb, var(--sky-aqua) 10%, transparent);
-    border: 1px solid color-mix(in srgb, var(--sky-aqua) 40%, transparent);
+    background: color-mix(in srgb, var(--blue-green) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--blue-green) 40%, transparent);
   }
   .password-step strong {
     font-weight: 650;
@@ -860,8 +860,8 @@
     flex: none;
   }
   .banner.warn {
-    border-color: color-mix(in srgb, var(--tangerine-dream) 65%, transparent);
-    background: color-mix(in srgb, var(--tangerine-dream) 16%, transparent);
+    border-color: color-mix(in srgb, var(--ochre) 65%, transparent);
+    background: color-mix(in srgb, var(--ochre) 16%, transparent);
   }
   .banner.err {
     border-color: color-mix(in srgb, var(--danger) 55%, transparent);
@@ -945,7 +945,7 @@
   .btn.danger {
     border-color: transparent;
     background: var(--danger);
-    color: var(--white);
+    color: var(--snow);
   }
   .icon-btn {
     display: inline-flex;

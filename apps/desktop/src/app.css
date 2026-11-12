@@ -1,25 +1,25 @@
 /* Halcyon design tokens – palette and contrast rules: /design/palette.md */
 :root {
   --pitch-black: #15110e;
-  --sky-aqua: #1dc6ee;
-  --tangerine-dream: #f79d65;
-  --white: #fdfdfe;
-  --stormy-teal: #3c6b74;
+  --blue-green: #1698b5;
+  --ochre: #df7618;
+  --snow: #f7f0f0;
+  --blue-slate: #3b5966;
 
-  --bg: var(--white);
-  --surface: color-mix(in srgb, var(--stormy-teal) 6%, var(--white));
-  --surface-raised: var(--white);
-  --border: color-mix(in srgb, var(--stormy-teal) 16%, var(--white));
+  --bg: var(--snow);
+  --surface: color-mix(in srgb, var(--blue-slate) 6%, var(--snow));
+  --surface-raised: color-mix(in srgb, var(--snow) 45%, #ffffff);
+  --border: color-mix(in srgb, var(--blue-slate) 16%, var(--snow));
   --text: var(--pitch-black);
-  --text-muted: color-mix(in srgb, var(--pitch-black) 62%, var(--white));
-  /* Text accent: Stormy Teal is the only accent with enough contrast on white. */
-  --accent-text: var(--stormy-teal);
-  --accent-fill: var(--stormy-teal);
-  --on-accent-fill: var(--white);
-  --highlight: var(--sky-aqua);
-  --selection: color-mix(in srgb, var(--sky-aqua) 18%, var(--white));
-  --hover: color-mix(in srgb, var(--stormy-teal) 8%, var(--white));
-  --unread: var(--tangerine-dream);
+  --text-muted: color-mix(in srgb, var(--pitch-black) 62%, var(--snow));
+  /* Text accent: Blue Slate is the only accent with enough contrast on Snow. */
+  --accent-text: var(--blue-slate);
+  --accent-fill: var(--blue-slate);
+  --on-accent-fill: var(--snow);
+  --highlight: var(--blue-green);
+  --selection: color-mix(in srgb, var(--blue-green) 18%, var(--snow));
+  --hover: color-mix(in srgb, var(--blue-slate) 8%, var(--snow));
+  --unread: var(--ochre);
   --danger: #b3261e;
 
   --radius: 8px;
@@ -37,32 +37,32 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
     --bg: var(--pitch-black);
-    --surface: color-mix(in srgb, var(--stormy-teal) 14%, var(--pitch-black));
-    --surface-raised: color-mix(in srgb, var(--white) 4%, var(--pitch-black));
-    --border: color-mix(in srgb, var(--stormy-teal) 38%, var(--pitch-black));
-    --text: var(--white);
-    --text-muted: color-mix(in srgb, var(--white) 62%, var(--pitch-black));
-    --accent-text: var(--sky-aqua);
-    --accent-fill: var(--sky-aqua);
+    --surface: color-mix(in srgb, var(--blue-slate) 14%, var(--pitch-black));
+    --surface-raised: color-mix(in srgb, var(--snow) 4%, var(--pitch-black));
+    --border: color-mix(in srgb, var(--blue-slate) 38%, var(--pitch-black));
+    --text: var(--snow);
+    --text-muted: color-mix(in srgb, var(--snow) 62%, var(--pitch-black));
+    --accent-text: var(--blue-green);
+    --accent-fill: var(--blue-green);
     --on-accent-fill: var(--pitch-black);
-    --selection: color-mix(in srgb, var(--stormy-teal) 55%, var(--pitch-black));
-    --hover: color-mix(in srgb, var(--stormy-teal) 26%, var(--pitch-black));
+    --selection: color-mix(in srgb, var(--blue-slate) 55%, var(--pitch-black));
+    --hover: color-mix(in srgb, var(--blue-slate) 26%, var(--pitch-black));
     --danger: #ff8a80;
   }
 }
 
 :root[data-theme='dark'] {
   --bg: var(--pitch-black);
-  --surface: color-mix(in srgb, var(--stormy-teal) 14%, var(--pitch-black));
-  --surface-raised: color-mix(in srgb, var(--white) 4%, var(--pitch-black));
-  --border: color-mix(in srgb, var(--stormy-teal) 38%, var(--pitch-black));
-  --text: var(--white);
-  --text-muted: color-mix(in srgb, var(--white) 62%, var(--pitch-black));
-  --accent-text: var(--sky-aqua);
-  --accent-fill: var(--sky-aqua);
+  --surface: color-mix(in srgb, var(--blue-slate) 14%, var(--pitch-black));
+  --surface-raised: color-mix(in srgb, var(--snow) 4%, var(--pitch-black));
+  --border: color-mix(in srgb, var(--blue-slate) 38%, var(--pitch-black));
+  --text: var(--snow);
+  --text-muted: color-mix(in srgb, var(--snow) 62%, var(--pitch-black));
+  --accent-text: var(--blue-green);
+  --accent-fill: var(--blue-green);
   --on-accent-fill: var(--pitch-black);
-  --selection: color-mix(in srgb, var(--stormy-teal) 55%, var(--pitch-black));
-  --hover: color-mix(in srgb, var(--stormy-teal) 26%, var(--pitch-black));
+  --selection: color-mix(in srgb, var(--blue-slate) 55%, var(--pitch-black));
+  --hover: color-mix(in srgb, var(--blue-slate) 26%, var(--pitch-black));
   --danger: #ff8a80;
 }
 
@@ -97,5 +97,5 @@ button {
 }
 
 ::selection {
-  background: color-mix(in srgb, var(--sky-aqua) 40%, transparent);
+  background: color-mix(in srgb, var(--blue-green) 40%, transparent);
 }

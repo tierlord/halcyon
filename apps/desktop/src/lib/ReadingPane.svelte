@@ -319,8 +319,8 @@
     align-items: center;
     padding: 8px 12px;
     border-radius: var(--radius);
-    background: color-mix(in srgb, var(--tangerine-dream) 22%, transparent);
-    border: 1px solid color-mix(in srgb, var(--tangerine-dream) 55%, transparent);
+    background: color-mix(in srgb, var(--ochre) 22%, transparent);
+    border: 1px solid color-mix(in srgb, var(--ochre) 55%, transparent);
     font-size: 13px;
     margin-bottom: 8px;
   }
@@ -328,8 +328,8 @@
     flex: 1;
   }
   .hint.images {
-    background: color-mix(in srgb, var(--sky-aqua) 12%, transparent);
-    border-color: color-mix(in srgb, var(--sky-aqua) 45%, transparent);
+    background: color-mix(in srgb, var(--blue-green) 12%, transparent);
+    border-color: color-mix(in srgb, var(--blue-green) 45%, transparent);
   }
   .small-btn {
     display: inline-flex;
@@ -415,7 +415,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius);
     /* Mails are designed for a light page, also in dark mode. */
-    background: #fdfdfe;
+    background: #ffffff;
   }
   .state {
     flex: 1;
@@ -454,7 +454,7 @@
     align-items: center;
   }
   .warn-box h2 :global(svg) {
-    color: var(--tangerine-dream);
+    color: var(--ochre);
   }
   .warn-box p {
     margin: 6px 0;

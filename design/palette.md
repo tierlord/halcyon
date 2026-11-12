@@ -1,25 +1,28 @@
 # Halcyon – Farbpalette
 
-Abgeleitet vom Eisvogel (Halcyon): Rücken aqua/petrol, Bauch orange.
+Abgeleitet vom Logo (Eisvogel mit Brief, `images/halcyon-logo.svg`):
+Rücken blaugrün, Kopf und Flügel schieferblau, Bauch ocker.
 
-| Token              | Wert      | Rolle |
-|--------------------|-----------|-------|
-| `--pitch-black`    | `#15110e` | Text (hell), Hintergrund (dunkel) |
-| `--sky-aqua`       | `#1dc6ee` | Primärer Akzent: Auswahl, Fokus, aktive Elemente |
-| `--tangerine-dream`| `#f79d65` | Sekundärer Akzent: Hinweise, ungelesen, Kategorie-Highlights |
-| `--white`          | `#fdfdfe` | Hintergrund (hell), Text (dunkel) |
-| `--stormy-teal`    | `#3c6b74` | Text-Akzent, Links, Buttons im hellen Modus |
+| Token           | Wert      | Rolle |
+|-----------------|-----------|-------|
+| `--pitch-black` | `#15110e` | Text (hell), Hintergrund (dunkel) |
+| `--blue-green`  | `#1698b5` | Primärer Akzent: Auswahl, Fokus, Markierungen; Akzent-Text im dunklen Modus |
+| `--ochre`       | `#df7618` | Sekundärer Akzent: ungelesen, Hinweise, Kategorie-Highlights |
+| `--snow`        | `#f7f0f0` | Hintergrund (hell), Text (dunkel) |
+| `--blue-slate`  | `#3b5966` | Akzent-Text, Links und Primär-Buttons im hellen Modus |
 
 ## Kontrastregeln (WCAG)
 
-| Vordergrund   | Hintergrund | Kontrast | Verwendung |
-|---------------|-------------|----------|------------|
-| pitch-black   | white       | 18.5 | Fließtext |
-| stormy-teal   | white       | 5.8  | Links, Akzent-Text, Button-Fläche mit weißem Text |
-| white         | stormy-teal | 5.8  | Text auf Primär-Buttons |
-| sky-aqua      | pitch-black | 9.3  | Akzent-Text im dunklen Modus |
-| tangerine     | pitch-black | 8.9  | Hinweis-Text im dunklen Modus |
-| sky-aqua      | white       | 2.0  | **nur Flächen/Icons/Rahmen, kein Text** |
-| tangerine     | white       | 2.1  | **nur Flächen/Icons/Rahmen, kein Text** |
+| Vordergrund | Hintergrund | Kontrast | Verwendung |
+|-------------|-------------|----------|------------|
+| pitch-black | snow        | 16.7 | Fließtext |
+| blue-slate  | snow        | 6.7  | Links, Akzent-Text |
+| snow        | blue-slate  | 6.7  | Text auf Primär-Buttons (hell) |
+| blue-green  | pitch-black | 5.5  | Akzent-Text im dunklen Modus |
+| pitch-black | blue-green  | 5.5  | Text auf Primär-Buttons (dunkel) |
+| ochre       | pitch-black | 6.0  | Hinweis-Text im dunklen Modus |
+| pitch-black | ochre       | 6.0  | Text auf Ocker-Flächen |
+| blue-green  | snow        | 3.0  | **nur** Icons, Rahmen, Fokusring (≥ 3:1 für Bedienelemente), kein Fließtext |
+| ochre       | snow        | 2.8  | **nur** Flächen und Punkte, immer mit zweitem Merkmal (z. B. fett) |
 
-Auf Aqua- oder Tangerine-Flächen steht Text immer in `--pitch-black`.
+Mailinhalte werden auf reinem Weiß (`#ffffff`) angezeigt, da sie dafür gestaltet sind.

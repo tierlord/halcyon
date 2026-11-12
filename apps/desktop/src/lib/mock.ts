@@ -274,7 +274,7 @@ const escapeHtml = (s: string) =>
 
 function mockDocument(body: string, allowRemote: boolean): string {
   const img = allowRemote ? 'data: https:' : 'data:'
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${img}; style-src 'unsafe-inline'; script-src 'none'"><style>body{margin:16px;font:14px/1.5 system-ui,sans-serif;color:#15110e;background:#fdfdfe}a{color:#3c6b74}img{max-width:100%}</style></head><body>${body}</body></html>`
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${img}; style-src 'unsafe-inline'; script-src 'none'"><style>body{margin:16px;font:14px/1.5 system-ui,sans-serif;color:#15110e;background:#ffffff}a{color:#3b5966}img{max-width:100%}</style></head><body>${body}</body></html>`
 }
 
 export function messageContent(id: number, allowRemote: boolean): Promise<MessageView> {
@@ -290,7 +290,7 @@ export function messageContent(id: number, allowRemote: boolean): Promise<Messag
       : '<div style="height:120px;background:#eee;border-radius:8px"></div>'
     body = `${banner}<h2 style="color:#c0392b">${subject}</h2><p>Nur diese Woche: Spare auf ausgewählte Artikel.</p><p><a href="https://shop.example/angebote">Zu den Angeboten</a> · <a href="https://tracking.evil.example/r?id=1">https://shop.example/konto</a></p>`
   } else {
-    body = `<p>Hallo Max,</p><p>${escapeHtml(m?.preview ?? '')}</p><p>Mehr Infos: <a href="https://example.org/info">https://example.org/info</a></p><blockquote style="border-left:3px solid #1dc6ee;margin:0;padding-left:8px;color:#3c6b74">Am Montag schrieb jemand:<br>Wie ist der Stand?</blockquote><p>Viele Grüße</p>`
+    body = `<p>Hallo Max,</p><p>${escapeHtml(m?.preview ?? '')}</p><p>Mehr Infos: <a href="https://example.org/info">https://example.org/info</a></p><blockquote style="border-left:3px solid #1698b5;margin:0;padding-left:8px;color:#3b5966">Am Montag schrieb jemand:<br>Wie ist der Stand?</blockquote><p>Viele Grüße</p>`
   }
   return delay(
     {

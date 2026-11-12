@@ -376,12 +376,12 @@ fn wrap_document(body: &str, allow_remote: bool, plain: bool) -> String {
          <meta name=\"referrer\" content=\"no-referrer\">\
          <style>\
          html{{color-scheme:light;}}\
-         body{{margin:16px;{font}color:#15110e;background:#fdfdfe;overflow-wrap:anywhere;}}\
+         body{{margin:16px;{font}color:#15110e;background:#ffffff;overflow-wrap:anywhere;}}\
          img{{max-width:100%;height:auto;}}\
-         a{{color:#3c6b74;}}\
+         a{{color:#3b5966;}}\
          .plain div{{white-space:pre-wrap;}}\
-         .q1{{color:#3c6b74;border-left:3px solid #1dc6ee;padding-left:8px;}}\
-         .q2{{color:#6b6460;border-left:3px solid #f79d65;padding-left:8px;}}\
+         .q1{{color:#3b5966;border-left:3px solid #1698b5;padding-left:8px;}}\
+         .q2{{color:#6b6460;border-left:3px solid #df7618;padding-left:8px;}}\
          </style></head><body>{body}</body></html>"
     )
 }

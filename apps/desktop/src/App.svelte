@@ -255,7 +255,7 @@
   }
   .search:focus-within {
     border-color: var(--highlight);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--sky-aqua) 25%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue-green) 25%, transparent);
   }
   .search input {
     flex: 1;
@@ -288,7 +288,7 @@
   .mock {
     padding: 1px 8px;
     border-radius: 99px;
-    background: color-mix(in srgb, var(--tangerine-dream) 30%, transparent);
+    background: color-mix(in srgb, var(--ochre) 30%, transparent);
     color: var(--text);
     font-weight: 600;
   }

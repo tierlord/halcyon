@@ -157,7 +157,7 @@
     font-size: 10px;
     padding: 1px 6px;
     border-radius: 99px;
-    background: color-mix(in srgb, var(--tangerine-dream) 30%, transparent);
+    background: color-mix(in srgb, var(--ochre) 30%, transparent);
     color: var(--text);
   }
   .section {
