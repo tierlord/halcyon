@@ -3,7 +3,15 @@
 
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import type { MessageSummary, Overview, SyncUpdate, View } from './types'
+import type {
+  Account,
+  DiscoverResult,
+  MessageSummary,
+  Overview,
+  ServerConfig,
+  SyncUpdate,
+  View,
+} from './types'
 import * as mock from './mock'
 
 const native = isTauri()
@@ -33,4 +41,29 @@ export function startSync(): Promise<boolean> {
 export async function onSync(handler: (u: SyncUpdate) => void): Promise<() => void> {
   if (!native) return mock.onSync(handler)
   return listen<SyncUpdate>('sync', (e) => handler(e.payload))
+}
+
+export function listAccounts(): Promise<Account[]> {
+  return native ? invoke('list_accounts') : mock.listAccounts()
+}
+
+export function discoverAccount(email: string): Promise<DiscoverResult> {
+  return native ? invoke('discover_account', { email }) : mock.discoverAccount(email)
+}
+
+export function testImapConnection(
+  server: ServerConfig,
+  password: string | null,
+): Promise<string> {
+  return native
+    ? invoke('test_imap_connection', { server, password })
+    : mock.testImapConnection(server, password)
+}
+
+export function saveAccount(account: Account, password: string | null): Promise<Account> {
+  return native ? invoke('save_account', { account, password }) : mock.saveAccount(account)
+}
+
+export function deleteAccount(id: number): Promise<void> {
+  return native ? invoke('delete_account', { id }) : mock.deleteAccount(id)
 }

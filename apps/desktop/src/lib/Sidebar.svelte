@@ -7,7 +7,13 @@
     overview,
     view,
     onselect,
-  }: { overview: Overview | null; view: View; onselect: (v: View) => void } = $props()
+    onmanageaccounts,
+  }: {
+    overview: Overview | null
+    view: View
+    onselect: (v: View) => void
+    onmanageaccounts: () => void
+  } = $props()
 
   // Planned smart categories (see ROADMAP.md); shown so the direction is visible.
   const upcoming = ['Rechnungen', 'Bestellungen', 'Logindaten', 'Verträge', 'Newsletter']
@@ -35,7 +41,18 @@
     </li>
   </ul>
 
-  <h2>Konten</h2>
+  <div class="section-header">
+    <h2>Konten</h2>
+    <button
+      type="button"
+      class="edit-btn"
+      onclick={onmanageaccounts}
+      title="Konten verwalten"
+      aria-label="Konten verwalten"
+    >
+      <Icon name="pencil" size={14} />
+    </button>
+  </div>
   <ul class="section">
     {#each overview?.accounts ?? [] as account (account.id)}
       <li>
@@ -51,7 +68,10 @@
         </button>
       </li>
     {:else}
-      <li class="empty">Noch keine Konten.<br />Mit <code>halcyon account add</code> anlegen.</li>
+      <li class="empty">
+        Noch keine Konten.
+        <button type="button" class="add-link" onclick={onmanageaccounts}>Konto hinzufügen</button>
+      </li>
     {/each}
   </ul>
 
@@ -79,6 +99,45 @@
     font-weight: 650;
     font-size: 17px;
     letter-spacing: 0.01em;
+  }
+  .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 18px 8px 6px;
+  }
+  .section-header h2 {
+    margin: 0;
+  }
+  .edit-btn {
+    opacity: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 3px;
+    border: 0;
+    border-radius: 5px;
+    background: none;
+    color: var(--text-muted);
+    transition: opacity 0.12s ease;
+  }
+  .section-header:hover .edit-btn,
+  .section-header:focus-within .edit-btn {
+    opacity: 1;
+  }
+  .edit-btn:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
+  .add-link {
+    display: block;
+    margin-top: 4px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent-text);
+    font-weight: 600;
+    font-size: 13px;
   }
   h2 {
     margin: 18px 8px 6px;
@@ -158,8 +217,5 @@
     padding: 6px 8px;
     color: var(--text-muted);
     font-size: 13px;
-  }
-  code {
-    font-size: 12px;
   }
 </style>

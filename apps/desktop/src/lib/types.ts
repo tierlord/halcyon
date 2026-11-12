@@ -36,6 +36,40 @@ export interface AccountInfo {
   unread_inbox: number
 }
 
+export type Security = 'tls' | 'starttls' | 'plain'
+export type AuthMethod = 'password' | 'oauth2'
+
+export interface ServerConfig {
+  host: string
+  port: number
+  security: Security
+  username: string
+  auth: AuthMethod
+}
+
+export interface Account {
+  id: number
+  email: string
+  display_name: string | null
+  imap: ServerConfig
+  smtp: ServerConfig | null
+}
+
+export type DiscoverySource = 'provider' | 'ispdb' | 'mx-provider' | 'mx-ispdb' | 'srv' | 'guess'
+
+export interface DiscoveryCandidate {
+  source: DiscoverySource
+  provider_name: string | null
+  imap: ServerConfig
+  smtp: ServerConfig | null
+}
+
+export interface DiscoverResult {
+  candidates: DiscoveryCandidate[]
+  reachable_index: number | null
+  probe_error: string | null
+}
+
 export interface Overview {
   accounts: AccountInfo[]
   unread_inbox: number

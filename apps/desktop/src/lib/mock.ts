@@ -1,11 +1,67 @@
 // Made-up sample data for developing the UI in a browser.
 
-import type { AccountInfo, MessageSummary, Overview, SyncUpdate } from './types'
+import type {
+  Account,
+  AccountInfo,
+  DiscoverResult,
+  MessageSummary,
+  Overview,
+  ServerConfig,
+  SyncUpdate,
+} from './types'
 
 const accounts: AccountInfo[] = [
   { id: 1, email: 'max@mail.example.org', display_name: null, unread_inbox: 0 },
   { id: 2, email: 'max@werkstatt.example.com', display_name: null, unread_inbox: 0 },
   { id: 3, email: 'max.muster@example.net', display_name: null, unread_inbox: 0 },
+]
+
+const fullAccounts: Account[] = [
+  {
+    id: 1,
+    email: 'max@mail.example.org',
+    display_name: null,
+    imap: {
+      host: 'imap.example.org',
+      port: 993,
+      security: 'tls',
+      username: 'max@mail.example.org',
+      auth: 'password',
+    },
+    smtp: {
+      host: 'smtp.example.org',
+      port: 465,
+      security: 'tls',
+      username: 'max@mail.example.org',
+      auth: 'password',
+    },
+  },
+  {
+    id: 2,
+    email: 'max@werkstatt.example.com',
+    display_name: 'Werkstatt',
+    imap: {
+      host: 'mail.werkstatt.example.com',
+      port: 993,
+      security: 'tls',
+      username: 'max@werkstatt.example.com',
+      auth: 'password',
+    },
+    smtp: null,
+  },
+  {
+    id: 3,
+    email: 'max.muster@example.net',
+    display_name: null,
+    imap: {
+      host: 'imap.example.net',
+      port: 993,
+      security: 'tls',
+      username: 'max.muster@example.net',
+      auth: 'password',
+    },
+    smtp: null,
+  },
 ]
 
 const now = Math.floor(Date.now() / 1000)
@@ -118,4 +174,81 @@ export async function startSync(): Promise<boolean> {
   }
   emit({ kind: 'finished', new_messages: 0 })
   return true
+}
+
+export function listAccounts(): Promise<Account[]> {
+  return delay(fullAccounts.map((a) => ({ ...a, imap: { ...a.imap }, smtp: a.smtp ? { ...a.smtp } : null })))
+}
+
+export function discoverAccount(email: string): Promise<DiscoverResult> {
+  const domain = email.split('@')[1]?.trim().toLowerCase() || 'example.org'
+  return delay(
+    {
+      candidates: [
+        {
+          source: 'ispdb',
+          provider_name: domain,
+          imap: {
+            host: `imap.${domain}`,
+            port: 993,
+            security: 'tls',
+            username: email.trim(),
+            auth: 'password',
+          },
+          smtp: {
+            host: `smtp.${domain}`,
+            port: 465,
+            security: 'tls',
+            username: email.trim(),
+            auth: 'password',
+          },
+        },
+      ],
+      reachable_index: 0,
+      probe_error: null,
+    },
+    300,
+  )
+}
+
+export function testImapConnection(server: ServerConfig, password: string | null): Promise<string> {
+  if (!server.host.trim()) return Promise.reject('Bitte einen IMAP-Server angeben.')
+  return delay(
+    password ? 'Verbindung und Anmeldung erfolgreich.' : 'Verbindung zum Server hergestellt.',
+    250,
+  )
+}
+
+export function saveAccount(account: Account): Promise<Account> {
+  if (account.id === 0) {
+    const id = Math.max(0, ...fullAccounts.map((a) => a.id)) + 1
+    const saved = { ...account, id }
+    fullAccounts.push(saved)
+    accounts.push({
+      id,
+      email: saved.email,
+      display_name: saved.display_name,
+      unread_inbox: 0,
+    })
+    return delay(saved, 200)
+  }
+  const idx = fullAccounts.findIndex((a) => a.id === account.id)
+  if (idx >= 0) fullAccounts[idx] = account
+  const infoIdx = accounts.findIndex((a) => a.id === account.id)
+  if (infoIdx >= 0) {
+    accounts[infoIdx] = {
+      ...accounts[infoIdx],
+      email: account.email,
+      display_name: account.display_name,
+    }
+  }
+  return delay(account, 200)
+}
+
+export function deleteAccount(id: number): Promise<void> {
+  const idx = fullAccounts.findIndex((a) => a.id === id)
+  if (idx >= 0) fullAccounts.splice(idx, 1)
+  const infoIdx = accounts.findIndex((a) => a.id === id)
+  if (infoIdx >= 0) accounts.splice(infoIdx, 1)
+  return delay(undefined, 150)
 }

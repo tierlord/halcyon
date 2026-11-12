@@ -9,6 +9,10 @@
     x: 'M6 6l12 12M18 6L6 18',
     unsubscribe: 'M4 6h16v12H4zM4 7l8 6 8-6M15 19l6-6',
     mail: 'M4 6h16v12H4zM4 7l8 6 8-6',
+    pencil: 'M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z',
+    plus: 'M12 5v14M5 12h14',
+    trash: 'M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3',
+    check: 'M5 12.5l4.5 4.5L19 7.5',
   } as const
 
   let { name, size = 18 }: { name: keyof typeof paths; size?: number } = $props()

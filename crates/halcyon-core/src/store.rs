@@ -184,6 +184,36 @@ impl Store {
         Ok(())
     }
 
+    /// Updates an existing account's display name and server settings.
+    pub fn update_account(&self, account: &Account) -> Result<()> {
+        let smtp = account.smtp.as_ref();
+        self.conn.execute(
+            "UPDATE accounts
+             SET email = ?2, display_name = ?3,
+                 imap_host = ?4, imap_port = ?5, imap_security = ?6,
+                 imap_username = ?7, imap_auth = ?8,
+                 smtp_host = ?9, smtp_port = ?10, smtp_security = ?11,
+                 smtp_username = ?12, smtp_auth = ?13
+             WHERE id = ?1",
+            params![
+                account.id,
+                account.email,
+                account.display_name,
+                account.imap.host,
+                account.imap.port,
+                account.imap.security.to_string(),
+                account.imap.username,
+                account.imap.auth.to_string(),
+                smtp.map(|s| &s.host),
+                smtp.map(|s| s.port),
+                smtp.map(|s| s.security.to_string()),
+                smtp.map(|s| &s.username),
+                smtp.map(|s| s.auth.to_string()),
+            ],
+        )?;
+        Ok(())
+    }
+
     // ----- folders --------------------------------------------------------
 
     /// Creates the folder or updates its server-side attributes. Sync state
@@ -631,5 +661,20 @@ mod tests {
             .unwrap();
         store.remove_account(a.id).unwrap();
         assert!(store.search("hallo", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn update_account_persists_changes() {
+        let store = Store::open_in_memory().unwrap();
+        let mut a = store.add_account(&account("a@example.org")).unwrap();
+        a.display_name = Some("Max Muster".into());
+        a.imap.host = "mail.example.org".into();
+        a.imap.port = 143;
+        store.update_account(&a).unwrap();
+
+        let loaded = store.account_by_email("a@example.org").unwrap().unwrap();
+        assert_eq!(loaded.display_name.as_deref(), Some("Max Muster"));
+        assert_eq!(loaded.imap.host, "mail.example.org");
+        assert_eq!(loaded.imap.port, 143);
     }
 }
