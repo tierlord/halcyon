@@ -130,6 +130,7 @@ async fn read_greeting(client: &mut Client<Box<dyn ImapIo>>) -> Result<()> {
 
 /// Opens an unauthenticated connection with the configured security.
 pub async fn connect(server: &ServerConfig) -> Result<Client<Box<dyn ImapIo>>> {
+    server.validate()?;
     let tcp = tokio::time::timeout(
         CONNECT_TIMEOUT,
         TcpStream::connect((server.host.as_str(), server.port)),

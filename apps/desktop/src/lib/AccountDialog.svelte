@@ -58,6 +58,12 @@
     }
   }
 
+  // Mirrors ServerConfig::validate in the core, which enforces it.
+  function isLocalHost(host: string): boolean {
+    const h = host.trim().replace(/^\[|\]$/g, '').toLowerCase()
+    return h === 'localhost' || h === '::1' || /^127\.\d+\.\d+\.\d+$/.test(h)
+  }
+
   function sourceLabel(source: DiscoverySource): string {
     switch (source) {
       case 'provider':
@@ -451,7 +457,7 @@
             bind:value={password}
             placeholder={isNew
               ? 'Passwort oder App-Passwort'
-              : 'Leer lassen, um aktuelles Passwort zu behalten'}
+              : 'Leer lassen, um es zu behalten (nicht bei geänderten Servern)'}
             required={isNew && imap.auth === 'password'}
             autocomplete="current-password"
           />
@@ -523,7 +529,9 @@
                 >
                   <option value="tls">SSL/TLS</option>
                   <option value="starttls">STARTTLS</option>
-                  <option value="plain">Unverschlüsselt</option>
+                  {#if isLocalHost(imap.host)}
+                    <option value="plain">Unverschlüsselt (nur lokal)</option>
+                  {/if}
                 </select>
               </label>
               <label class="field">
@@ -562,7 +570,9 @@
                   >
                     <option value="tls">SSL/TLS</option>
                     <option value="starttls">STARTTLS</option>
-                    <option value="plain">Unverschlüsselt</option>
+                    {#if isLocalHost(smtp.host)}
+                      <option value="plain">Unverschlüsselt (nur lokal)</option>
+                    {/if}
                   </select>
                 </label>
                 <label class="field">

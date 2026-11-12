@@ -142,9 +142,9 @@ async fn discover_account(email: String) -> CmdResult<DiscoverResult> {
 
 #[tauri::command]
 async fn test_imap_connection(server: ServerConfig, password: Option<String>) -> CmdResult<String> {
-    let pw = password
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    server.validate().map_err(err)?;
+    // Never trim passwords: leading/trailing spaces can be part of them.
+    let pw = password.filter(|s| !s.is_empty());
     match pw {
         Some(pw) => {
             imap::probe(&server, &Credentials::Password(pw))
@@ -172,6 +172,40 @@ async fn save_account(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let pw = password.filter(|s| !s.is_empty());
+
+    account.imap.validate().map_err(err)?;
+    if let Some(smtp) = &account.smtp {
+        smtp.validate().map_err(err)?;
+    }
+
+    // Editing an account must not silently send the stored password to a
+    // different server: changed connection settings require the password
+    // again. The address is the keychain key and cannot change.
+    if account.id != 0 {
+        let existing = state
+            .store
+            .lock()
+            .map_err(err)?
+            .accounts()
+            .map_err(err)?
+            .into_iter()
+            .find(|a| a.id == account.id)
+            .ok_or_else(|| "Konto nicht gefunden.".to_string())?;
+        account.email = existing.email.clone();
+        let imap_changed = !existing.imap.same_endpoint(&account.imap);
+        let smtp_changed = match (&existing.smtp, &account.smtp) {
+            (Some(a), Some(b)) => !a.same_endpoint(b),
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if (imap_changed || smtp_changed) && pw.is_none() {
+            return Err(
+                "Die Servereinstellungen wurden geändert. Bitte gib das Passwort erneut ein, \
+                 damit es nicht ungeprüft an einen anderen Server geht."
+                    .into(),
+            );
+        }
+    }
 
     if let Some(ref pw) = pw
         && account.imap.auth == AuthMethod::Password
