@@ -10,10 +10,10 @@ export type CaseKind =
   | 'support'
   | 'other'
 
-export type CaseStatus = 'needs_you' | 'waiting' | 'aside' | 'done'
+export type CaseStatus = 'needs_you' | 'waiting' | 'aside' | 'done' | 'rejected'
 
 export interface CaseEvent {
-  id: string
+  id: number
   /** ISO date YYYY-MM-DD for timeline alignment. */
   day: string
   label: string
@@ -36,7 +36,7 @@ export interface CaseAttachment {
 }
 
 export interface CaseItem {
-  id: string
+  id: number
   title: string
   counterparty: string
   domain: string | null
@@ -110,7 +110,7 @@ export function createMockCases(messages: MessageSummary[]): {
 
   const cases: CaseItem[] = [
     {
-      id: 'case-kleinanzeigen',
+      id: 1,
       title: 'Rennrad 28 Zoll',
       counterparty: 'Kleinanzeigen · Interessent',
       domain: 'kleinanzeigen.example',
@@ -124,15 +124,15 @@ export function createMockCases(messages: MessageSummary[]): {
         { label: 'Gegenüber', value: 'Kleinanzeigen' },
       ],
       events: [
-        { id: 'e1', day: dayOffset(-2), label: 'Anzeige online', phase: 'start', messageId: kleinanzeigenIds[2], direction: 'in' },
-        { id: 'e2', day: dayOffset(-1), label: 'Erste Anfrage', phase: 'update', messageId: kleinanzeigenIds[1], direction: 'in' },
-        { id: 'e3', day: dayOffset(-1), label: 'Deine Antwort', phase: 'update', messageId: kleinanzeigenIds[3], direction: 'out' },
-        { id: 'e4', day: dayOffset(0), label: 'Neue Rückfrage', phase: 'due', messageId: kleinanzeigenIds[0], direction: 'in' },
+        { id: 1, day: dayOffset(-2), label: 'Anzeige online', phase: 'start', messageId: kleinanzeigenIds[2], direction: 'in' },
+        { id: 2, day: dayOffset(-1), label: 'Erste Anfrage', phase: 'update', messageId: kleinanzeigenIds[1], direction: 'in' },
+        { id: 3, day: dayOffset(-1), label: 'Deine Antwort', phase: 'update', messageId: kleinanzeigenIds[3], direction: 'out' },
+        { id: 4, day: dayOffset(0), label: 'Neue Rückfrage', phase: 'due', messageId: kleinanzeigenIds[0], direction: 'in' },
       ],
       messageIds: kleinanzeigenIds.filter((id): id is number => id != null),
     },
     {
-      id: 'case-stadtwerke-jahr',
+      id: 2,
       title: 'Jahresabrechnung Strom',
       counterparty: 'Stadtwerke',
       domain: 'stadtwerke.example',
@@ -147,8 +147,8 @@ export function createMockCases(messages: MessageSummary[]): {
         { label: 'Betrag', value: '148,50 €' },
       ],
       events: [
-        { id: 'e5', day: dayOffset(-3), label: 'Rechnung gestellt', phase: 'start', messageId: stadtwerkeJahr ?? stadtwerkeStrom, direction: 'in' },
-        { id: 'e6', day: dayOffset(2), label: 'Fällig', phase: 'due' },
+        { id: 5, day: dayOffset(-3), label: 'Rechnung gestellt', phase: 'start', messageId: stadtwerkeJahr ?? stadtwerkeStrom, direction: 'in' },
+        { id: 6, day: dayOffset(2), label: 'Fällig', phase: 'due' },
       ],
       attachments: [
         { id: 'att-sw-1', name: 'Jahresabrechnung_2025.pdf', sizeLabel: '420 KB', messageId: stadtwerkeJahr ?? stadtwerkeStrom },
@@ -156,7 +156,7 @@ export function createMockCases(messages: MessageSummary[]): {
       messageIds: [stadtwerkeJahr, stadtwerkeStrom].filter((id): id is number => id != null),
     },
     {
-      id: 'case-kranz',
+      id: 3,
       title: 'Angebot Ersatzteile',
       counterparty: 'Sabine Kranz · Zulieferer',
       domain: null,
@@ -167,9 +167,9 @@ export function createMockCases(messages: MessageSummary[]): {
       reason: 'Verknüpft über Thread-Header (In-Reply-To / References)',
       keys: [{ label: 'Kontakt', value: 'kranz@zulieferer.example' }],
       events: [
-        { id: 'e7', day: dayOffset(-1), label: 'Angebot erhalten', phase: 'start', messageId: kranzIds[0], direction: 'in' },
-        { id: 'e8', day: dayOffset(0), label: 'Freigabe gesendet', phase: 'update', messageId: kranzIds[1], direction: 'out' },
-        { id: 'e9', day: dayOffset(3), label: 'Rückmeldung erwartet', phase: 'due' },
+        { id: 7, day: dayOffset(-1), label: 'Angebot erhalten', phase: 'start', messageId: kranzIds[0], direction: 'in' },
+        { id: 8, day: dayOffset(0), label: 'Freigabe gesendet', phase: 'update', messageId: kranzIds[1], direction: 'out' },
+        { id: 9, day: dayOffset(3), label: 'Rückmeldung erwartet', phase: 'due' },
       ],
       attachments: [
         { id: 'att-kranz-1', name: 'Angebot_Ersatzteile.pdf', sizeLabel: '185 KB', messageId: kranzIds[0] },
@@ -177,7 +177,7 @@ export function createMockCases(messages: MessageSummary[]): {
       messageIds: kranzIds,
     },
     {
-      id: 'case-reise',
+      id: 4,
       title: 'Hamburg 12.–14. Dez',
       counterparty: 'Reiseportal',
       domain: 'reise.example',
@@ -188,8 +188,8 @@ export function createMockCases(messages: MessageSummary[]): {
       reason: 'Reisebestätigung erkannt (Datum + Buchungsreferenz)',
       keys: [{ label: 'Reisezeitraum', value: '12.–14.12.2026' }],
       events: [
-        { id: 'e10', day: dayOffset(-6), label: 'Gebucht', phase: 'start', messageId: reiseId, direction: 'in' },
-        { id: 'e11', day: dayOffset(4), label: 'Ticket-Abruf', phase: 'due' },
+        { id: 10, day: dayOffset(-6), label: 'Gebucht', phase: 'start', messageId: reiseId, direction: 'in' },
+        { id: 11, day: dayOffset(4), label: 'Ticket-Abruf', phase: 'due' },
       ],
       attachments: [
         { id: 'att-reise-1', name: 'Buchungsbestaetigung_HH.pdf', sizeLabel: '310 KB', messageId: reiseId },
@@ -197,7 +197,7 @@ export function createMockCases(messages: MessageSummary[]): {
       messageIds: reiseId != null ? [reiseId] : [],
     },
     {
-      id: 'case-versicherung',
+      id: 5,
       title: 'Vertrag Nr. 2026-1184',
       counterparty: 'Versicherung Plus',
       domain: 'versicherung.example',
@@ -207,7 +207,7 @@ export function createMockCases(messages: MessageSummary[]): {
       reason: 'Vertragsnummer 2026-1184 erkannt',
       keys: [{ label: 'Vertragsnr.', value: '2026-1184' }],
       events: [
-        { id: 'e12', day: dayOffset(-4), label: 'Unterlagen erhalten', phase: 'done', messageId: versicherungId, direction: 'in' },
+        { id: 12, day: dayOffset(-4), label: 'Unterlagen erhalten', phase: 'done', messageId: versicherungId, direction: 'in' },
       ],
       attachments: [
         { id: 'att-vers-1', name: 'Police_2026-1184.pdf', sizeLabel: '640 KB', messageId: versicherungId },
@@ -215,7 +215,7 @@ export function createMockCases(messages: MessageSummary[]): {
       messageIds: versicherungId != null ? [versicherungId] : [],
     },
     {
-      id: 'case-fotobuch',
+      id: 6,
       title: 'Fotobuch Bestellung',
       counterparty: 'Fotobuch Studio',
       domain: 'fotobuch.example',
@@ -225,8 +225,8 @@ export function createMockCases(messages: MessageSummary[]): {
       reason: 'Versandbestätigung ohne offene Rechnung abgeschlossen',
       keys: [{ label: 'Bestellung', value: 'FB-9021' }],
       events: [
-        { id: 'e13', day: dayOffset(-8), label: 'Bestellt', phase: 'start', messageId: fotobuchId, direction: 'in' },
-        { id: 'e14', day: dayOffset(-5), label: 'Versandt', phase: 'done', messageId: fotobuchId, direction: 'in' },
+        { id: 13, day: dayOffset(-8), label: 'Bestellt', phase: 'start', messageId: fotobuchId, direction: 'in' },
+        { id: 14, day: dayOffset(-5), label: 'Versandt', phase: 'done', messageId: fotobuchId, direction: 'in' },
       ],
       attachments: [
         { id: 'att-fb-1', name: 'Rechnung_FB-9021.pdf', sizeLabel: '142 KB', messageId: fotobuchId },
@@ -234,7 +234,7 @@ export function createMockCases(messages: MessageSummary[]): {
       messageIds: fotobuchId != null ? [fotobuchId] : [],
     },
     {
-      id: 'case-bank',
+      id: 7,
       title: 'Postfach-Dokumente',
       counterparty: 'Online-Banking',
       domain: 'bank.example',
@@ -244,18 +244,19 @@ export function createMockCases(messages: MessageSummary[]): {
       reason: 'Monatlicher Kontoauszug-Hinweis',
       keys: [{ label: 'Hinweis', value: 'Kontoauszug' }],
       events: [
-        { id: 'e15', day: dayOffset(-7), label: 'Eingegangen', phase: 'done', messageId: bankId, direction: 'in' },
+        { id: 15, day: dayOffset(-7), label: 'Eingegangen', phase: 'done', messageId: bankId, direction: 'in' },
       ],
       messageIds: bankId != null ? [bankId] : [],
     },
   ]
 
-  const categories: AsideCategory[] = [
+  const securityIds = findIds(/Bestätigungscode|sign-in/)
+  const allCategories: AsideCategory[] = [
     {
       id: 'cat-newsletter',
       label: 'Newsletter & Angebote',
       icon: 'tag',
-      count: 2,
+      count: shopOrder != null ? 1 : 0,
       summary: 'Shop Wochenpost, Streamingdienst',
       messageIds: shopOrder != null ? [shopOrder] : [],
     },
@@ -263,19 +264,91 @@ export function createMockCases(messages: MessageSummary[]): {
       id: 'cat-security',
       label: 'Sicherheit & Logins',
       icon: 'warning',
-      count: 2,
+      count: securityIds.length,
       summary: 'Bestätigungscode, Neue Anmeldung',
-      messageIds: findIds(/Bestätigungscode|sign-in/),
+      messageIds: securityIds,
     },
     {
       id: 'cat-social',
       label: 'Social Media & Hinweise',
       icon: 'mail',
-      count: 1,
+      count: 0,
       summary: 'Wiederkehrende Benachrichtigungen',
       messageIds: [],
     },
   ]
+  const categories = allCategories.filter((c) => c.count > 0)
 
   return { cases, categories }
+}
+
+/** A case as the backend sends it (`CaseView` in halcyon-core). */
+export interface CaseView {
+  id: number
+  title: string
+  counterparty: string
+  domain: string | null
+  kind: CaseKind
+  status: CaseStatus
+  next_step: string
+  due_at: number | null
+  due_label: string | null
+  amount_cents: number | null
+  currency: string | null
+  reason: string
+  created_at: number
+  updated_at: number
+  events: {
+    id: number
+    message_id: number | null
+    occurred_at: number
+    kind: string | null
+    label: string
+    phase: CaseEvent['phase']
+    direction: 'in' | 'out' | null
+  }[]
+  keys: { label: string; value: string; normalized: string }[]
+  message_ids: number[]
+}
+
+/** Keys used only for linking; not worth showing on the card. */
+const HIDDEN_KEYS = new Set(['Verlauf', 'Artikel'])
+
+function localDay(unixSeconds: number): string {
+  const d = new Date(unixSeconds * 1000)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+function formatAmount(cents: number, currency: string | null): string {
+  return new Intl.NumberFormat('de-DE', { style: 'currency', currency: currency ?? 'EUR' }).format(
+    cents / 100,
+  )
+}
+
+export function fromCaseView(v: CaseView): CaseItem {
+  return {
+    id: v.id,
+    title: v.title,
+    counterparty: v.counterparty,
+    domain: v.domain,
+    kind: v.kind,
+    status: v.status,
+    nextStep: v.next_step,
+    dueLabel: v.due_label ?? undefined,
+    amount: v.amount_cents != null ? formatAmount(v.amount_cents, v.currency) : undefined,
+    reason: v.reason,
+    keys: v.keys
+      .filter((k) => !HIDDEN_KEYS.has(k.label))
+      .map((k) => ({ label: k.label, value: k.value })),
+    events: v.events.map((e) => ({
+      id: e.id,
+      day: localDay(e.occurred_at),
+      label: e.label,
+      phase: e.phase,
+      messageId: e.message_id ?? undefined,
+      direction: e.direction ?? undefined,
+    })),
+    messageIds: v.message_ids,
+  }
 }

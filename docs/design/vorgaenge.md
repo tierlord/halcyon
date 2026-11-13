@@ -1,6 +1,6 @@
 # Vorgänge – Plan
 
-Stand: 13.11.2026 · Status: Plan
+Stand: 13.11.2026 · Status: erste Version im Test
 
 ## Nordstern
 
@@ -108,3 +108,22 @@ Schnittstellen legt Claude in Aufgabe A fest, bevor B–E starten.
 2. *Verstehen* – C, F: erste Vorgänge entstehen automatisch
 3. *Sichtbar* – E mit echten Daten: Kartenansicht im Alltag nutzbar
 4. *Lernend* – G, H: Korrekturen wirken, Auswertung am eigenen Postfach
+
+**Stand 13.11.2026**
+
+- A erledigt (`cases.rs`, Migration 10, Store-API). Beträge als Cent plus
+  Währung, Ereignisse mit Typ (`order.shipped`).
+- E als Prototyp von Gemini, an echte Daten angebunden. Testdaten nur noch im
+  Browser-Modus.
+- F in Version 1 (`linker.rs`):
+  - Bestellungen über Bestell- oder Sendungsnummer bzw. Artikelname desselben
+    Absenders.
+  - Gespräche über Antwort-Header, nur wenn du selbst und jemand anderes
+    geschrieben haben.
+  - Versanddienste starten keinen Vorgang.
+  - Betrachtet werden Mails der letzten 120 Tage. Offene Vorgänge ohne
+    Neuigkeiten gelten nach 21 Tagen als erledigt.
+- Korrekturen auf der Karte: „Erledigt“ und „Kein Vorgang“. Ein abgelehnter
+  Vorgang entsteht nicht neu.
+- Offen: B, C, D (Rechnungen, Verträge, Fristen), Nebenbei-Kategorien,
+  Aufteilen und Zusammenführen, G, H.

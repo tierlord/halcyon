@@ -170,7 +170,10 @@ pub struct Case {
     pub next_step: String,
     pub due_at: Option<i64>,
     pub due_label: Option<String>,
-    pub amount: Option<String>,
+    /// Open amount in minor units (cents), if known.
+    pub amount_cents: Option<i64>,
+    /// ISO 4217 code for `amount_cents`, e.g. `EUR`.
+    pub currency: Option<String>,
     pub reason: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -187,7 +190,8 @@ pub struct NewCase {
     pub next_step: String,
     pub due_at: Option<i64>,
     pub due_label: Option<String>,
-    pub amount: Option<String>,
+    pub amount_cents: Option<i64>,
+    pub currency: Option<String>,
     pub reason: String,
 }
 
@@ -198,6 +202,9 @@ pub struct CaseEvent {
     pub case_id: i64,
     pub message_id: Option<i64>,
     pub occurred_at: i64,
+    /// Machine-readable event type such as `order.shipped`; `None` for
+    /// manual or unclassified events.
+    pub kind: Option<String>,
     pub label: String,
     pub phase: CaseEventPhase,
     pub direction: Option<EventDirection>,
@@ -210,6 +217,9 @@ pub struct CaseEvent {
 pub struct NewCaseEvent {
     pub message_id: Option<i64>,
     pub occurred_at: i64,
+    /// Machine-readable event type such as `order.shipped`; `None` for
+    /// manual or unclassified events.
+    pub kind: Option<String>,
     pub label: String,
     pub phase: CaseEventPhase,
     pub direction: Option<EventDirection>,

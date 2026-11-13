@@ -16,12 +16,12 @@
   }: {
     cases: CaseItem[]
     categories: AsideCategory[]
-    selectedCaseId: string | null
-    hoveredCaseId: string | null
-    onselectcase: (id: string | null) => void
-    onhovercase: (id: string | null) => void
+    selectedCaseId: number | null
+    hoveredCaseId: number | null
+    onselectcase: (id: number | null) => void
+    onhovercase: (id: number | null) => void
     onopenmessage: (messageId: number) => void
-    onchangestatus: (caseId: string, status: CaseStatus) => void
+    onchangestatus: (caseId: number, status: CaseStatus) => void
   } = $props()
 
   let logoVersion = $state(0)
@@ -40,6 +40,13 @@
   const needsYou = $derived(cases.filter((c) => c.status === 'needs_you'))
   const waiting = $derived(cases.filter((c) => c.status === 'waiting'))
   const doneCases = $derived(cases.filter((c) => c.status === 'done'))
+  const summary = $derived.by(() => {
+    const open = waiting.length === 1 ? '1 Vorgang läuft' : `${waiting.length} Vorgänge laufen`
+    if (needsYou.length === 0) return open
+    const urgent =
+      needsYou.length === 1 ? '1 Vorgang braucht dich' : `${needsYou.length} Vorgänge brauchen dich`
+    return `${urgent} · ${open}`
+  })
 
   function formatEventDay(dayIso: string): string {
     if (dayIso === today) return 'Heute'
@@ -131,8 +138,13 @@
           <button type="button" class="act-btn primary" onclick={() => onchangestatus(c.id, 'done')}>
             <Icon name="check" size={14} /> Erledigt
           </button>
-          <button type="button" class="act-btn" onclick={() => onchangestatus(c.id, 'aside')}>
-            Zu Hinweisen
+          <button
+            type="button"
+            class="act-btn"
+            title="Falsch erkannt: Karte entfernen, ohne Mails zu löschen"
+            onclick={() => onchangestatus(c.id, 'rejected')}
+          >
+            Kein Vorgang
           </button>
           <button type="button" class="act-btn" onclick={() => onselectcase(null)}>
             Schließen
@@ -172,14 +184,22 @@
     <div>
       <h1>Vorgänge</h1>
       <p class="subtitle">
-        {needsYou.length
-          ? `${needsYou.length} Vorgang braucht dich · ${waiting.length} läuft`
-          : `${waiting.length} laufende Vorgänge`}
+        {summary}
       </p>
     </div>
   </header>
 
   <div class="board-scroll">
+    {#if cases.length === 0 && categories.length === 0}
+      <div class="empty">
+        <p class="empty-title">Noch keine Vorgänge</p>
+        <p class="empty-text">
+          Halcyon erkennt Bestellungen, Sendungen und Gespräche, in denen du geantwortet hast,
+          aus Mails der letzten vier Monate. Neue Mails werden laufend einsortiert.
+        </p>
+      </div>
+    {/if}
+
     {#if needsYou.length > 0}
       <section class="group">
         <h2 class="group-title urgent">Braucht dich</h2>
@@ -272,6 +292,22 @@
 </section>
 
 <style>
+  .empty {
+    margin: 48px auto;
+    max-width: 360px;
+    text-align: center;
+    color: var(--text-muted);
+  }
+  .empty-title {
+    font-weight: 600;
+    color: var(--text);
+    margin: 0 0 6px;
+  }
+  .empty-text {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.5;
+  }
   .board {
     display: flex;
     flex-direction: column;
