@@ -56,6 +56,82 @@
     ...Object.keys(watcherActive).filter((e) => watcherActive[e]),
   ])
 
+  const DEFAULT_SIDEBAR_W = 240
+  const MIN_SIDEBAR_W = 180
+  const MAX_SIDEBAR_W = 420
+  const DEFAULT_LIST_W = 380
+  const MIN_LIST_W = 280
+  const MIN_PANE_W = 360
+
+  function loadWidth(key: string, fallback: number, min: number, max: number): number {
+    try {
+      const raw = localStorage.getItem(key)
+      if (!raw) return fallback
+      const n = Number(raw)
+      if (Number.isFinite(n)) return Math.min(max, Math.max(min, Math.round(n)))
+    } catch {
+      // Ignore storage errors in restricted contexts.
+    }
+    return fallback
+  }
+
+  let sidebarWidth = $state(loadWidth('halcyon.sidebarWidth', DEFAULT_SIDEBAR_W, MIN_SIDEBAR_W, MAX_SIDEBAR_W))
+  let listWidth = $state(loadWidth('halcyon.listWidth', DEFAULT_LIST_W, MIN_LIST_W, 900))
+  let resizing = $state<'sidebar' | 'list' | null>(null)
+  let dragStartX = 0
+  let dragStartWidth = 0
+  let appEl: HTMLDivElement | undefined = $state()
+  let contentEl: HTMLDivElement | undefined = $state()
+
+  function startResize(which: 'sidebar' | 'list', e: PointerEvent) {
+    if (e.button !== 0) return
+    e.preventDefault()
+    resizing = which
+    dragStartX = e.clientX
+    dragStartWidth = which === 'sidebar' ? sidebarWidth : listWidth
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  }
+
+  function onResizeMove(which: 'sidebar' | 'list', e: PointerEvent) {
+    if (resizing !== which) return
+    const delta = e.clientX - dragStartX
+    if (which === 'sidebar') {
+      const appW = appEl?.clientWidth ?? 1200
+      const maxAllowed = Math.min(MAX_SIDEBAR_W, appW - MIN_LIST_W - MIN_PANE_W - 8)
+      sidebarWidth = Math.round(Math.min(Math.max(MIN_SIDEBAR_W, maxAllowed), Math.max(MIN_SIDEBAR_W, dragStartWidth + delta)))
+    } else {
+      const contentW = contentEl?.clientWidth ?? 900
+      const maxAllowed = Math.max(MIN_LIST_W, contentW - MIN_PANE_W - 4)
+      listWidth = Math.round(Math.min(maxAllowed, Math.max(MIN_LIST_W, dragStartWidth + delta)))
+    }
+  }
+
+  function stopResize(which: 'sidebar' | 'list') {
+    if (resizing !== which) return
+    resizing = null
+    try {
+      localStorage.setItem(
+        which === 'sidebar' ? 'halcyon.sidebarWidth' : 'halcyon.listWidth',
+        String(which === 'sidebar' ? sidebarWidth : listWidth),
+      )
+    } catch {
+      // Ignore storage errors.
+    }
+  }
+
+  function resetWidth(which: 'sidebar' | 'list') {
+    if (which === 'sidebar') {
+      sidebarWidth = DEFAULT_SIDEBAR_W
+    } else {
+      listWidth = DEFAULT_LIST_W
+    }
+    try {
+      localStorage.removeItem(which === 'sidebar' ? 'halcyon.sidebarWidth' : 'halcyon.listWidth')
+    } catch {
+      // Ignore storage errors.
+    }
+  }
+
   // The sidebar animation lingers briefly after an account goes idle. A sync
   // often ends and the next begins right away (watcher after full sync, or
   // folder by folder); without this the animation would restart mid-sweep.
@@ -580,7 +656,12 @@
 
 <svelte:window onkeydown={onKeydown} />
 
-<div class="app">
+<div
+  bind:this={appEl}
+  class="app"
+  class:resizing={resizing !== null}
+  style:--sidebar-w="{sidebarWidth}px"
+>
   <Sidebar
     {overview}
     {view}
@@ -603,6 +684,20 @@
     }}
     onhovercase={(id) => (hoveredCaseId = id)}
   />
+
+  <div
+    class="col-resizer"
+    class:active={resizing === 'sidebar'}
+    role="separator"
+    aria-orientation="vertical"
+    aria-label="Seitenleiste vergrößern oder verkleinern"
+    title="Ziehen zum Ändern der Breite (Doppelklick zum Zurücksetzen)"
+    onpointerdown={(e) => startResize('sidebar', e)}
+    onpointermove={(e) => onResizeMove('sidebar', e)}
+    onpointerup={() => stopResize('sidebar')}
+    onpointercancel={() => stopResize('sidebar')}
+    ondblclick={() => resetWidth('sidebar')}
+  ></div>
 
   <main>
     <div class="toolbar">
@@ -670,7 +765,7 @@
       </div>
     {/if}
 
-    <div class="content">
+    <div bind:this={contentEl} class="content" style:--list-w="{listWidth}px">
       <MessageList
         {title}
         messages={displayedMessages}
@@ -686,6 +781,19 @@
           selectedId = null
         }}
       />
+      <div
+        class="col-resizer"
+        class:active={resizing === 'list'}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Nachrichtenliste vergrößern oder verkleinern"
+        title="Ziehen zum Ändern der Breite (Doppelklick zum Zurücksetzen)"
+        onpointerdown={(e) => startResize('list', e)}
+        onpointermove={(e) => onResizeMove('list', e)}
+        onpointerup={() => stopResize('list')}
+        onpointercancel={() => stopResize('list')}
+        ondblclick={() => resetWidth('list')}
+      ></div>
       <div class="pane-slot">
         {#if selected}
           <div class="pane-backbar">
@@ -937,8 +1045,32 @@
   }
   .app {
     display: grid;
-    grid-template-columns: 240px 1fr;
+    grid-template-columns: clamp(180px, var(--sidebar-w, 240px), calc(100% - 648px)) 4px minmax(0, 1fr);
     height: 100%;
+  }
+  .app.resizing {
+    cursor: col-resize;
+    user-select: none;
+  }
+  .app.resizing .pane-slot {
+    pointer-events: none;
+  }
+  .col-resizer {
+    position: relative;
+    cursor: col-resize;
+    touch-action: none;
+    background: transparent;
+  }
+  .col-resizer::after {
+    content: '';
+    position: absolute;
+    inset: 0 1px;
+    background: transparent;
+    transition: background-color 0.12s ease;
+  }
+  .col-resizer:hover::after,
+  .col-resizer.active::after {
+    background: var(--highlight);
   }
   main {
     display: flex;
@@ -1079,7 +1211,7 @@
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: minmax(320px, 42%) 1fr;
+    grid-template-columns: clamp(280px, var(--list-w, 380px), calc(100% - 364px)) 4px minmax(360px, 1fr);
   }
   .content > :global(*) {
     min-height: 0;
