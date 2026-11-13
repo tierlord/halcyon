@@ -2,6 +2,9 @@
 
 Stand: 13.11.2026 · Status: erste Version im Test
 
+Vorgänge sind eine von drei Arten von Geschichten im übergeordneten Konzept
+[Wer ist am Zug?](am-zug.md).
+
 ## Nordstern
 
 > **Halcyon zeigt nicht Mails, sondern was gerade passiert – und was als
