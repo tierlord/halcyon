@@ -3,6 +3,7 @@
   import * as api from './api'
   import Icon from './Icon.svelte'
   import { initials, longDate } from './format'
+  import { isAppDark } from './theme.svelte'
   import { isFlagged, isSeen, type MessageSummary, type MessageView } from './types'
 
   let {
@@ -30,18 +31,7 @@
   const isNewsletter = $derived(!!message && message.header.list_unsubscribe.length > 0)
   const files = $derived(view?.attachments.filter((a) => !a.inline) ?? [])
 
-  // The app's theme: an explicit choice on <html>, else the system setting.
-  const darkQuery = window.matchMedia('(prefers-color-scheme: dark)')
-  let systemDark = $state(darkQuery.matches)
-  $effect(() => {
-    const onChange = () => (systemDark = darkQuery.matches)
-    darkQuery.addEventListener('change', onChange)
-    return () => darkQuery.removeEventListener('change', onChange)
-  })
-  const appDark = $derived.by(() => {
-    const theme = document.documentElement.dataset.theme
-    return theme ? theme === 'dark' : systemDark
-  })
+  const appDark = $derived(isAppDark())
 
   // Requests can overlap while flipping through messages; only the newest
   // result is shown.

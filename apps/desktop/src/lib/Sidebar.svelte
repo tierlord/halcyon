@@ -14,6 +14,7 @@
   import Icon from './Icon.svelte'
   import { accountLabel } from './format'
   import type { CaseItem } from './cases'
+  import { getThemeMode, setThemeMode, type ThemeMode } from './theme.svelte'
   import type { FolderRole, Overview, View } from './types'
 
 
@@ -70,6 +71,27 @@
 
   const isUnified = $derived(view.kind === 'unified')
   let expandedAccountId = $state<number | null>(null)
+  let settingsOpen = $state(false)
+  let brandRowEl: HTMLDivElement | undefined = $state()
+
+  function onWindowPointerDown(e: PointerEvent) {
+    if (!settingsOpen) return
+    if (brandRowEl && !brandRowEl.contains(e.target as Node)) {
+      settingsOpen = false
+    }
+  }
+
+  function onWindowKeydown(e: KeyboardEvent) {
+    if (settingsOpen && e.key === 'Escape') {
+      settingsOpen = false
+    }
+  }
+
+  const themeOptions: { value: ThemeMode; label: string }[] = [
+    { value: 'light', label: 'Hell' },
+    { value: 'dark', label: 'Dunkel' },
+    { value: 'auto', label: 'Automatisch' },
+  ]
 
   function folderIcon(role: FolderRole | null) {
     switch (role) {
@@ -121,10 +143,46 @@
   }
 </script>
 
+<svelte:window onpointerdown={onWindowPointerDown} onkeydown={onWindowKeydown} />
+
 <nav class="sidebar" aria-label="Ordner">
-  <div class="brand">
-    <img src="/halcyon.svg" alt="" width="28" height="28" />
-    <span>Halcyon</span>
+  <div class="brand-wrap" bind:this={brandRowEl}>
+    <div class="brand">
+      <img src="/halcyon.svg" alt="" width="28" height="28" />
+      <span>Halcyon</span>
+      <button
+        type="button"
+        class="settings-btn"
+        class:open={settingsOpen}
+        onclick={() => (settingsOpen = !settingsOpen)}
+        aria-expanded={settingsOpen}
+        aria-haspopup="true"
+        title="Einstellungen"
+        aria-label="Einstellungen"
+      >
+        <Icon name="settings" size={16} />
+      </button>
+    </div>
+
+    {#if settingsOpen}
+      <div class="settings-menu" role="dialog" aria-label="Einstellungen">
+        <div class="settings-label">Thema</div>
+        <div class="theme-switch" role="radiogroup" aria-label="Thema">
+          {#each themeOptions as opt (opt.value)}
+            <button
+              type="button"
+              role="radio"
+              aria-checked={getThemeMode() === opt.value}
+              class="theme-opt"
+              class:active={getThemeMode() === opt.value}
+              onclick={() => setThemeMode(opt.value)}
+            >
+              {opt.label}
+            </button>
+          {/each}
+        </div>
+      </div>
+    {/if}
   </div>
 
   <ul class="section">
@@ -269,6 +327,9 @@
     overflow: hidden;
     user-select: none;
   }
+  .brand-wrap {
+    position: relative;
+  }
   .brand {
     display: flex;
     align-items: center;
@@ -277,6 +338,70 @@
     font-weight: 650;
     font-size: 17px;
     letter-spacing: 0.01em;
+  }
+  .settings-btn {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 5px;
+    border: 0;
+    border-radius: var(--radius);
+    background: none;
+    color: var(--text-muted);
+  }
+  .settings-btn:hover,
+  .settings-btn.open {
+    background: var(--hover);
+    color: var(--text);
+  }
+  .settings-menu {
+    position: absolute;
+    top: 38px;
+    left: 6px;
+    right: 6px;
+    z-index: 20;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface-raised);
+    box-shadow: 0 8px 24px color-mix(in srgb, var(--pitch-black) 26%, transparent);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .settings-label {
+    font-size: 11px;
+    font-weight: 650;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+  }
+  .theme-switch {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 3px;
+    padding: 3px;
+    border-radius: var(--radius);
+    background: var(--surface);
+    border: 1px solid var(--border);
+  }
+  .theme-opt {
+    border: 0;
+    background: none;
+    border-radius: 6px;
+    padding: 5px 4px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+  .theme-opt:hover {
+    color: var(--text);
+  }
+  .theme-opt.active {
+    background: var(--accent-fill);
+    color: var(--on-accent-fill);
   }
   .section-header {
     display: flex;

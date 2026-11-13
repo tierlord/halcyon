@@ -687,55 +687,6 @@ impl Store {
         Ok(())
     }
 
-    /// One-time job: reads the DMARC verdict from stored originals of
-    /// messages synced before it was recorded. Offline; runs once (a marker
-    /// in `meta`) and returns how many messages turned out authenticated.
-    pub fn backfill_dmarc_from_bodies(&self) -> Result<Option<usize>> {
-        const MARKER: &str = "backfill.dmarc.v2";
-        let done: bool = self.conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM meta WHERE key = ?1)",
-            [MARKER],
-            |r| r.get(0),
-        )?;
-        if done {
-            return Ok(None);
-        }
-        let mut passed = 0;
-        let mut last_id = 0i64;
-        loop {
-            // In batches, so the UI's connection is never blocked for long.
-            let batch: Vec<(i64, Vec<u8>, i64)> = {
-                let mut stmt = self.conn.prepare(
-                    "SELECT m.id, b.raw_zstd, b.raw_size FROM messages m
-                     JOIN message_bodies b ON b.message_id = m.id
-                     WHERE m.dmarc_pass = 0 AND m.id > ?1 ORDER BY m.id LIMIT 200",
-                )?;
-                stmt.query_map([last_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                    .collect::<Result<_, _>>()?
-            };
-            let Some(&(id, _, _)) = batch.last() else {
-                break;
-            };
-            last_id = id;
-            let tx = self.conn.unchecked_transaction()?;
-            for (id, compressed, size) in batch {
-                let Ok(raw) = zstd::bulk::decompress(&compressed, size.max(0) as usize) else {
-                    continue;
-                };
-                if crate::imap::parse_header_block(&raw).dmarc_pass {
-                    tx.execute("UPDATE messages SET dmarc_pass = 1 WHERE id = ?1", [id])?;
-                    passed += 1;
-                }
-            }
-            tx.commit()?;
-        }
-        self.conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, unixepoch())",
-            [MARKER],
-        )?;
-        Ok(Some(passed))
-    }
-
     /// The raw message, if its content was downloaded.
     pub fn body(&self, message_id: i64) -> Result<Option<Vec<u8>>> {
         let row: Option<(Vec<u8>, i64)> = self
@@ -1665,32 +1616,6 @@ impl Store {
         )?)
     }
 
-    /// One-time job: removes `conversation` cases the linker created
-    /// before plain mail exchanges became threads in the list. Cases with a
-    /// manual event stay. Runs once (a marker in `meta`).
-    pub fn prune_auto_conversations(&self) -> Result<usize> {
-        const MARKER: &str = "cases.prune_conversations.v1";
-        let done: bool = self.conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM meta WHERE key = ?1)",
-            [MARKER],
-            |r| r.get(0),
-        )?;
-        if done {
-            return Ok(0);
-        }
-        let removed = self.conn.execute(
-            "DELETE FROM cases
-             WHERE kind = 'conversation'
-               AND id NOT IN (SELECT DISTINCT case_id FROM case_events WHERE manual = 1)",
-            [],
-        )?;
-        self.conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, unixepoch())",
-            [MARKER],
-        )?;
-        Ok(removed)
-    }
-
     /// Your own replies (in a Sent folder) to any of these `Message-ID`s, so
     /// a list of incoming mail can show whole threads.
     pub fn sent_replies_to(&self, rfc_ids: &[String]) -> Result<Vec<MessageSummary>> {
@@ -2555,34 +2480,6 @@ mod tests {
                 .get_brand_logo("kleinanzeigen.example", 2_000)
                 .unwrap(),
             None
-        );
-    }
-
-    #[test]
-    fn dmarc_verdict_backfilled_once_from_stored_originals() {
-        let mut store = Store::open_in_memory().unwrap();
-        let a = store.add_account(&account("a@example.org")).unwrap();
-        let f = store
-            .upsert_folder(a.id, "INBOX", None, Some(FolderRole::Inbox), true)
-            .unwrap();
-        store
-            .insert_messages(f.id, &[header(1, "x", "news@shop.example", 1)])
-            .unwrap();
-        let id = store.recent_messages(None, 1).unwrap()[0].id;
-        let raw = b"Authentication-Results: mx.provider.example; dmarc=pass header.from=shop.example\r\nFrom: Shop <news@shop.example>\r\nSubject: x\r\n\r\nHallo\r\n";
-        // Simulate a body stored before the column existed.
-        store.store_body(id, raw).unwrap();
-        store
-            .conn
-            .execute("UPDATE messages SET dmarc_pass = 0", [])
-            .unwrap();
-
-        assert_eq!(store.backfill_dmarc_from_bodies().unwrap(), Some(1));
-        assert!(store.message(id).unwrap().unwrap().header.dmarc_pass);
-        assert_eq!(
-            store.backfill_dmarc_from_bodies().unwrap(),
-            None,
-            "runs once"
         );
     }
 

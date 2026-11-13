@@ -278,10 +278,7 @@ pub fn run(store: &mut Store, now: i64) -> Result<LinkReport> {
         .map(|a| a.email.to_ascii_lowercase())
         .collect();
     store.in_transaction(|store| {
-        let mut report = LinkReport {
-            closed: store.prune_auto_conversations()?,
-            ..LinkReport::default()
-        };
+        let mut report = LinkReport::default();
         loop {
             let batch = store.case_scan_batch(now - SCAN_WINDOW_SECS, BATCH)?;
             if batch.is_empty() {
@@ -809,26 +806,5 @@ mod tests {
             replies[0].header.subject.as_deref(),
             Some("Re: Tischreservierung")
         );
-
-        // A conversation case left from the earlier linker is removed once.
-        let c = store
-            .create_case(&NewCase {
-                title: "Alt".into(),
-                counterparty: "X".into(),
-                domain: None,
-                kind: CaseKind::Conversation,
-                status: CaseStatus::NeedsYou,
-                next_step: String::new(),
-                due_at: None,
-                due_label: None,
-                amount_cents: None,
-                currency: None,
-                reason: String::new(),
-            })
-            .unwrap();
-        assert_eq!(store.prune_auto_conversations().unwrap(), 1);
-        assert!(store.get_case(c.case.id).unwrap().is_none());
-        assert_eq!(store.prune_auto_conversations().unwrap(), 0);
-        let _ = run(&mut store, NOW).unwrap();
     }
 }

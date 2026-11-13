@@ -1257,34 +1257,6 @@ fn messages_by_ids(state: State<'_, AppState>, ids: Vec<i64>) -> CmdResult<Vec<M
     Ok(out)
 }
 
-/// One-time data jobs after an update, in the background so the window
-/// opens at once. Currently: DMARC verdicts (for sender logos) from stored
-/// originals of mail synced before they were recorded.
-fn backfill_once(app: &AppHandle) {
-    let app = app.clone();
-    let db_path = app.state::<AppState>().db_path.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let Ok(store) = Store::open(&db_path) else {
-            return;
-        };
-        match store.backfill_dmarc_from_bodies() {
-            Ok(Some(n)) if n > 0 => {
-                tracing::info!(authenticated = n, "DMARC verdicts backfilled");
-                // Any account id: the UI reloads list and counts.
-                let _ = app.emit(
-                    "mail-changed",
-                    watch::MailChanged {
-                        account_id: 0,
-                        new_messages: 0,
-                    },
-                );
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "DMARC backfill failed"),
-        }
-    });
-}
-
 fn default_db_path() -> PathBuf {
     if let Some(p) = std::env::var_os("HALCYON_DB") {
         return p.into();
@@ -1326,7 +1298,6 @@ pub fn run() {
             // sync to catch up on what arrived while the app was closed.
             watch::restart(app.handle());
             outbox::start(app.handle());
-            backfill_once(app.handle());
             schedule_link(app.handle());
             begin_sync(app.handle());
             Ok(())

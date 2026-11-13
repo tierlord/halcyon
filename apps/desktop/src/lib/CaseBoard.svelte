@@ -378,14 +378,15 @@
     box-shadow: inset 3px 0 0 var(--highlight);
   }
   .card-wash {
+    --wash-edge: color-mix(in srgb, var(--brand-wash) var(--wash-mix), var(--bg));
     position: absolute;
     inset: 0;
     pointer-events: none;
     z-index: 0;
     background: linear-gradient(
       90deg,
-      color-mix(in srgb, var(--brand-wash) 86%, transparent) 0%,
-      color-mix(in srgb, var(--brand-wash) 35%, transparent) 58px,
+      var(--wash-edge) 0%,
+      color-mix(in srgb, var(--wash-edge) 42%, transparent) 58px,
       transparent 140px
     );
   }

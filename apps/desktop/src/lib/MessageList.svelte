@@ -447,17 +447,17 @@
       '.   brand subject account';
   }
   .brand-wash {
+    --wash-edge: color-mix(in srgb, var(--brand-wash) var(--wash-mix), var(--bg));
     position: absolute;
     inset: 0;
     pointer-events: none;
     z-index: 0;
     background: linear-gradient(
       90deg,
-      color-mix(in srgb, var(--brand-wash) 92%, transparent) 0%,
-      color-mix(in srgb, var(--brand-wash) 88%, transparent) 46px,
-      color-mix(in srgb, var(--brand-wash) 34%, transparent) 88px,
-      color-mix(in srgb, var(--brand-wash) 10%, transparent) 132px,
-      transparent 180px
+      var(--wash-edge) 0%,
+      var(--wash-edge) 44px,
+      color-mix(in srgb, var(--wash-edge) 42%, transparent) 92px,
+      transparent 165px
     );
   }
   li.selected > button .brand-wash {

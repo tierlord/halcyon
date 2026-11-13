@@ -22,6 +22,7 @@
   --unread: var(--ochre);
   --sync-glow: color-mix(in srgb, var(--blue-green) 32%, transparent);
   --danger: #b3261e;
+  --wash-mix: 48%;
 
   --radius: 8px;
   --font: system-ui, -apple-system, 'Segoe UI', Roboto, Ubuntu, Cantarell, sans-serif;
@@ -50,6 +51,7 @@
     --hover: color-mix(in srgb, var(--blue-slate) 26%, var(--pitch-black));
     --sync-glow: color-mix(in srgb, var(--blue-green) 55%, transparent);
     --danger: #ff8a80;
+    --wash-mix: 26%;
   }
 }
 
@@ -67,6 +69,7 @@
   --hover: color-mix(in srgb, var(--blue-slate) 26%, var(--pitch-black));
   --sync-glow: color-mix(in srgb, var(--blue-green) 55%, transparent);
   --danger: #ff8a80;
+  --wash-mix: 26%;
 }
 
 *,
