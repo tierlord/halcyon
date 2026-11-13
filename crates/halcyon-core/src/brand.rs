@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 const FETCH_TIMEOUT: Duration = Duration::from_secs(6);
 const MAX_LOGO_BYTES: usize = 512 * 1024;
 const MIN_LOGO_BYTES: usize = 100;
+const MAX_HTML_BYTES: usize = 256 * 1024;
 
 /// Cache TTL for resolved logos (30 days).
 pub const LOGO_HIT_TTL_SECS: i64 = 30 * 24 * 60 * 60;
@@ -20,6 +21,11 @@ pub const LOGO_MISS_TTL_SECS: i64 = 24 * 60 * 60;
 
 static RE_BIMI_LOC: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(?:^|;\s*)l\s*=\s*(https://[^\s;]+)").unwrap());
+static RE_LINK_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<link\b[^>]*>").unwrap());
+static RE_ATTR_REL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?is)\brel\s*=\s*(?:"([^"]*)"|'([^']*)')"#).unwrap());
+static RE_ATTR_HREF: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?is)\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')"#).unwrap());
 
 const FREEMAIL_DOMAINS: &[&str] = &[
     "gmail.com",
@@ -175,6 +181,20 @@ pub async fn resolve_logo(domain: &str) -> Option<String> {
         }
     }
 
+    // 3. Icons declared via <link rel="apple-touch-icon|icon"> in the homepage HTML.
+    let homepage_candidates = [
+        format!("https://{domain}/"),
+        format!("https://www.{domain}/"),
+    ];
+    for page_url in &homepage_candidates {
+        let icon_urls = fetch_html_icon_urls(&http, page_url).await;
+        for url in icon_urls.into_iter().take(3) {
+            if let Some(data_url) = fetch_image_as_data_url(&http, &url, MIN_LOGO_BYTES).await {
+                return Some(data_url);
+            }
+        }
+    }
+
     None
 }
 
@@ -260,14 +280,103 @@ async fn fetch_image_as_data_url(
             .unwrap_or("image/png")
             .trim()
             .to_string()
-    } else if content_type.contains("octet-stream") && url.to_ascii_lowercase().ends_with(".ico") {
+    } else if (content_type.contains("octet-stream") || content_type.is_empty())
+        && url.to_ascii_lowercase().contains(".ico")
+    {
         "image/x-icon".to_string()
+    } else if content_type.is_empty() && url.to_ascii_lowercase().contains(".png") {
+        "image/png".to_string()
     } else {
         return None;
     };
 
     let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Some(format!("data:{mime};base64,{encoded}"))
+}
+
+async fn fetch_html_icon_urls(http: &reqwest::Client, page_url: &str) -> Vec<String> {
+    let Ok(res) = http.get(page_url).send().await else {
+        return Vec::new();
+    };
+    if !res.status().is_success() {
+        return Vec::new();
+    }
+    let content_type = res
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !content_type.contains("text/html") && !content_type.contains("application/xhtml") {
+        return Vec::new();
+    }
+
+    let final_url = res.url().clone();
+    let mut bytes = Vec::new();
+    let mut res = res;
+    while let Ok(Some(chunk)) = res.chunk().await {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() >= MAX_HTML_BYTES {
+            break;
+        }
+    }
+    let html = String::from_utf8_lossy(&bytes);
+    parse_html_icon_urls(&html, &final_url)
+}
+
+fn parse_html_icon_urls(html: &str, base: &reqwest::Url) -> Vec<String> {
+    let head_end = html
+        .to_ascii_lowercase()
+        .find("</head>")
+        .unwrap_or_else(|| html.len().min(64 * 1024));
+    let head = &html[..head_end];
+
+    let mut ranked: Vec<(u8, String)> = Vec::new();
+    for m in RE_LINK_TAG.find_iter(head) {
+        let tag = m.as_str();
+        let Some(rel) = attr_value(&RE_ATTR_REL, tag) else {
+            continue;
+        };
+        let rel_lower = rel.to_ascii_lowercase();
+        let tokens: Vec<&str> = rel_lower.split_whitespace().collect();
+        let priority = if tokens.contains(&"apple-touch-icon")
+            || tokens.contains(&"apple-touch-icon-precomposed")
+        {
+            0
+        } else if tokens == ["icon"] {
+            1
+        } else if tokens.contains(&"icon") && !tokens.contains(&"mask-icon") {
+            2
+        } else {
+            continue;
+        };
+
+        let Some(href) = attr_value(&RE_ATTR_HREF, tag) else {
+            continue;
+        };
+        let href = href.trim().replace("&amp;", "&");
+        if href.is_empty() {
+            continue;
+        }
+        let Ok(resolved) = base.join(&href) else {
+            continue;
+        };
+        if resolved.scheme() != "https" || !resolved.host_str().is_some_and(is_valid_domain) {
+            continue;
+        }
+        let url_str = resolved.to_string();
+        if !ranked.iter().any(|(_, u)| u == &url_str) {
+            ranked.push((priority, url_str));
+        }
+    }
+
+    ranked.sort_by_key(|(prio, _)| *prio);
+    ranked.into_iter().map(|(_, u)| u).collect()
+}
+
+fn attr_value<'a>(re: &Regex, tag: &'a str) -> Option<&'a str> {
+    let caps = re.captures(tag)?;
+    caps.get(1).or_else(|| caps.get(2)).map(|m| m.as_str())
 }
 
 #[cfg(test)]
@@ -328,5 +437,26 @@ mod tests {
         ] {
             assert!(!super::is_valid_domain(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn parses_html_icon_links_preferring_apple_touch_icon() {
+        let html = r##"
+        <html><head>
+          <link rel="mask-icon" href="/safari-pinned-tab.svg" color="#94c502">
+          <link rel="shortcut icon" type="image/x-icon" href="/eportal/img/fav/eop/favicon.ico?v=1">
+          <link rel="apple-touch-icon" href="/eportal/img/fav/eop/apple-touch-icon.png?v=2" sizes="180x180">
+          <link rel="icon" href="http://insecure.example/icon.png">
+        </head></html>
+        "##;
+        let base = reqwest::Url::parse("https://www.elster.de/eportal/start").unwrap();
+        let urls = super::parse_html_icon_urls(html, &base);
+        assert_eq!(
+            urls,
+            vec![
+                "https://www.elster.de/eportal/img/fav/eop/apple-touch-icon.png?v=2",
+                "https://www.elster.de/eportal/img/fav/eop/favicon.ico?v=1",
+            ]
+        );
     }
 }
