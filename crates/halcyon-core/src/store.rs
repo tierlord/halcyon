@@ -691,7 +691,7 @@ impl Store {
     /// messages synced before it was recorded. Offline; runs once (a marker
     /// in `meta`) and returns how many messages turned out authenticated.
     pub fn backfill_dmarc_from_bodies(&self) -> Result<Option<usize>> {
-        const MARKER: &str = "backfill.dmarc.v1";
+        const MARKER: &str = "backfill.dmarc.v2";
         let done: bool = self.conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM meta WHERE key = ?1)",
             [MARKER],

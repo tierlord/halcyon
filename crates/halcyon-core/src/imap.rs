@@ -383,7 +383,72 @@ fn has_dmarc_pass(headers: mail_parser::Headers<'_>, from_domain: Option<&str>) 
         return false;
     };
     let value = String::from_utf8_lossy(topmost.raw_value());
-    parse_dmarc_pass(&value) && header_from_matches(&value, from_domain)
+    (parse_dmarc_pass(&value) && header_from_matches(&value, from_domain))
+        || has_aligned_dkim_pass(&value, from_domain)
+}
+
+/// Many providers (e.g. T-Online, Postfix/OpenDKIM) write `dkim=pass` with
+/// `header.d=` or `header.i=` in `Authentication-Results` without a separate
+/// `dmarc=pass` clause. An aligned `dkim=pass` in the topmost header equally
+/// proves the `From` domain is authentic.
+fn has_aligned_dkim_pass(value: &str, from_domain: Option<&str>) -> bool {
+    let Some(from_dom) = from_domain.map(str::trim).filter(|d| !d.is_empty()) else {
+        return false;
+    };
+    value.split(';').skip(1).any(|clause| {
+        let lower = clause.trim().to_ascii_lowercase();
+        let Some(rest) = lower.strip_prefix("dkim") else {
+            return false;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix('=') else {
+            return false;
+        };
+        let Some(after) = rest.trim_start().strip_prefix("pass") else {
+            return false;
+        };
+        if !(after.is_empty() || after.starts_with(|c: char| c.is_ascii_whitespace() || c == '('))
+        {
+            return false;
+        }
+        dkim_header_domain(&lower).is_some_and(|d| domains_aligned(d, from_dom))
+    })
+}
+
+fn dkim_header_domain(clause_lower: &str) -> Option<&str> {
+    if let Some(rest) = clause_lower.split("header.d=").nth(1) {
+        let dom = rest
+            .split(|c: char| c.is_whitespace() || c == ';' || c == ')')
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('@');
+        if !dom.is_empty() {
+            return Some(dom);
+        }
+    }
+    if let Some(rest) = clause_lower.split("header.i=").nth(1) {
+        let raw = rest
+            .split(|c: char| c.is_whitespace() || c == ';' || c == ')')
+            .next()
+            .unwrap_or("");
+        let dom = raw.rsplit_once('@').map(|(_, d)| d).unwrap_or(raw);
+        if !dom.is_empty() {
+            return Some(dom);
+        }
+    }
+    None
+}
+
+fn domains_aligned(a: &str, b: &str) -> bool {
+    if a.eq_ignore_ascii_case(b) {
+        return true;
+    }
+    match (
+        crate::brand::extract_brand_domain(&format!("a@{a}")),
+        crate::brand::extract_brand_domain(&format!("a@{b}")),
+    ) {
+        (Some(ba), Some(bb)) => ba.eq_ignore_ascii_case(&bb),
+        _ => false,
+    }
 }
 
 /// `header.from=` of the dmarc clause, if given, must name the From domain.
@@ -534,6 +599,16 @@ Authentication-Results: mx.example.org; dkim=fail; dmarc=fail header.from=shop.e
         let raw_spoofed_prefix = b"From: Info <info@shop.example>\r\n\
 Authentication-Results: mx.example.org; x-dmarc=pass; dmarc=bestguesspass\r\n\r\n";
         assert!(!parse_header_block(raw_spoofed_prefix).dmarc_pass);
+
+        // T-Online / Postfix style: dkim=pass with aligned header.d= and no dmarc= clause.
+        let raw_dkim_aligned = b"From: Kleinanzeigen <noreply@mail.kleinanzeigen.de>\r\n\
+Authentication-Results: mxf9b1;\r\n\tdkim=pass header.d=mail.kleinanzeigen.de;\r\n\tspf=pass smtp.mailfrom=bounces@em1295.mail.kleinanzeigen.de\r\n\r\n";
+        assert!(parse_header_block(raw_dkim_aligned).dmarc_pass);
+
+        // Unaligned dkim=pass (e.g. mailing list / forwarder) must NOT pass.
+        let raw_dkim_unaligned = b"From: Info <info@shop.example>\r\n\
+Authentication-Results: mailin24.t-online.de;\r\n\tdkim=pass (2048-bit key) header.d=googlegroups.com header.i=@googlegroups.com\r\n\r\n";
+        assert!(!parse_header_block(raw_dkim_unaligned).dmarc_pass);
     }
 
     #[test]
