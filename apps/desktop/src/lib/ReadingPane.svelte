@@ -30,6 +30,21 @@
 
   const isNewsletter = $derived(!!message && message.header.list_unsubscribe.length > 0)
   const files = $derived(view?.attachments.filter((a) => !a.inline) ?? [])
+  const canReplyAll = $derived(message ? hasOtherRecipients(message) : false)
+
+  function extractEmail(raw: string): string {
+    const match = raw.match(/<([^>]+)>/)
+    return (match ? match[1] : raw).trim().toLowerCase()
+  }
+
+  function hasOtherRecipients(m: MessageSummary): boolean {
+    const self = m.account_email.trim().toLowerCase()
+    const from = (m.header.from_addr ?? '').trim().toLowerCase()
+    const others = [...m.header.to, ...m.header.cc]
+      .map(extractEmail)
+      .filter((addr) => addr && addr !== self && addr !== from)
+    return new Set(others).size > 0
+  }
 
   const appDark = $derived(isAppDark())
 
@@ -152,13 +167,25 @@
           <Icon name="reply" size={16} />
           <span>Antworten</span>
         </button>
-        <button type="button" class="action" onclick={() => onreply(message, 'reply_all')} title="Allen antworten (A)">
-          <Icon name="replyall" size={16} />
-          <span>Allen</span>
-        </button>
-        <button type="button" class="action" onclick={() => onreply(message, 'forward')} title="Weiterleiten (F)">
+        {#if canReplyAll}
+          <button
+            type="button"
+            class="action icon-only"
+            onclick={() => onreply(message, 'reply_all')}
+            title="Allen antworten (A)"
+            aria-label="Allen antworten"
+          >
+            <Icon name="replyall" size={16} />
+          </button>
+        {/if}
+        <button
+          type="button"
+          class="action icon-only"
+          onclick={() => onreply(message, 'forward')}
+          title="Weiterleiten (F)"
+          aria-label="Weiterleiten"
+        >
           <Icon name="forward" size={16} />
-          <span>Weiterleiten</span>
         </button>
         <span class="sep" aria-hidden="true"></span>
         <button
@@ -172,23 +199,23 @@
         </button>
         <button
           type="button"
-          class="action"
+          class="action icon-only"
           class:on={isFlagged(message)}
           onclick={() => ontoggleflag(message)}
           title="Markieren (S)"
+          aria-label="Markieren"
           aria-pressed={isFlagged(message)}
         >
           <Icon name="star" size={16} filled={isFlagged(message)} />
-          <span>Markieren</span>
         </button>
         <button
           type="button"
-          class="action"
+          class="action icon-only"
           onclick={() => ondelete(message)}
           title={message.folder_role === 'trash' ? 'Endgültig löschen (Entf)' : 'In den Papierkorb (Entf)'}
+          aria-label={message.folder_role === 'trash' ? 'Endgültig löschen' : 'Löschen'}
         >
           <Icon name="trash" size={16} />
-          <span>Löschen</span>
         </button>
       </div>
       <h1>{h.subject ?? '(kein Betreff)'}</h1>
@@ -359,13 +386,18 @@
   .action {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 6px;
+    min-height: 30px;
     padding: 5px 10px;
     border-radius: var(--radius);
     border: 1px solid var(--border);
     background: var(--surface);
     font-size: 13px;
     font-weight: 600;
+  }
+  .action.icon-only {
+    padding: 5px 8px;
   }
   .action:hover {
     background: var(--hover);
