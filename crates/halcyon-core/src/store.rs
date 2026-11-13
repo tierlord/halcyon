@@ -483,6 +483,18 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Messages inside a single folder, newest first.
+    pub fn folder_messages(&self, folder_id: i64, limit: usize) -> Result<Vec<MessageSummary>> {
+        let sql = format!(
+            "{SUMMARY_SELECT}
+             WHERE f.id = ?1
+             ORDER BY m.date DESC LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![folder_id, limit as i64], summary_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Number of unread messages, filtered like [`Store::messages`].
     pub fn unread_count(&self, account_id: Option<i64>, role: Option<FolderRole>) -> Result<i64> {
         Ok(self.conn.query_row(
@@ -493,6 +505,23 @@ impl Store {
             params![account_id, role.map(FolderRole::as_str)],
             |r| r.get(0),
         )?)
+    }
+
+    /// Unread message count keyed by `folder_id` across all folders.
+    pub fn unread_counts_by_folder(&self) -> Result<std::collections::HashMap<i64, i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT folder_id, COUNT(*)
+             FROM messages
+             WHERE NOT EXISTS (SELECT 1 FROM json_each(flags) WHERE value = '\\Seen')
+             GROUP BY folder_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (folder_id, count) = row?;
+            map.insert(folder_id, count);
+        }
+        Ok(map)
     }
 
     /// Full-text search over subject, sender and recipients of all accounts.
@@ -1479,5 +1508,32 @@ mod tests {
         assert!(store.claim_due_outgoing(10_000).unwrap().is_none());
         assert!(store.take_failed_outgoing(item.id).unwrap().is_some());
         assert!(store.outbox().unwrap().is_empty());
+    }
+
+    #[test]
+    fn folder_messages_and_unread_counts_by_folder() {
+        let mut store = Store::open_in_memory().unwrap();
+        let a = store.add_account(&account("a@example.org")).unwrap();
+        let inbox = store
+            .upsert_folder(a.id, "INBOX", Some("/"), Some(FolderRole::Inbox), true)
+            .unwrap();
+        let custom = store
+            .upsert_folder(a.id, "Rechnungen", Some("/"), None, true)
+            .unwrap();
+
+        let mut h1 = header(1, "Willkommen", "hello@example.org", 10);
+        h1.flags = vec!["\\Seen".into()];
+        let h2 = header(2, "Rechnung Januar", "billing@example.org", 20);
+        let h3 = header(3, "Rechnung Februar", "billing@example.org", 30);
+
+        store.insert_messages(inbox.id, &[h1]).unwrap();
+        store.insert_messages(custom.id, &[h2, h3]).unwrap();
+
+        let custom_msgs = store.folder_messages(custom.id, 10).unwrap();
+        assert_eq!(custom_msgs.len(), 2);
+
+        let counts = store.unread_counts_by_folder().unwrap();
+        assert_eq!(counts.get(&inbox.id).copied().unwrap_or(0), 0);
+        assert_eq!(counts.get(&custom.id).copied().unwrap_or(0), 2);
     }
 }

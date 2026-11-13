@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from './Icon.svelte'
   import { accountLabel } from './format'
-  import type { Overview, View } from './types'
+  import type { FolderInfo, FolderRole, Overview, View } from './types'
 
   let {
     overview,
@@ -22,6 +22,56 @@
   const upcoming = ['Rechnungen', 'Bestellungen', 'Logindaten', 'Verträge', 'Newsletter']
 
   const isUnified = $derived(view.kind === 'unified')
+  let expandedAccountId = $state<number | null>(null)
+
+  function folderIcon(role: FolderRole | null) {
+    switch (role) {
+      case 'inbox':
+        return 'inbox' as const
+      case 'sent':
+        return 'send' as const
+      case 'drafts':
+        return 'compose' as const
+      case 'trash':
+        return 'trash' as const
+      case 'junk':
+        return 'warning' as const
+      case 'archive':
+        return 'archive' as const
+      case 'flagged':
+        return 'star' as const
+      case 'all':
+        return 'mail' as const
+      default:
+        return 'folder' as const
+    }
+  }
+
+  function selectUnified() {
+    expandedAccountId = null
+    onselect({ kind: 'unified', role: 'inbox' })
+  }
+
+  function selectAccount(accountId: number) {
+    if (expandedAccountId === accountId && view.kind === 'account' && view.accountId === accountId) {
+      expandedAccountId = null
+      return
+    }
+    expandedAccountId = accountId
+    onselect({ kind: 'account', accountId, role: 'inbox' })
+  }
+
+  function selectFolder(accountId: number, folder: FolderInfo) {
+    if (!folder.selectable) return
+    expandedAccountId = accountId
+    onselect({
+      kind: 'folder',
+      accountId,
+      folderId: folder.id,
+      folderName: folder.name,
+      folderRole: folder.role,
+    })
+  }
 </script>
 
 <nav class="sidebar" aria-label="Ordner">
@@ -35,7 +85,7 @@
       <button
         class="item"
         class:active={isUnified}
-        onclick={() => onselect({ kind: 'unified', role: 'inbox' })}
+        onclick={selectUnified}
       >
         <Icon name="inbox" />
         <span class="label">Alle Posteingänge</span>
@@ -58,21 +108,60 @@
   </div>
   <ul class="section">
     {#each overview?.accounts ?? [] as account (account.id)}
+      {@const expanded = expandedAccountId === account.id}
+      {@const hasFolders = account.folders.length > 0}
       <li>
         <button
           class="item"
           class:active={view.kind === 'account' && view.accountId === account.id}
+          class:parent-active={view.kind === 'folder' && view.accountId === account.id}
           class:syncing={activeEmails.includes(account.email)}
           aria-busy={activeEmails.includes(account.email)}
+          aria-expanded={hasFolders ? expanded : undefined}
           title={activeEmails.includes(account.email)
             ? `${account.email} – wird abgerufen …`
             : account.email}
-          onclick={() => onselect({ kind: 'account', accountId: account.id, role: 'inbox' })}
+          onclick={() => selectAccount(account.id)}
         >
+          {#if hasFolders}
+            <span class="chevron"><Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={14} /></span>
+          {/if}
           <Icon name="mail" />
           <span class="label">{account.display_name ?? accountLabel(account.email)}</span>
           {#if account.unread_inbox}<span class="count">{account.unread_inbox}</span>{/if}
         </button>
+
+        {#if expanded && hasFolders}
+          <ul class="folders" aria-label={`Ordner von ${account.display_name ?? accountLabel(account.email)}`}>
+            {#each account.folders as folder (folder.id)}
+              {@const folderActive = view.kind === 'folder' && view.folderId === folder.id}
+              <li>
+                {#if folder.selectable}
+                  <button
+                    class="item folder-item"
+                    class:active={folderActive}
+                    style:padding-left={`${8 + Math.min(folder.depth, 4) * 12}px`}
+                    title={folder.path}
+                    onclick={() => selectFolder(account.id, folder)}
+                  >
+                    <Icon name={folderIcon(folder.role)} size={15} />
+                    <span class="label">{folder.name}</span>
+                    {#if folder.unread}<span class="count">{folder.unread}</span>{/if}
+                  </button>
+                {:else}
+                  <div
+                    class="item folder-item disabled"
+                    style:padding-left={`${8 + Math.min(folder.depth, 4) * 12}px`}
+                    title={folder.path}
+                  >
+                    <Icon name={folderIcon(folder.role)} size={15} />
+                    <span class="label">{folder.name}</span>
+                  </div>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
       </li>
     {:else}
       <li class="empty">
@@ -241,6 +330,30 @@
     background: var(--selection);
     box-shadow: inset 3px 0 0 var(--highlight);
     font-weight: 600;
+  }
+  .item.parent-active {
+    font-weight: 600;
+  }
+  .chevron {
+    display: inline-flex;
+    align-items: center;
+    margin-right: -4px;
+    color: var(--text-muted);
+  }
+  .chevron :global(svg) {
+    color: var(--text-muted);
+  }
+  .folders {
+    list-style: none;
+    margin: 2px 0 6px 14px;
+    padding: 0 0 0 6px;
+    border-left: 1px solid var(--border);
+  }
+  .folder-item {
+    gap: 8px;
+    padding-top: 5px;
+    padding-bottom: 5px;
+    font-size: 13px;
   }
   .item :global(svg) {
     flex: none;

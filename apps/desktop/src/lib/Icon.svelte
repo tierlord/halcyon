@@ -24,6 +24,10 @@
     image: 'M4 5h16v14H4zM4 16l5-5 4 4 2-2 5 5M15 9.5h.01',
     download: 'M12 4v11M7 10l5 5 5-5M5 20h14',
     warning: 'M12 3l10 18H2zM12 10v5M12 18h.01',
+    folder: 'M3 6h6l2 2h10v11H3z',
+    archive: 'M4 4h16v4H4zM6 8v11h12V8M10 12h4',
+    chevronRight: 'M9 6l6 6-6 6',
+    chevronDown: 'M6 9l6 6 6-6',
   } as const
 
   let {

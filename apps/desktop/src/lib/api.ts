@@ -29,10 +29,12 @@ export function overview(): Promise<Overview> {
 }
 
 export function messages(view: View): Promise<MessageSummary[]> {
-  const accountId = view.kind === 'account' ? view.accountId : null
+  const accountId = view.kind === 'unified' ? null : view.accountId
+  const role = view.kind === 'folder' ? null : view.role
+  const folderId = view.kind === 'folder' ? view.folderId : null
   return native
-    ? invoke('messages', { accountId, role: view.role })
-    : mock.messages(accountId, view.role)
+    ? invoke('messages', { accountId, role, folderId })
+    : mock.messages(accountId, role, folderId)
 }
 
 export function search(query: string): Promise<MessageSummary[]> {

@@ -53,11 +53,23 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 #[derive(Serialize)]
+struct FolderInfo {
+    id: i64,
+    path: String,
+    name: String,
+    depth: usize,
+    role: Option<FolderRole>,
+    selectable: bool,
+    unread: i64,
+}
+
+#[derive(Serialize)]
 struct AccountInfo {
     id: i64,
     email: String,
     display_name: Option<String>,
     unread_inbox: i64,
+    folders: Vec<FolderInfo>,
 }
 
 #[derive(Serialize)]
@@ -66,19 +78,79 @@ struct Overview {
     unread_inbox: i64,
 }
 
+fn folder_display_and_depth(
+    path: &str,
+    delimiter: Option<&str>,
+    role: Option<FolderRole>,
+) -> (String, usize) {
+    let decoded = halcyon_core::utf7::decode(path);
+    if role == Some(FolderRole::Inbox) && path.eq_ignore_ascii_case("INBOX") {
+        return ("Posteingang".to_string(), 0);
+    }
+    if let Some(delim) = delimiter.filter(|d| !d.is_empty()) {
+        let parts: Vec<&str> = decoded.split(delim).collect();
+        if parts.len() > 1 {
+            let depth = parts.len() - 1;
+            let name = parts
+                .last()
+                .copied()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&decoded);
+            return (name.to_string(), depth);
+        }
+    }
+    (decoded, 0)
+}
+
+fn folder_sort_key(folder: &FolderInfo) -> (u8, String) {
+    let rank = match folder.role {
+        Some(FolderRole::Inbox) => 0,
+        Some(FolderRole::Sent) => 1,
+        Some(FolderRole::Drafts) => 2,
+        Some(FolderRole::Archive) => 3,
+        Some(FolderRole::Junk) => 4,
+        Some(FolderRole::Trash) => 5,
+        Some(FolderRole::All) => 6,
+        Some(FolderRole::Flagged) => 7,
+        None => 8,
+    };
+    (rank, folder.path.to_lowercase())
+}
+
 #[tauri::command]
 fn overview(state: State<'_, AppState>) -> CmdResult<Overview> {
     let store = state.store.lock().map_err(err)?;
+    let unread_by_folder = store.unread_counts_by_folder().map_err(err)?;
     let accounts = store
         .accounts()
         .map_err(err)?
         .into_iter()
         .map(|a| {
+            let mut folders: Vec<FolderInfo> = store
+                .folders(a.id)?
+                .into_iter()
+                .map(|f| {
+                    let (name, depth) =
+                        folder_display_and_depth(&f.path, f.delimiter.as_deref(), f.role);
+                    let unread = unread_by_folder.get(&f.id).copied().unwrap_or(0);
+                    FolderInfo {
+                        id: f.id,
+                        path: f.path,
+                        name,
+                        depth,
+                        role: f.role,
+                        selectable: f.selectable,
+                        unread,
+                    }
+                })
+                .collect();
+            folders.sort_by_key(folder_sort_key);
             Ok(AccountInfo {
                 unread_inbox: store.unread_count(Some(a.id), Some(FolderRole::Inbox))?,
                 id: a.id,
                 email: a.email,
                 display_name: a.display_name,
+                folders,
             })
         })
         .collect::<halcyon_core::Result<_>>()
@@ -96,14 +168,14 @@ fn messages(
     state: State<'_, AppState>,
     account_id: Option<i64>,
     role: Option<String>,
+    folder_id: Option<i64>,
 ) -> CmdResult<Vec<MessageSummary>> {
+    let store = state.store.lock().map_err(err)?;
+    if let Some(fid) = folder_id {
+        return store.folder_messages(fid, LIST_LIMIT).map_err(err);
+    }
     let role = role.as_deref().and_then(FolderRole::parse);
-    state
-        .store
-        .lock()
-        .map_err(err)?
-        .messages(account_id, role, LIST_LIMIT)
-        .map_err(err)
+    store.messages(account_id, role, LIST_LIMIT).map_err(err)
 }
 
 #[tauri::command]
