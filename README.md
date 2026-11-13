@@ -1,9 +1,17 @@
-# Halcyon
+<p align="center">
+  <img src="images/halcyon-icon.svg" alt="Halcyon-Logo: ein Eisvogel mit Briefumschlag" width="160">
+</p>
 
-Ein E-Mail-Programm mit Komfort-Features, die man anderswo vergeblich sucht:
+<h1 align="center">Halcyon</h1>
+
+<p align="center">
+  E-Mail mit Komfort-Features, die man anderswo vergeblich sucht.
+</p>
+
 Vorgänge statt loser Einzelmails, kontenübergreifende Kategorien, automatische
-Rechnungsablage, Newsletter-Aufräumen, Einmalcodes per Klick – mit lokaler KI,
-ohne Cloud.
+Rechnungsablage, Newsletter-Aufräumen, Einmalcodes per Klick – auf Wunsch mit
+lokaler KI, ohne Cloud. Der Name kommt vom Eisvogel (lat. *halcyon*) und den
+„halkyonischen Tagen": Ruhe im Posteingang.
 
 ## Aufbau
 
@@ -13,6 +21,8 @@ ohne Cloud.
 | `crates/halcyon-cli`  | Entwickler-CLI (`halcyon`) zum Testen des Kerns mit echten Konten |
 | `apps/desktop`        | Desktop-App: Tauri 2 + Svelte 5 + TypeScript |
 | `design/`             | Farbpalette und Gestaltungsregeln |
+| `images/`             | Logo (`halcyon-logo.svg`) und zugeschnittenes App-Icon (`halcyon-icon.svg`) |
+| `scripts/`            | `install-desktop.sh`: App mit Starter-Icon für den eigenen Benutzer installieren |
 | `docs/tasks/`         | Abgegrenzte Aufgaben für parallel arbeitende KI-Agenten |
 
 ## Ausprobieren
@@ -42,12 +52,15 @@ Datenbank. Die Datenbank liegt unter `~/.local/share/halcyon/halcyon.db`
 Die ausführliche Planung steht in [ROADMAP.md](ROADMAP.md).
 
 - [x] Kontoerkennung: Provider-Autoconfig, Thunderbird-ISPDB, MX, SRV, Raten
+- [x] Konto-Dialog: Passwort erst nach erfolgreicher Serverprüfung
 - [x] IMAP mit TLS/STARTTLS, Login per Passwort (XOAUTH2 vorbereitet)
-- [x] Sync neuer Nachrichten (nur Header), neueste zuerst, UIDVALIDITY-sicher
-- [x] Kontenübergreifende Suche und gemeinsamer Posteingang
-- [ ] Flag-Änderungen und Löschungen (CONDSTORE/QRESYNC)
-- [ ] Nachrichtentext und Anhänge laden
+- [x] Sync neuer Nachrichten, neueste zuerst, UIDVALIDITY-sicher
+- [x] Abgleich in beide Richtungen: gelesen, markiert, gelöscht, verschoben
+- [x] Mailinhalte (90 Tage vorgeladen, ältere bei Bedarf), Volltextsuche im Text
+- [x] Sichere Anzeige: HTML-Filter, CSP, abgeschotteter Rahmen, externe Bilder blockiert, Phishing-Warnung bei Links
+- [x] Anhänge speichern
+- [x] Desktop-Oberfläche mit hellem und dunklem Design, App-Starter
 - [ ] OAuth2 (Gmail, Microsoft)
 - [ ] SMTP-Versand
-- [x] Erste Desktop-Oberfläche: Posteingänge, Konten, Suche, Abrufen
-- [ ] Desktop: Mailtext, Aktionen, Kategorien
+- [ ] Sofortige Zustellung (IDLE)
+- [ ] Kategorien, Vorgänge, Spam-Erkennung
