@@ -109,13 +109,48 @@ pub fn extract_brand_domain(email: &str) -> Option<String> {
     Some(root)
 }
 
-/// Resolves a brand logo for `domain` using a 3-stage cascade:
+/// Whether `domain` is a plain host name (letters, digits, hyphens, dots).
+/// Anything else could smuggle paths, ports or credentials into the URLs
+/// built from it.
+pub fn is_valid_domain(domain: &str) -> bool {
+    domain.len() <= 253
+        && domain.contains('.')
+        // The top-level label has letters: no IP addresses (local network).
+        && domain
+            .rsplit('.')
+            .next()
+            .is_some_and(|tld| tld.bytes().any(|b| b.is_ascii_alphabetic()))
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
+/// Resolves a brand logo for `domain`, asking only the brand itself:
 /// 1. BIMI DNS TXT record (`default._bimi.<domain>`).
-/// 2. Direct website icons (`apple-touch-icon.png`, `favicon.ico`).
-/// 3. Public icon services (DuckDuckGo, Google).
+/// 2. Icons on the brand's own website (`apple-touch-icon.png`, `favicon.ico`).
+///
+/// No third-party icon service is asked: it would learn whom the user
+/// corresponds with.
 pub async fn resolve_logo(domain: &str) -> Option<String> {
+    if !is_valid_domain(domain) {
+        return None;
+    }
     let http = reqwest::Client::builder()
         .timeout(FETCH_TIMEOUT)
+        // Follow a few redirects, but never away from HTTPS.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 3 || attempt.url().scheme() != "https" {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
         .user_agent(concat!("Halcyon/", env!("CARGO_PKG_VERSION")))
         .build()
         .ok()?;
@@ -144,6 +179,7 @@ pub async fn resolve_logo(domain: &str) -> Option<String> {
 }
 
 async fn fetch_bimi_logo_url(domain: &str) -> Option<String> {
+    // BIMI logos must be served over HTTPS (BIMI spec, section 4.4).
     let resolver = TokioResolver::builder_tokio().ok()?.build().ok()?;
     let query = format!("default._bimi.{domain}.");
     let lookup = resolver.txt_lookup(query).await.ok()?;
@@ -191,8 +227,23 @@ async fn fetch_image_as_data_url(
         .unwrap_or("")
         .to_ascii_lowercase();
 
-    let bytes = res.bytes().await.ok()?;
-    if bytes.len() < min_bytes || bytes.len() > MAX_LOGO_BYTES {
+    // Read at most MAX_LOGO_BYTES: a hostile server must not be able to
+    // make Halcyon download (and hold) gigabytes.
+    if res
+        .content_length()
+        .is_some_and(|l| l as usize > MAX_LOGO_BYTES)
+    {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    let mut res = res;
+    while let Some(chunk) = res.chunk().await.ok()? {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() > MAX_LOGO_BYTES {
+            return None;
+        }
+    }
+    if bytes.len() < min_bytes {
         return None;
     }
 
@@ -259,5 +310,23 @@ mod tests {
             Some("https://cdn.example/logo.svg")
         );
         assert_eq!(parse_bimi_txt("v=spf1 include:example ~all"), None);
+    }
+
+    #[test]
+    fn only_plain_host_names_are_valid_domains() {
+        assert!(super::is_valid_domain("shop.example"));
+        assert!(super::is_valid_domain("mail.my-shop.example"));
+        for bad in [
+            "",
+            "localhost",
+            "evil.example/x?",
+            "a@b.example",
+            "127.0.0.1:80",
+            "-x.example",
+            "x..example",
+            "user:pw@x.example",
+        ] {
+            assert!(!super::is_valid_domain(bad), "{bad}");
+        }
     }
 }

@@ -1058,7 +1058,7 @@ fn now_unix_secs() -> i64 {
 #[tauri::command]
 async fn brand_logo(state: State<'_, AppState>, domain: String) -> CmdResult<Option<BrandLogo>> {
     let domain = domain.trim().to_ascii_lowercase();
-    if domain.is_empty() {
+    if !brand::is_valid_domain(&domain) {
         return Ok(None);
     }
 

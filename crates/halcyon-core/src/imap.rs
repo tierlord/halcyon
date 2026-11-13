@@ -358,17 +358,56 @@ pub fn parse_header_block(raw: &[u8]) -> MessageHeader {
             .unwrap_or_default(),
         list_unsubscribe_post: raw_header("List-Unsubscribe-Post")
             .is_some_and(|v| v.contains("List-Unsubscribe=One-Click")),
-        dmarc_pass: has_dmarc_pass(headers),
+        dmarc_pass: has_dmarc_pass(
+            headers,
+            from.as_ref()
+                .and_then(|m| m.address())
+                .and_then(|a| a.rsplit_once('@').map(|(_, d)| d)),
+        ),
     }
 }
 
-fn has_dmarc_pass(headers: mail_parser::Headers<'_>) -> bool {
-    headers.iter().any(|h| {
+/// Whether the receiving server attested `dmarc=pass` for the sender.
+///
+/// Only the **topmost** `Authentication-Results` header counts: it is the
+/// one the user's provider added on receipt (RFC 8601, section 5). Anything
+/// below it came with the message and can be forged by the sender – a
+/// phishing mail could simply include `dmarc=pass` itself. The verdict must
+/// also be about the domain shown in `From`.
+fn has_dmarc_pass(headers: mail_parser::Headers<'_>, from_domain: Option<&str>) -> bool {
+    let Some(topmost) = headers.iter().find(|h| {
         h.name()
             .as_str()
             .eq_ignore_ascii_case("Authentication-Results")
-            && parse_dmarc_pass(&String::from_utf8_lossy(h.raw_value()))
-    })
+    }) else {
+        return false;
+    };
+    let value = String::from_utf8_lossy(topmost.raw_value());
+    parse_dmarc_pass(&value) && header_from_matches(&value, from_domain)
+}
+
+/// `header.from=` of the dmarc clause, if given, must name the From domain.
+fn header_from_matches(value: &str, from_domain: Option<&str>) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let Some(clause) = lower
+        .split(';')
+        .map(str::trim)
+        .find(|c| c.starts_with("dmarc"))
+    else {
+        return false;
+    };
+    match clause.split("header.from=").nth(1) {
+        Some(rest) => {
+            let claimed = rest
+                .split(|c: char| c.is_whitespace() || c == ';' || c == ')')
+                .next()
+                .unwrap_or("");
+            from_domain.is_some_and(|d| d.eq_ignore_ascii_case(claimed))
+        }
+        // No header.from given: the receiving server checked the From
+        // domain by definition of DMARC.
+        None => true,
+    }
 }
 
 fn parse_dmarc_pass(value: &str) -> bool {
@@ -460,6 +499,26 @@ List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n\r\n";
         );
         assert!(h.list_unsubscribe_post);
         assert!(!h.dmarc_pass);
+    }
+
+    #[test]
+    fn forged_authentication_results_below_the_providers_do_not_count() {
+        // The provider's header (topmost) says fail; the sender added a
+        // fake "pass" further down.
+        let raw = b"Authentication-Results: mx.provider.example; dmarc=fail header.from=paypal.example\r\n\
+From: Service <service@paypal.example>\r\n\
+Authentication-Results: mx.provider.example; dmarc=pass header.from=paypal.example\r\n\r\n";
+        assert!(!parse_header_block(raw).dmarc_pass);
+
+        // A pass for a different domain does not vouch for the From domain.
+        let raw =
+            b"Authentication-Results: mx.provider.example; dmarc=pass header.from=evil.example\r\n\
+From: Service <service@paypal.example>\r\n\r\n";
+        assert!(!parse_header_block(raw).dmarc_pass);
+
+        let raw = b"Authentication-Results: mx.provider.example; dkim=pass; dmarc=pass (p=reject) header.from=paypal.example\r\n\
+From: Service <service@PayPal.example>\r\n\r\n";
+        assert!(parse_header_block(raw).dmarc_pass);
     }
 
     #[test]
