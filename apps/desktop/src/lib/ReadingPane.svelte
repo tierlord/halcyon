@@ -464,7 +464,8 @@
   }
   .hint {
     display: flex;
-    gap: 10px;
+    flex-wrap: wrap;
+    gap: 8px 10px;
     align-items: center;
     padding: 8px 12px;
     border-radius: var(--radius);
@@ -474,7 +475,8 @@
     margin-bottom: 8px;
   }
   .hint span {
-    flex: 1;
+    flex: 1 1 220px;
+    min-width: 0;
   }
   .hint.images {
     background: color-mix(in srgb, var(--blue-green) 12%, transparent);
@@ -484,12 +486,13 @@
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-    flex-shrink: 0;
+    max-width: 100%;
   }
   .small-btn {
     display: inline-flex;
     align-items: center;
     gap: 5px;
+    max-width: 100%;
     padding: 4px 10px;
     border-radius: var(--radius);
     border: 1px solid var(--border);
@@ -497,6 +500,8 @@
     font-size: 13px;
     font-weight: 600;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .small-btn:hover {
     background: var(--hover);
