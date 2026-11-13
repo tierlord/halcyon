@@ -92,3 +92,15 @@ Liste gefundener Lücken im Ergebnis steht.
   4. `track_style_attr_url_blocked` & `track_style_block_url_blocked`: `sanitize_html` belässt `url(https://...)` absichtlich im CSS und zählt es nur (`blocked > 0`); bei `allow_remote = false` **stoppt die CSP** (`img-src data:;`) den Abruf.
   5. `css_import_variants`: `@import` wird durch `/* import removed */` ersetzt, sodass dahinter stehendes `url("https://...")` als ungültige CSS-Syntax im `<style>`-Block stehen bleibt. **CSP** (`default-src 'none'; style-src 'unsafe-inline'`) verhindert das Nachladen externer Stylesheets.
 - Prüfungen: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings` und `cargo test --workspace` grün (42 passed, 6 ignored in `html_safety`).
+
+## Review (Claude)
+
+Alle fünf Lücken behoben, alle 48 Tests laufen ohne `#[ignore]`:
+
+1. Tiefe Verschachtelung / sehr große HTML-Teile: Vorprüfung ohne Parser
+   (Tiefe > 256 oder > 4 MB) zeigt die Mail als bereinigten Text an.
+   10 000 `<div>` jetzt in Millisekunden statt 17 s.
+2. `srcset`/`poster` mit Fremdadressen werden gezählt.
+3.–5. CSS in `style`-Attributen und `<style>`-Blöcken wird normalisiert
+   (Kommentare und Escapes aufgelöst), `@import` entfernt, fremde `url()`
+   ohne Erlaubnis durch `none` ersetzt und gezählt; mit Erlaubnis nur HTTPS.

@@ -184,9 +184,53 @@ pub fn render(content: &MessageContent, allow_remote: bool) -> Rendered {
 }
 
 static RE_CID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)cid:([^"'\s>)]+)"#).unwrap());
-static RE_CSS_REMOTE_URL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"(?i)url\(\s*['"]?\s*(https?:)?//"#).unwrap());
-static RE_CSS_IMPORT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)@import").unwrap());
+static RE_CSS_IMPORT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)@import[^;{}]*;?").unwrap());
+static RE_CSS_URL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?i)url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)"#).unwrap());
+static RE_CSS_LEGACY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(expression\s*\(|-moz-binding|behavior\s*:|javascript:|vbscript:)").unwrap()
+});
+static RE_STYLE_BLOCK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?is)(<style[^>]*>)(.*?)(</style>)").unwrap());
+// Remote images in attributes the allow-list drops anyway; counted so the
+// UI can offer to load them.
+static RE_REMOTE_DROPPED_ATTR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)\s(?:srcset|poster)\s*=\s*["']?[^"'>]*(?:https?:)?//"#).unwrap()
+});
+static RE_ANY_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<[^>]*>").unwrap());
+static RE_TAG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<(/?)([a-zA-Z][a-zA-Z0-9]*)[^>]*?(/?)>").unwrap());
+
+/// Documents nested deeper than this are shown as text: no real mail needs
+/// it, and HTML tree building gets very slow on such input (a cheap way to
+/// freeze a mail reader).
+const MAX_NESTING: usize = 256;
+/// HTML larger than this is shown as text for the same reason.
+const MAX_HTML_BYTES: usize = 4 * 1024 * 1024;
+
+const VOID_ELEMENTS: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track",
+    "wbr", "param",
+];
+
+/// Rough maximum nesting depth from a scan of the tags, without parsing.
+fn nesting_depth(html: &str) -> usize {
+    let (mut depth, mut max) = (0usize, 0usize);
+    for cap in RE_TAG.captures_iter(html) {
+        let name = cap[2].to_ascii_lowercase();
+        if VOID_ELEMENTS.contains(&name.as_str()) || !cap[3].is_empty() {
+            continue;
+        }
+        if cap[1].is_empty() {
+            depth += 1;
+            max = max.max(depth);
+        } else {
+            depth = depth.saturating_sub(1);
+        }
+    }
+    max
+}
 
 /// Cleans untrusted HTML. Returns the cleaned body and the number of blocked
 /// remote resources.
@@ -195,12 +239,18 @@ pub fn sanitize_html(
     inline_images: &HashMap<String, String>,
     allow_remote: bool,
 ) -> (String, usize) {
+    if html.len() > MAX_HTML_BYTES || nesting_depth(html) > MAX_NESTING {
+        // Strip tags without building a tree: building it is the slow part.
+        let text = RE_ANY_TAG.replace_all(html, " ");
+        return (text_to_html(&decode_entities(&text)), 0);
+    }
+
     let blocked = Arc::new(AtomicUsize::new(0));
-    // Remote CSS (url() in style attributes and <style> blocks) is blocked by
-    // the document's CSP; it is only counted here so the UI can offer to
-    // load it.
     if !allow_remote {
-        blocked.fetch_add(RE_CSS_REMOTE_URL.find_iter(html).count(), Ordering::Relaxed);
+        blocked.fetch_add(
+            RE_REMOTE_DROPPED_ATTR.find_iter(html).count(),
+            Ordering::Relaxed,
+        );
     }
 
     let filter_blocked = blocked.clone();
@@ -238,12 +288,115 @@ pub fn sanitize_html(
             )
         });
     let body = builder.clean(html).to_string();
-    // @import inside <style> could load further CSS; CSP blocks it, but drop
-    // it anyway rather than rely on a single layer.
-    let body = RE_CSS_IMPORT
-        .replace_all(&body, "/* import removed */")
+    // <style> blocks pass the allow-list unchanged; clean their CSS the same
+    // way as style attributes.
+    let body = RE_STYLE_BLOCK
+        .replace_all(&body, |c: &regex::Captures<'_>| {
+            format!(
+                "{}{}{}",
+                &c[1],
+                clean_css(&c[2], allow_remote, &blocked),
+                &c[3]
+            )
+        })
         .into_owned();
     (body, blocked.load(Ordering::Relaxed))
+}
+
+/// Normalises untrusted CSS: comments and escapes are resolved first (so
+/// `\75\72\6c(` and `u/**/rl(` cannot hide a `url(`), then imports and
+/// legacy script hooks are removed and remote `url()`s are blocked unless
+/// allowed. The CSP would stop the loads anyway; this keeps the first layer
+/// honest and lets the UI count what was blocked.
+fn clean_css(css: &str, allow_remote: bool, blocked: &AtomicUsize) -> String {
+    let plain = decode_css_escapes(&strip_css_comments(css));
+    if !allow_remote {
+        let imports = RE_CSS_IMPORT
+            .find_iter(&plain)
+            .filter(|m| m.as_str().contains("//"))
+            .count();
+        blocked.fetch_add(imports, Ordering::Relaxed);
+    }
+    // Imports are never allowed, also not with remote content enabled: they
+    // pull in whole style sheets nobody checked.
+    let plain = RE_CSS_IMPORT.replace_all(&plain, "");
+    let plain = RE_CSS_LEGACY.replace_all(&plain, "blocked-");
+    let plain = RE_CSS_URL.replace_all(&plain, |c: &regex::Captures<'_>| {
+        let target = c
+            .get(1)
+            .or(c.get(2))
+            .or(c.get(3))
+            .map(|m| m.as_str().trim())
+            .unwrap_or("");
+        let lower = target.to_ascii_lowercase();
+        if lower.starts_with("data:image/") || (allow_remote && lower.starts_with("https://")) {
+            c[0].to_string()
+        } else {
+            if lower.starts_with("http:") || lower.starts_with("https:") || lower.starts_with("//")
+            {
+                blocked.fetch_add(1, Ordering::Relaxed);
+            }
+            "none".to_string()
+        }
+    });
+    // Decoded escapes must not be able to close the <style> element.
+    plain.replace('<', "\\3c ")
+}
+
+fn strip_css_comments(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        match rest[start + 2..].find("*/") {
+            Some(end) => rest = &rest[start + 2 + end + 2..],
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Resolves CSS escapes: `\75` (hex, optionally followed by one space) and
+/// `\x` for any other character.
+fn decode_css_escapes(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut chars = css.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let mut hex = String::new();
+        while hex.len() < 6 && chars.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
+            hex.push(chars.next().unwrap());
+        }
+        if hex.is_empty() {
+            match chars.next() {
+                Some('\n') | None => {}
+                Some(other) => out.push(other),
+            }
+            continue;
+        }
+        if chars.peek().is_some_and(|c| c.is_ascii_whitespace()) {
+            chars.next();
+        }
+        match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+            Some('\0') | None => out.push('\u{fffd}'),
+            Some(ch) => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Turns the few entities ammonia's text output contains back into text.
+fn decode_entities(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
 }
 
 fn filter_attribute<'u>(
@@ -289,18 +442,7 @@ fn filter_attribute<'u>(
                 None
             }
         }
-        (_, "style") => {
-            // Expressions and bindings are long dead in browsers, but cost
-            // nothing to remove.
-            if lower.contains("expression(")
-                || lower.contains("-moz-binding")
-                || lower.contains("behavior:")
-            {
-                None
-            } else {
-                Some(Cow::Borrowed(value))
-            }
-        }
+        (_, "style") => Some(Cow::Owned(clean_css(value, allow_remote, blocked))),
         _ => Some(Cow::Borrowed(value)),
     }
 }
@@ -518,5 +660,33 @@ mod tests {
         assert_eq!(safe_file_name(".bashrc"), "bashrc");
         assert_eq!(safe_file_name("a\u{0}b\nc.txt"), "a_b_c.txt");
         assert_eq!(safe_file_name("  "), "anhang");
+    }
+
+    #[test]
+    fn remote_css_follows_the_users_choice() {
+        let html = r#"<div style="background:url('https://cdn.example/bg.png')">a</div><style>p{background:\75\72\6c(http://t.example/x.gif)}</style>"#;
+        let (out, blocked) = clean(html);
+        assert_eq!(blocked, 2);
+        assert!(!out.contains("cdn.example") && !out.contains("t.example"));
+        let (out, blocked) = sanitize_html(html, &HashMap::new(), true);
+        // HTTPS loads once allowed; plain HTTP never.
+        assert!(out.contains("https://cdn.example/bg.png"));
+        assert!(!out.contains("t.example"));
+        assert_eq!(
+            blocked, 1,
+            "the plain-HTTP load is still counted as blocked"
+        );
+    }
+
+    #[test]
+    fn absurd_nesting_falls_back_to_escaped_text() {
+        let html = format!(
+            "{}<b onclick=x>Hallo</b>{}",
+            "<div>".repeat(1000),
+            "</div>".repeat(1000)
+        );
+        let (out, _) = clean(&html);
+        assert!(out.contains("Hallo"));
+        assert!(!out.contains("<b") && !out.contains("onclick"));
     }
 }

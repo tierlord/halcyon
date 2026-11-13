@@ -216,7 +216,6 @@ fixture_test!(css_moz_binding, "css-moz-binding.html");
 fixture_test!(css_behavior, "css-behavior.html");
 
 #[test]
-#[ignore = "Lücke: @import wird durch '/* import removed */' ersetzt, dahinter stehendes url(...) bleibt im <style>-Block stehen (Layer 2 CSP blockt jedoch externe Stylesheets)"]
 fn css_import_variants() {
     assert_html_is_safe(
         "css-import-variants.html",
@@ -225,7 +224,6 @@ fn css_import_variants() {
 }
 
 #[test]
-#[ignore = "Lücke: CSS-escapetes \\75\\72\\6c(...) und u/**/rl(...) bleiben im Output und werden nicht in blocked gezählt (Layer 2 CSP img-src data: blockt jedoch den Abruf)"]
 fn css_url_escaped() {
     assert_html_is_safe(
         "css-url-escaped.html",
@@ -251,7 +249,6 @@ fn track_img_blocked() {
 }
 
 #[test]
-#[ignore = "Lücke: ammonia entfernt srcset korrekt, aber remote_blocked bleibt 0"]
 fn track_srcset_blocked() {
     let blocked = assert_html_is_safe(
         "track-srcset.html",
@@ -273,7 +270,6 @@ fn track_table_background_blocked() {
 }
 
 #[test]
-#[ignore = "Lücke: sanitize_html lässt url(https://...) im style-Attribut stehen und verlässt sich auf Layer 2 (CSP img-src data:)"]
 fn track_style_attr_url_blocked() {
     let blocked = assert_html_is_safe(
         "track-style-attr-url.html",
@@ -286,7 +282,6 @@ fn track_style_attr_url_blocked() {
 }
 
 #[test]
-#[ignore = "Lücke: sanitize_html lässt url(https://...) im <style>-Block stehen und verlässt sich auf Layer 2 (CSP img-src data:)"]
 fn track_style_block_url_blocked() {
     let blocked = assert_html_is_safe(
         "track-style-block-url.html",
@@ -312,7 +307,6 @@ fn track_picture_video_poster_blocked() {
 
 // Robustness (must not panic and must complete in < 2s)
 #[test]
-#[ignore = "Lücke: 10 000 verschachtelte <div> brauchen ca. 17 s im Debug-Build (> 2 s); CSP schützt hier nicht vor CPU-DoS"]
 fn robust_deep_nesting_completes_fast() {
     let start = Instant::now();
     assert_html_is_safe(

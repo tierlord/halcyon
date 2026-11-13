@@ -31,6 +31,6 @@ parallel dazu laufen können.
 | 01 | [Modifiziertes UTF-7 für Ordnernamen](01-utf7-folder-names.md) | erledigt |
 | 02 | [Testkorpus für Mail-Header](02-header-fixtures.md) | erledigt |
 | 03 | [Einmalcodes und Sendungsnummern erkennen](03-extractors.md) | erledigt (mit Review-Fixes) |
-| 04 | [Bösartige HTML-Mails als Testkorpus](04-hostile-html.md) | offen |
+| 04 | [Bösartige HTML-Mails als Testkorpus](04-hostile-html.md) | erledigt (5 Lücken gefunden und behoben) |
 
 Reihenfolge ist frei; jede Aufgabe ist für sich abgeschlossen.
