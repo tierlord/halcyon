@@ -27,6 +27,7 @@ export interface MessageSummary {
   folder_id: number
   folder_path: string
   folder_name: string
+  folder_role: FolderRole | null
   preview: string | null
   has_attachments: boolean
   has_body: boolean
@@ -79,7 +80,15 @@ export interface Overview {
   unread_inbox: number
 }
 
-export type FolderRole = 'inbox' | 'sent' | 'drafts' | 'trash' | 'junk' | 'archive'
+export type FolderRole =
+  | 'inbox'
+  | 'sent'
+  | 'drafts'
+  | 'trash'
+  | 'junk'
+  | 'archive'
+  | 'all'
+  | 'flagged'
 
 /** What the message list shows. */
 export type View =
@@ -108,3 +117,4 @@ export interface MessageView {
 }
 
 export const isSeen = (m: MessageSummary) => m.header.flags.includes('\\Seen')
+export const isFlagged = (m: MessageSummary) => m.header.flags.includes('\\Flagged')

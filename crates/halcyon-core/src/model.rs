@@ -226,6 +226,31 @@ pub struct Folder {
     pub uid_validity: Option<u32>,
     /// Highest UID we have stored for this folder.
     pub last_seen_uid: u32,
+    /// CONDSTORE state after the last flag sync (RFC 7162).
+    pub highest_modseq: Option<u64>,
+}
+
+/// A local change that still has to reach the server. Changes are applied
+/// to the local store at once and queued, so the UI reacts immediately and
+/// nothing is lost while offline.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PendingChange {
+    AddFlag(String),
+    RemoveFlag(String),
+    /// Move to another mailbox (e.g. the trash).
+    MoveTo(String),
+    /// Permanently delete (only used for messages already in the trash).
+    Expunge,
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingOp {
+    pub id: i64,
+    pub account_id: i64,
+    pub folder_path: String,
+    pub uid: u32,
+    pub change: PendingChange,
+    pub attempts: u32,
 }
 
 /// The header-level data the core keeps for every message.
@@ -266,6 +291,7 @@ pub struct MessageSummary {
     pub folder_path: String,
     /// Mailbox name for display.
     pub folder_name: String,
+    pub folder_role: Option<FolderRole>,
     pub header: MessageHeader,
     /// Start of the text, once the content is downloaded.
     pub preview: Option<String>,

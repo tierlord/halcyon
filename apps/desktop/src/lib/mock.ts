@@ -86,6 +86,7 @@ function msg(
     folder_id: accountId * 10,
     folder_path: 'INBOX',
     folder_name: 'Posteingang',
+    folder_role: 'inbox',
     preview: previewFor(subject),
     has_attachments: /Rechnung|Vertrag/.test(subject),
     has_body: true,
@@ -310,4 +311,21 @@ export function openLink(url: string): Promise<void> {
 
 export function saveAttachment(_id: number, _part: number): Promise<string> {
   return delay('~/Downloads/Rechnung-2026-11.pdf', 200)
+}
+
+export function setFlag(ids: number[], flag: 'seen' | 'flagged', on: boolean): Promise<number> {
+  const name = flag === 'seen' ? '\\Seen' : '\\Flagged'
+  let changed = 0
+  for (const m of all) {
+    if (!ids.includes(m.id) || m.header.flags.includes(name) === on) continue
+    m.header.flags = on ? [...m.header.flags, name] : m.header.flags.filter((f) => f !== name)
+    changed++
+  }
+  return delay(changed, 50)
+}
+
+export function deleteMessages(ids: number[]): Promise<number> {
+  const before = all.length
+  for (let i = all.length - 1; i >= 0; i--) if (ids.includes(all[i].id)) all.splice(i, 1)
+  return delay(before - all.length, 50)
 }

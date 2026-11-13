@@ -292,6 +292,11 @@ pub fn header_from_fetch(fetch: &Fetch) -> Option<MessageHeader> {
     Some(header)
 }
 
+/// The flags of a `FETCH` response as stored by Halcyon.
+pub fn flag_names(fetch: &Fetch) -> Vec<String> {
+    fetch.flags().filter_map(|f| flag_name(&f)).collect()
+}
+
 fn flag_name(flag: &Flag<'_>) -> Option<String> {
     Some(match flag {
         Flag::Seen => "\\Seen".into(),

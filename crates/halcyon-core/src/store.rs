@@ -10,7 +10,8 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::Result;
 use crate::model::{
-    Account, AuthMethod, Folder, FolderRole, MessageHeader, MessageSummary, Security, ServerConfig,
+    Account, AuthMethod, Folder, FolderRole, MessageHeader, MessageSummary, PendingChange,
+    PendingOp, Security, ServerConfig,
 };
 
 /// Schema migrations, applied in order. The index + 1 is stored in
@@ -131,7 +132,31 @@ CREATE TRIGGER messages_au AFTER UPDATE OF subject, from_name, from_addr, to_add
 END;
 INSERT INTO messages_fts(messages_fts) VALUES ('rebuild');
 "#,
+    // 3: two-way sync. CONDSTORE state per folder, and a queue of local
+    // changes (read, flagged, moved, deleted) that still have to reach the
+    // server.
+    r#"
+ALTER TABLE folders ADD COLUMN highest_modseq INTEGER;
+
+CREATE TABLE pending_ops (
+    id          INTEGER PRIMARY KEY,
+    account_id  INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    message_id  INTEGER,
+    folder_path TEXT NOT NULL,
+    uid         INTEGER NOT NULL,
+    op          TEXT NOT NULL,
+    arg         TEXT,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    last_error  TEXT,
+    created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX pending_ops_account ON pending_ops(account_id, id);
+CREATE INDEX pending_ops_message ON pending_ops(message_id);
+"#,
 ];
+
+/// Failed changes are retried this many times, then kept for inspection.
+const MAX_OP_ATTEMPTS: u32 = 5;
 
 /// Compression level for stored messages: fast, and mail text compresses
 /// well even at low levels.
@@ -552,6 +577,225 @@ impl Store {
             .optional()?)
     }
 
+    // ----- two-way sync ---------------------------------------------------
+
+    pub fn set_highest_modseq(&self, folder_id: i64, modseq: Option<u64>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE folders SET highest_modseq = ?2 WHERE id = ?1",
+            params![folder_id, modseq.map(|m| m as i64)],
+        )?;
+        Ok(())
+    }
+
+    /// Removes messages that no longer exist on the server (deleted or moved
+    /// elsewhere). Only UIDs up to `up_to` are considered, so messages that
+    /// arrived during the sync are not touched.
+    pub fn delete_missing(
+        &mut self,
+        folder_id: i64,
+        existing: &std::collections::HashSet<u32>,
+        up_to: u32,
+    ) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let local: Vec<(i64, u32)> = {
+            let mut stmt =
+                tx.prepare("SELECT id, uid FROM messages WHERE folder_id = ?1 AND uid <= ?2")?;
+            stmt.query_map(params![folder_id, up_to], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<_, _>>()?
+        };
+        let mut removed = 0;
+        for (id, uid) in local {
+            if !existing.contains(&uid) {
+                removed += tx.execute("DELETE FROM messages WHERE id = ?1", [id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// Takes over flags from the server. Messages with local changes that
+    /// have not reached the server yet keep their local flags; otherwise a
+    /// sync would undo what the user just did.
+    pub fn apply_server_flags(
+        &mut self,
+        folder_id: i64,
+        flags: &[(u32, Vec<String>)],
+    ) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut changed = 0;
+        {
+            let mut stmt = tx.prepare_cached(
+                "UPDATE messages SET flags = ?3
+                 WHERE folder_id = ?1 AND uid = ?2 AND flags <> ?3
+                   AND NOT EXISTS (SELECT 1 FROM pending_ops p WHERE p.message_id = messages.id)",
+            )?;
+            for (uid, f) in flags {
+                let mut sorted = f.clone();
+                sorted.sort();
+                changed += stmt.execute(params![folder_id, uid, json(&sorted)])?;
+            }
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    /// Sets or clears a flag (`\Seen`, `\Flagged`, …) locally and queues the
+    /// change for the server. Returns the number of messages changed.
+    pub fn queue_flag(&mut self, message_ids: &[i64], flag: &str, on: bool) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut changed = 0;
+        for &id in message_ids {
+            let row: Option<(String, i64, String, u32)> = tx
+                .query_row(
+                    "SELECT m.flags, f.account_id, f.path, m.uid FROM messages m
+                     JOIN folders f ON f.id = m.folder_id WHERE m.id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            let Some((raw, account_id, path, uid)) = row else {
+                continue;
+            };
+            let mut flags: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
+            if flags.iter().any(|f| f == flag) == on {
+                continue;
+            }
+            if on {
+                flags.push(flag.to_string());
+            } else {
+                flags.retain(|f| f != flag);
+            }
+            flags.sort();
+            tx.execute(
+                "UPDATE messages SET flags = ?2 WHERE id = ?1",
+                params![id, json(&flags)],
+            )?;
+            // A newer change for the same flag replaces an unsent older one.
+            tx.execute(
+                "DELETE FROM pending_ops WHERE message_id = ?1 AND arg = ?2
+                   AND op IN ('add_flag', 'remove_flag') AND attempts = 0",
+                params![id, flag],
+            )?;
+            tx.execute(
+                "INSERT INTO pending_ops (account_id, message_id, folder_path, uid, op, arg)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    account_id,
+                    id,
+                    path,
+                    uid,
+                    if on { "add_flag" } else { "remove_flag" },
+                    flag
+                ],
+            )?;
+            changed += 1;
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    /// Deletes messages: moves them to the account's trash, or removes them
+    /// for good if they already are in the trash. Local copies go at once.
+    /// Fails without any change if an account has no trash folder.
+    pub fn queue_delete(&mut self, message_ids: &[i64]) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut deleted = 0;
+        for &id in message_ids {
+            let row: Option<(i64, String, u32, Option<String>)> = tx
+                .query_row(
+                    "SELECT f.account_id, f.path, m.uid, f.role FROM messages m
+                     JOIN folders f ON f.id = m.folder_id WHERE m.id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            let Some((account_id, path, uid, role)) = row else {
+                continue;
+            };
+            let (op, arg) = if role.as_deref() == Some("trash") {
+                ("expunge", None)
+            } else {
+                let trash: Option<String> = tx
+                    .query_row(
+                        "SELECT path FROM folders WHERE account_id = ?1 AND role = 'trash' LIMIT 1",
+                        [account_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                match trash {
+                    Some(t) => ("move", Some(t)),
+                    None => {
+                        return Err(crate::Error::Other(
+                            "this account has no trash folder".into(),
+                        ));
+                    }
+                }
+            };
+            tx.execute(
+                "INSERT INTO pending_ops (account_id, message_id, folder_path, uid, op, arg)
+                 VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
+                params![account_id, path, uid, op, arg],
+            )?;
+            // Pending flag changes for this message are moot now.
+            tx.execute("DELETE FROM pending_ops WHERE message_id = ?1", [id])?;
+            tx.execute("DELETE FROM messages WHERE id = ?1", [id])?;
+            deleted += 1;
+        }
+        tx.commit()?;
+        Ok(deleted)
+    }
+
+    /// Queued changes of an account that have not failed too often, oldest
+    /// first.
+    pub fn pending_ops(&self, account_id: i64) -> Result<Vec<PendingOp>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, account_id, folder_path, uid, op, arg, attempts FROM pending_ops
+             WHERE account_id = ?1 AND attempts < ?2 ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![account_id, MAX_OP_ATTEMPTS], |r| {
+            let op: String = r.get(4)?;
+            let arg: Option<String> = r.get(5)?;
+            let change = match (op.as_str(), arg) {
+                ("add_flag", Some(f)) => PendingChange::AddFlag(f),
+                ("remove_flag", Some(f)) => PendingChange::RemoveFlag(f),
+                ("move", Some(t)) => PendingChange::MoveTo(t),
+                _ => PendingChange::Expunge,
+            };
+            Ok(PendingOp {
+                id: r.get(0)?,
+                account_id: r.get(1)?,
+                folder_path: r.get(2)?,
+                uid: r.get(3)?,
+                change,
+                attempts: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Whether any account has changes waiting for the server.
+    pub fn has_pending_ops(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pending_ops WHERE attempts < ?1)",
+            [MAX_OP_ATTEMPTS],
+            |r| r.get(0),
+        )?)
+    }
+
+    pub fn complete_op(&self, op_id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM pending_ops WHERE id = ?1", [op_id])?;
+        Ok(())
+    }
+
+    pub fn fail_op(&self, op_id: i64, error: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE pending_ops SET attempts = attempts + 1, last_error = ?2 WHERE id = ?1",
+            params![op_id, error],
+        )?;
+        Ok(())
+    }
+
     pub fn message_count(&self, folder_id: i64) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM messages WHERE folder_id = ?1",
@@ -568,7 +812,8 @@ const SUMMARY_SELECT: &str = "
            m.flags, m.list_id, m.list_unsubscribe, m.list_unsubscribe_post,
            m.preview, m.has_attachments,
            EXISTS (SELECT 1 FROM message_bodies b WHERE b.message_id = m.id) AS has_body,
-           f.account_id AS account_id, f.path AS folder_path, a.email AS account_email
+           f.account_id AS account_id, f.path AS folder_path, f.role AS folder_role,
+           a.email AS account_email
     FROM messages m
     JOIN folders f ON f.id = m.folder_id
     JOIN accounts a ON a.id = f.account_id";
@@ -661,6 +906,9 @@ fn folder_from_row(row: &Row<'_>) -> rusqlite::Result<Folder> {
         selectable: row.get("selectable")?,
         uid_validity: row.get("uid_validity")?,
         last_seen_uid: row.get("last_seen_uid")?,
+        highest_modseq: row
+            .get::<_, Option<i64>>("highest_modseq")?
+            .map(|v| v as u64),
     })
 }
 
@@ -672,6 +920,10 @@ fn summary_from_row(row: &Row<'_>) -> rusqlite::Result<MessageSummary> {
         folder_id: row.get("folder_id")?,
         folder_name: crate::utf7::decode(&row.get::<_, String>("folder_path")?),
         folder_path: row.get("folder_path")?,
+        folder_role: row
+            .get::<_, Option<String>>("folder_role")?
+            .as_deref()
+            .and_then(FolderRole::parse),
         preview: row.get("preview")?,
         has_attachments: row.get("has_attachments")?,
         has_body: row.get("has_body")?,
@@ -897,5 +1149,91 @@ mod tests {
         let m = &store.recent_messages(None, 1).unwrap()[0];
         assert_eq!(m.folder_path, "Entw&APw-rfe");
         assert_eq!(m.folder_name, "Entwürfe");
+    }
+
+    #[test]
+    fn local_changes_win_until_sent_and_deletes_go_to_trash() {
+        let mut store = Store::open_in_memory().unwrap();
+        let a = store.add_account(&account("a@example.org")).unwrap();
+        let inbox = store
+            .upsert_folder(a.id, "INBOX", None, Some(FolderRole::Inbox), true)
+            .unwrap();
+        store
+            .insert_messages(
+                inbox.id,
+                &[
+                    header(1, "x", "y@example.org", 1),
+                    header(2, "z", "y@example.org", 2),
+                ],
+            )
+            .unwrap();
+        let ids: Vec<i64> = store
+            .messages(None, None, 10)
+            .unwrap()
+            .iter()
+            .map(|m| m.id)
+            .collect();
+
+        // Mark read locally: queued, and a server flag sync does not undo it.
+        assert_eq!(store.queue_flag(&[ids[0]], "\\Seen", true).unwrap(), 1);
+        assert_eq!(store.queue_flag(&[ids[0]], "\\Seen", true).unwrap(), 0);
+        store
+            .apply_server_flags(inbox.id, &[(2, vec![]), (1, vec![])])
+            .unwrap();
+        assert!(store.message(ids[0]).unwrap().unwrap().is_seen());
+        let ops = store.pending_ops(a.id).unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].change, PendingChange::AddFlag("\\Seen".into()));
+
+        // Once sent, the server is authoritative again.
+        store.complete_op(ops[0].id).unwrap();
+        store
+            .apply_server_flags(inbox.id, &[(2, vec![]), (1, vec![])])
+            .unwrap();
+        assert!(!store.message(ids[0]).unwrap().unwrap().is_seen());
+
+        // Delete without trash folder: refused, nothing changed.
+        assert!(store.queue_delete(&[ids[1]]).is_err());
+        assert!(store.message(ids[1]).unwrap().is_some());
+        store
+            .upsert_folder(a.id, "Trash", None, Some(FolderRole::Trash), true)
+            .unwrap();
+        assert_eq!(store.queue_delete(&[ids[1]]).unwrap(), 1);
+        assert!(store.message(ids[1]).unwrap().is_none());
+        let ops = store.pending_ops(a.id).unwrap();
+        assert_eq!(
+            ops.last().unwrap().change,
+            PendingChange::MoveTo("Trash".into())
+        );
+
+        // Failing ops are retried a limited number of times.
+        for _ in 0..MAX_OP_ATTEMPTS {
+            store.fail_op(ops[0].id, "boom").unwrap();
+        }
+        assert!(store.pending_ops(a.id).unwrap().is_empty());
+        assert!(!store.has_pending_ops().unwrap());
+    }
+
+    #[test]
+    fn messages_gone_from_server_are_removed() {
+        let mut store = Store::open_in_memory().unwrap();
+        let a = store.add_account(&account("a@example.org")).unwrap();
+        let f = store
+            .upsert_folder(a.id, "INBOX", None, None, true)
+            .unwrap();
+        store
+            .insert_messages(
+                f.id,
+                &[
+                    header(1, "a", "x@example.org", 1),
+                    header(2, "b", "x@example.org", 2),
+                    header(9, "c", "x@example.org", 3),
+                ],
+            )
+            .unwrap();
+        let existing: std::collections::HashSet<u32> = [2].into_iter().collect();
+        // UID 9 is above `up_to` and must survive.
+        assert_eq!(store.delete_missing(f.id, &existing, 5).unwrap(), 1);
+        assert_eq!(store.message_count(f.id).unwrap(), 2);
     }
 }

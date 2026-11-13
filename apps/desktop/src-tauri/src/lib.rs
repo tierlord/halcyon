@@ -25,6 +25,10 @@ struct AppState {
     db_path: PathBuf,
     store: Mutex<Store>,
     syncing: AtomicBool,
+    /// A background run sending queued local changes is active …
+    flushing: AtomicBool,
+    /// … and more changes arrived while it ran.
+    flush_again: AtomicBool,
     /// Servers a freshly typed password may go to, per lower-cased address.
     ///
     /// The account dialog asks for the password only after the server check
@@ -392,9 +396,17 @@ fn start_sync(app: AppHandle, state: State<'_, AppState>) -> CmdResult<bool> {
     tauri::async_runtime::spawn(async move {
         let new_messages = run_sync(&app, &db_path).await;
         let _ = app.emit("sync", SyncUpdate::Finished { new_messages });
-        app.state::<AppState>()
-            .syncing
-            .store(false, Ordering::SeqCst);
+        let state = app.state::<AppState>();
+        state.syncing.store(false, Ordering::SeqCst);
+        // Changes made while the sync ran were not part of its first step.
+        let pending = state
+            .store
+            .lock()
+            .map(|s| s.has_pending_ops().unwrap_or(false))
+            .unwrap_or(false);
+        if pending {
+            schedule_flush(&app);
+        }
     });
     Ok(true)
 }
@@ -616,6 +628,134 @@ fn unique_path(dir: &std::path::Path, name: &str) -> PathBuf {
         .expect("an unused name exists")
 }
 
+/// Maps the UI's flag names to IMAP system flags. Only these two can be set
+/// from the UI.
+fn imap_flag(name: &str) -> CmdResult<&'static str> {
+    match name {
+        "seen" => Ok("\\Seen"),
+        "flagged" => Ok("\\Flagged"),
+        _ => Err(format!("Unbekannte Markierung {name:?}.")),
+    }
+}
+
+/// Marks messages read/unread or flagged/unflagged. Takes effect locally at
+/// once; the server follows in the background.
+#[tauri::command]
+fn set_flag(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+    flag: String,
+    on: bool,
+) -> CmdResult<usize> {
+    let changed = state
+        .store
+        .lock()
+        .map_err(err)?
+        .queue_flag(&ids, imap_flag(&flag)?, on)
+        .map_err(err)?;
+    if changed > 0 {
+        schedule_flush(&app);
+    }
+    Ok(changed)
+}
+
+/// Moves messages to the trash (or deletes them for good if they are in the
+/// trash already).
+#[tauri::command]
+fn delete_messages(app: AppHandle, state: State<'_, AppState>, ids: Vec<i64>) -> CmdResult<usize> {
+    let deleted = state
+        .store
+        .lock()
+        .map_err(err)?
+        .queue_delete(&ids)
+        .map_err(|e| match e {
+            halcyon_core::Error::Other(m) if m.contains("trash") => {
+                "Dieses Konto hat keinen Papierkorb-Ordner.".to_string()
+            }
+            e => e.to_string(),
+        })?;
+    if deleted > 0 {
+        schedule_flush(&app);
+    }
+    Ok(deleted)
+}
+
+/// Sends queued local changes in the background. Calls while a run is active
+/// make it run once more instead of starting a second one.
+fn schedule_flush(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if state.flushing.swap(true, Ordering::SeqCst) {
+        state.flush_again.store(true, Ordering::SeqCst);
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            app.state::<AppState>()
+                .flush_again
+                .store(false, Ordering::SeqCst);
+            run_flush(&app).await;
+            if !app
+                .state::<AppState>()
+                .flush_again
+                .swap(false, Ordering::SeqCst)
+            {
+                break;
+            }
+        }
+        app.state::<AppState>()
+            .flushing
+            .store(false, Ordering::SeqCst);
+    });
+}
+
+async fn run_flush(app: &AppHandle) {
+    let db_path = app.state::<AppState>().db_path.clone();
+    let report = |email: &str, error: String| {
+        let _ = app.emit(
+            "sync",
+            SyncUpdate::Failed {
+                email: email.to_string(),
+                error: format!("Änderung nicht übertragen: {error}"),
+            },
+        );
+    };
+    let mut store = match Store::open(&db_path) {
+        Ok(s) => s,
+        Err(e) => return report("", e.to_string()),
+    };
+    for account in store.accounts().unwrap_or_default() {
+        if store
+            .pending_ops(account.id)
+            .map(|o| o.is_empty())
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        let email = account.email.clone();
+        let password = tauri::async_runtime::spawn_blocking(move || {
+            secrets::load(&email, SecretKind::ImapPassword)
+        })
+        .await;
+        let Ok(Ok(Some(password))) = password else {
+            report(&account.email, "kein Passwort im Schlüsselbund".into());
+            continue;
+        };
+        let result = async {
+            let (mut session, caps) =
+                imap::login(&account.imap, &Credentials::Password(password)).await?;
+            let sent = sync::flush_changes(&mut store, &mut session, &caps, account.id).await;
+            let _ = session.logout().await;
+            sent
+        }
+        .await;
+        if let Err(e) = result {
+            report(&account.email, e.to_string());
+        }
+    }
+}
+
 fn default_db_path() -> PathBuf {
     if let Some(p) = std::env::var_os("HALCYON_DB") {
         return p.into();
@@ -642,6 +782,8 @@ pub fn run() {
             db_path,
             store: Mutex::new(store),
             syncing: AtomicBool::new(false),
+            flushing: AtomicBool::new(false),
+            flush_again: AtomicBool::new(false),
             verified_servers: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
@@ -656,7 +798,9 @@ pub fn run() {
             delete_account,
             message_content,
             open_link,
-            save_attachment
+            save_attachment,
+            set_flag,
+            delete_messages
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Halcyon app");

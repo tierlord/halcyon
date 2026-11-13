@@ -13,20 +13,26 @@
     plus: 'M12 5v14M5 12h14',
     trash: 'M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3',
     check: 'M5 12.5l4.5 4.5L19 7.5',
+    star: 'M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z',
+    mailopen: 'M4 10l8-6 8 6v9H4zM4 10l8 5 8-5',
     paperclip: 'M21 11.5l-8.6 8.6a5 5 0 0 1-7.1-7.1l8.6-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9',
     image: 'M4 5h16v14H4zM4 16l5-5 4 4 2-2 5 5M15 9.5h.01',
     download: 'M12 4v11M7 10l5 5 5-5M5 20h14',
     warning: 'M12 3l10 18H2zM12 10v5M12 18h.01',
   } as const
 
-  let { name, size = 18 }: { name: keyof typeof paths; size?: number } = $props()
+  let {
+    name,
+    size = 18,
+    filled = false,
+  }: { name: keyof typeof paths; size?: number; filled?: boolean } = $props()
 </script>
 
 <svg
   width={size}
   height={size}
   viewBox="0 0 24 24"
-  fill="none"
+  fill={filled ? 'currentColor' : 'none'}
   stroke="currentColor"
   stroke-width="1.8"
   stroke-linecap="round"

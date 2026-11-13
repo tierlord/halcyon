@@ -2,9 +2,19 @@
   import * as api from './api'
   import Icon from './Icon.svelte'
   import { initials, longDate } from './format'
-  import type { MessageSummary, MessageView } from './types'
+  import { isFlagged, isSeen, type MessageSummary, type MessageView } from './types'
 
-  let { message }: { message: MessageSummary | null } = $props()
+  let {
+    message,
+    ontoggleread,
+    ontoggleflag,
+    ondelete,
+  }: {
+    message: MessageSummary | null
+    ontoggleread: (m: MessageSummary) => void
+    ontoggleflag: (m: MessageSummary) => void
+    ondelete: (m: MessageSummary) => void
+  } = $props()
 
   let view = $state<MessageView | null>(null)
   let loading = $state(false)
@@ -114,6 +124,37 @@
   {#if message}
     {@const h = message.header}
     <header class="head">
+      <div class="actions" role="toolbar" aria-label="Aktionen">
+        <button
+          type="button"
+          class="action"
+          onclick={() => ontoggleread(message)}
+          title={isSeen(message) ? 'Als ungelesen markieren (U)' : 'Als gelesen markieren (U)'}
+        >
+          <Icon name={isSeen(message) ? 'mail' : 'mailopen'} size={16} />
+          <span>{isSeen(message) ? 'Ungelesen' : 'Gelesen'}</span>
+        </button>
+        <button
+          type="button"
+          class="action"
+          class:on={isFlagged(message)}
+          onclick={() => ontoggleflag(message)}
+          title="Markieren (S)"
+          aria-pressed={isFlagged(message)}
+        >
+          <Icon name="star" size={16} filled={isFlagged(message)} />
+          <span>Markieren</span>
+        </button>
+        <button
+          type="button"
+          class="action"
+          onclick={() => ondelete(message)}
+          title={message.folder_role === 'trash' ? 'Endgültig löschen (Entf)' : 'In den Papierkorb (Entf)'}
+        >
+          <Icon name="trash" size={16} />
+          <span>Löschen</span>
+        </button>
+      </div>
       <h1>{h.subject ?? '(kein Betreff)'}</h1>
 
       <div class="sender">
@@ -259,8 +300,33 @@
     background: var(--surface-raised);
     position: relative;
   }
+  .actions {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 14px;
+  }
+  .action {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .action:hover {
+    background: var(--hover);
+  }
+  .action :global(svg) {
+    color: var(--accent-text);
+  }
+  .action.on :global(svg) {
+    color: var(--ochre);
+  }
   .head {
-    padding: 22px 28px 12px;
+    padding: 16px 28px 12px;
     flex: none;
     overflow-y: auto;
     max-height: 55%;

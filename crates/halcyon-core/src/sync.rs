@@ -1,14 +1,15 @@
 //! Pulls folders and message headers from the server into the local store.
 //!
-//! This first version only adds new messages. Flag changes and deletions of
-//! already stored messages will follow with CONDSTORE/QRESYNC, falling back
-//! to a periodic flag scan on servers without them.
+//! Two-way: local changes (read, flagged, deleted) are queued in the store
+//! and sent first; then each folder brings in new messages, removes messages
+//! deleted or moved elsewhere, and takes over flag changes made on other
+//! devices – with CONDSTORE only the changed ones, otherwise all flags.
 
 use futures::TryStreamExt;
 
 use crate::Result;
-use crate::imap::{self, Credentials, HEADER_FIELDS, ImapSession};
-use crate::model::{Account, FolderRole};
+use crate::imap::{self, Capabilities, Credentials, HEADER_FIELDS, ImapSession};
+use crate::model::{Account, FolderRole, PendingChange};
 use crate::store::Store;
 
 /// Messages fetched per round trip.
@@ -55,6 +56,12 @@ pub struct SyncReport {
     pub folders: usize,
     pub new_messages: usize,
     pub bodies: usize,
+    /// Local changes sent to the server.
+    pub changes_sent: usize,
+    /// Messages removed because they are gone from the server.
+    pub removed: usize,
+    /// Messages whose flags changed on the server.
+    pub flags_updated: usize,
     pub failed_folders: Vec<(String, String)>,
 }
 
@@ -69,11 +76,17 @@ pub async fn sync_account(
     let (mut session, caps) = imap::login(&account.imap, credentials).await?;
     tracing::debug!(account = %account.email, ?caps, "logged in");
 
+    // Local changes first, so the flag sync below cannot undo them.
+    let changes_sent = flush_changes(store, &mut session, &caps, account.id).await?;
+
     let remote = imap::list_folders(&mut session).await?;
     let paths: Vec<String> = remote.iter().map(|f| f.path.clone()).collect();
     store.retain_folders(account.id, &paths)?;
 
-    let mut report = SyncReport::default();
+    let mut report = SyncReport {
+        changes_sent,
+        ..SyncReport::default()
+    };
     for rf in &remote {
         let folder = store.upsert_folder(
             account.id,
@@ -93,6 +106,7 @@ pub async fn sync_account(
         match sync_folder(
             store,
             &mut session,
+            &caps,
             folder.id,
             &rf.path,
             skip_bodies,
@@ -100,9 +114,11 @@ pub async fn sync_account(
         )
         .await
         {
-            Ok((n, b)) => {
-                report.new_messages += n;
-                report.bodies += b;
+            Ok(r) => {
+                report.new_messages += r.new_messages;
+                report.bodies += r.bodies;
+                report.removed += r.removed;
+                report.flags_updated += r.flags_updated;
             }
             Err(e) => {
                 on_event(SyncEvent::FolderFailed {
@@ -124,31 +140,76 @@ pub async fn sync_account(
     Ok(report)
 }
 
+#[derive(Default)]
+struct FolderResult {
+    new_messages: usize,
+    bodies: usize,
+    removed: usize,
+    flags_updated: usize,
+}
+
 async fn sync_folder(
     store: &mut Store,
     session: &mut ImapSession,
+    caps: &Capabilities,
     folder_id: i64,
     path: &str,
     skip_bodies: bool,
     on_event: &mut impl FnMut(SyncEvent<'_>),
-) -> Result<(usize, usize)> {
-    let mailbox = session.examine(path).await?;
+) -> Result<FolderResult> {
+    let mailbox = if caps.condstore {
+        session.select_condstore(path).await?
+    } else {
+        session.examine(path).await?
+    };
     // Servers without UIDVALIDITY violate RFC 3501; treat them as constant.
     if store.set_uid_validity(folder_id, mailbox.uid_validity.unwrap_or(0))? {
         on_event(SyncEvent::FolderReset { path });
+    }
+    let folder = store
+        .folder_by_id(folder_id)?
+        .ok_or_else(|| crate::Error::Other(format!("folder {path} vanished")))?;
+    let last_seen = folder.last_seen_uid;
+    let mut result = FolderResult::default();
+
+    // Changes to messages we already have: deletions and flags.
+    if last_seen > 0 {
+        let existing: std::collections::HashSet<u32> = if mailbox.exists == 0 {
+            Default::default()
+        } else {
+            session.uid_search("ALL").await?.into_iter().collect()
+        };
+        result.removed = store.delete_missing(folder_id, &existing, last_seen)?;
+
+        let unchanged = caps.condstore
+            && folder.highest_modseq.is_some()
+            && folder.highest_modseq == mailbox.highest_modseq;
+        if mailbox.exists > 0 && !unchanged {
+            let query = match (caps.condstore, folder.highest_modseq) {
+                (true, Some(modseq)) => format!("(UID FLAGS) (CHANGEDSINCE {modseq})"),
+                _ => "(UID FLAGS)".to_string(),
+            };
+            let fetches: Vec<_> = session
+                .uid_fetch(format!("1:{last_seen}"), &query)
+                .await?
+                .try_collect()
+                .await?;
+            let flags: Vec<(u32, Vec<String>)> = fetches
+                .iter()
+                .filter_map(|f| Some((f.uid?, imap::flag_names(f))))
+                .filter(|(uid, _)| *uid <= last_seen)
+                .collect();
+            result.flags_updated = store.apply_server_flags(folder_id, &flags)?;
+        }
     }
     if mailbox.exists == 0 {
         on_event(SyncEvent::FolderStarted {
             path,
             new_messages: 0,
         });
-        return Ok((0, 0));
+        store.set_highest_modseq(folder_id, mailbox.highest_modseq)?;
+        return Ok(result);
     }
-
-    let last_seen = store
-        .folder_by_id(folder_id)?
-        .map(|f| f.last_seen_uid)
-        .unwrap_or(0);
     // "n:*" always matches the highest UID, even if it is below n.
     let mut uids: Vec<u32> = session
         .uid_search(format!("UID {}:*", last_seen + 1))
@@ -184,13 +245,101 @@ async fn sync_folder(
     if let Some(&max) = uids.first() {
         store.mark_synced_up_to(folder_id, max)?;
     }
+    // Only now: if anything above failed, the next sync asks for the same
+    // changes again.
+    store.set_highest_modseq(folder_id, mailbox.highest_modseq)?;
+    result.new_messages = uids.len();
 
-    let bodies = if skip_bodies {
-        0
+    if !skip_bodies {
+        result.bodies = prefetch_bodies(store, session, folder_id, path, on_event).await?;
+    }
+    Ok(result)
+}
+
+/// Sends queued local changes of one account. Changes that fail are kept
+/// and retried on later syncs (a few times). Returns how many were sent.
+pub async fn flush_changes(
+    // `&mut` although only reading and writing rows: it keeps the future
+    // `Send` (a shared reference would need the connection to be `Sync`).
+    store: &mut Store,
+    session: &mut ImapSession,
+    caps: &Capabilities,
+    account_id: i64,
+) -> Result<usize> {
+    let ops = store.pending_ops(account_id)?;
+    let mut sent = 0;
+    let mut selected: Option<String> = None;
+    for op in ops {
+        if selected.as_deref() != Some(op.folder_path.as_str()) {
+            session.select(&op.folder_path).await?;
+            selected = Some(op.folder_path.clone());
+        }
+        match apply_change(session, caps, op.uid, &op.change).await {
+            Ok(()) => {
+                store.complete_op(op.id)?;
+                sent += 1;
+            }
+            Err(e) => {
+                tracing::warn!(op = op.id, error = %e, "could not send change");
+                store.fail_op(op.id, &e.to_string())?;
+                // A broken connection fails every following op too.
+                if matches!(
+                    e,
+                    crate::Error::Imap(async_imap::error::Error::ConnectionLost)
+                ) {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Ok(sent)
+}
+
+async fn apply_change(
+    session: &mut ImapSession,
+    caps: &Capabilities,
+    uid: u32,
+    change: &PendingChange,
+) -> Result<()> {
+    let uid = uid.to_string();
+    match change {
+        PendingChange::AddFlag(flag) => {
+            store_flags(session, &uid, &format!("+FLAGS.SILENT ({flag})")).await
+        }
+        PendingChange::RemoveFlag(flag) => {
+            store_flags(session, &uid, &format!("-FLAGS.SILENT ({flag})")).await
+        }
+        PendingChange::MoveTo(target) => {
+            if caps.r#move {
+                session.uid_mv(&uid, target).await?;
+                Ok(())
+            } else {
+                session.uid_copy(&uid, target).await?;
+                store_flags(session, &uid, "+FLAGS.SILENT (\\Deleted)").await?;
+                expunge(session, caps, &uid).await
+            }
+        }
+        PendingChange::Expunge => {
+            store_flags(session, &uid, "+FLAGS.SILENT (\\Deleted)").await?;
+            expunge(session, caps, &uid).await
+        }
+    }
+}
+
+async fn store_flags(session: &mut ImapSession, uid: &str, query: &str) -> Result<()> {
+    let _: Vec<_> = session.uid_store(uid, query).await?.try_collect().await?;
+    Ok(())
+}
+
+/// With UIDPLUS only this message is expunged; without it EXPUNGE removes
+/// every message marked deleted in the folder, as other clients expect.
+async fn expunge(session: &mut ImapSession, caps: &Capabilities, uid: &str) -> Result<()> {
+    if caps.uidplus {
+        let _: Vec<_> = session.uid_expunge(uid).await?.try_collect().await?;
     } else {
-        prefetch_bodies(store, session, folder_id, path, on_event).await?
-    };
-    Ok((uids.len(), bodies))
+        let _: Vec<_> = session.expunge().await?.try_collect().await?;
+    }
+    Ok(())
 }
 
 /// Downloads the content of recent messages that do not have it yet.

@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from './Icon.svelte'
   import { accountLabel, listDate } from './format'
-  import { isSeen, type MessageSummary } from './types'
+  import { isFlagged, isSeen, type MessageSummary } from './types'
 
   let {
     title,
@@ -51,7 +51,10 @@
         <button onclick={() => onselect(m.id)}>
           <span class="dot" aria-label={unread ? 'ungelesen' : undefined}></span>
           <span class="from">{m.header.from_name ?? m.header.from_addr ?? 'Unbekannt'}</span>
-          <time>{listDate(m.header.date)}</time>
+          <time>
+            {#if isFlagged(m)}<span class="flag" title="Markiert"><Icon name="star" size={12} filled /></span>{/if}
+            {listDate(m.header.date)}
+          </time>
           <span class="subject">
             {#if m.has_attachments}<Icon name="paperclip" size={13} />{/if}
             {m.header.subject ?? '(kein Betreff)'}{#if m.preview}<span class="preview"> – {m.preview}</span>{/if}
@@ -152,6 +155,11 @@
     font-size: 12px;
     color: var(--text-muted);
     white-space: nowrap;
+  }
+  .flag {
+    color: var(--ochre);
+    margin-right: 4px;
+    vertical-align: -1px;
   }
   .unread time {
     color: var(--accent-text);

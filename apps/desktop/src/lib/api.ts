@@ -81,3 +81,13 @@ export function openLink(url: string): Promise<void> {
 export function saveAttachment(id: number, part: number): Promise<string> {
   return native ? invoke('save_attachment', { id, part }) : mock.saveAttachment(id, part)
 }
+
+/** Marks messages read/unread or flagged; synced to the server later. */
+export function setFlag(ids: number[], flag: 'seen' | 'flagged', on: boolean): Promise<number> {
+  return native ? invoke('set_flag', { ids, flag, on }) : mock.setFlag(ids, flag, on)
+}
+
+/** Moves messages to the trash (or deletes them for good from the trash). */
+export function deleteMessages(ids: number[]): Promise<number> {
+  return native ? invoke('delete_messages', { ids }) : mock.deleteMessages(ids)
+}

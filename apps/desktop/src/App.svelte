@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, untrack } from 'svelte'
   import * as api from './lib/api'
   import AccountDialog from './lib/AccountDialog.svelte'
   import Icon from './lib/Icon.svelte'
@@ -7,7 +7,7 @@
   import ReadingPane from './lib/ReadingPane.svelte'
   import Sidebar from './lib/Sidebar.svelte'
   import { accountLabel } from './lib/format'
-  import type { MessageSummary, Overview, SyncUpdate, View } from './lib/types'
+  import { isFlagged, isSeen, type MessageSummary, type Overview, type SyncUpdate, type View } from './lib/types'
 
   let overview: Overview | null = $state(null)
   let view: View = $state({ kind: 'unified', role: 'inbox' })
@@ -100,6 +100,69 @@
     }
   }
 
+  // ----- actions on messages ---------------------------------------------
+
+  /** Applies a flag change locally at once; the backend syncs it later. */
+  async function setFlag(ids: number[], flag: 'seen' | 'flagged', on: boolean) {
+    const name = flag === 'seen' ? '\\Seen' : '\\Flagged'
+    for (const m of messages) {
+      if (!ids.includes(m.id)) continue
+      const flags = m.header.flags.filter((f) => f !== name)
+      if (on) flags.push(name)
+      m.header.flags = flags
+    }
+    try {
+      await api.setFlag(ids, flag, on)
+      if (flag === 'seen') refreshOverview()
+    } catch (e) {
+      errors = [...errors, String(e)]
+      load()
+    }
+  }
+
+  function toggleRead(m: MessageSummary) {
+    setFlag([m.id], 'seen', !isSeen(m))
+  }
+
+  function toggleFlag(m: MessageSummary) {
+    setFlag([m.id], 'flagged', !isFlagged(m))
+  }
+
+  let confirmDelete: MessageSummary | null = $state(null)
+
+  async function deleteMessage(m: MessageSummary, confirmed = false) {
+    // Messages in the trash are deleted for good: ask first.
+    if (m.folder_role === 'trash' && !confirmed) {
+      confirmDelete = m
+      return
+    }
+    confirmDelete = null
+    const index = messages.findIndex((x) => x.id === m.id)
+    try {
+      await api.deleteMessages([m.id])
+      messages = messages.filter((x) => x.id !== m.id)
+      if (selectedId === m.id) {
+        selectedId = messages[Math.min(index, messages.length - 1)]?.id ?? null
+      }
+      refreshOverview()
+    } catch (e) {
+      errors = [...errors, String(e)]
+    }
+  }
+
+  // Opening a message marks it read – once per opening, so "mark unread"
+  // on the open message sticks.
+  let autoMarkedId: number | null = null
+  $effect(() => {
+    const id = selectedId
+    untrack(() => {
+      if (id === null || id === autoMarkedId) return
+      autoMarkedId = id
+      const m = messages.find((x) => x.id === id)
+      if (m && !isSeen(m)) setFlag([m.id], 'seen', true)
+    })
+  })
+
   function moveSelection(delta: number) {
     if (messages.length === 0) return
     const index = messages.findIndex((m) => m.id === selectedId)
@@ -132,6 +195,13 @@
     } else if (e.key === 'ArrowUp' || e.key === 'k') {
       e.preventDefault()
       moveSelection(-1)
+    } else if (selected && e.key === 'u') {
+      toggleRead(selected)
+    } else if (selected && e.key === 's') {
+      toggleFlag(selected)
+    } else if (selected && (e.key === 'Delete' || e.key === '#')) {
+      e.preventDefault()
+      deleteMessage(selected)
     }
   }
 
@@ -208,10 +278,36 @@
         showAccount={searching || view.kind === 'unified'}
         onselect={(id) => (selectedId = id)}
       />
-      <ReadingPane message={selected} />
+      <ReadingPane
+        message={selected}
+        ontoggleread={toggleRead}
+        ontoggleflag={toggleFlag}
+        ondelete={(m) => deleteMessage(m)}
+      />
     </div>
   </main>
 </div>
+
+{#if confirmDelete}
+  {@const m = confirmDelete}
+  <div class="confirm-backdrop" role="presentation" onclick={() => (confirmDelete = null)}>
+    <div
+      class="confirm-box"
+      role="alertdialog"
+      aria-labelledby="confirm-title"
+      tabindex="-1"
+      onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => e.key === 'Escape' && (confirmDelete = null)}
+    >
+      <h2 id="confirm-title">Endgültig löschen?</h2>
+      <p>„{m.header.subject ?? '(kein Betreff)'}" liegt schon im Papierkorb und wird auch auf dem Server gelöscht. Das lässt sich nicht rückgängig machen.</p>
+      <div class="confirm-actions">
+        <button type="button" class="btn" onclick={() => (confirmDelete = null)}>Abbrechen</button>
+        <button type="button" class="btn danger" onclick={() => deleteMessage(m, true)}>Endgültig löschen</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if accountDialogOpen}
   <AccountDialog
@@ -224,6 +320,48 @@
 {/if}
 
 <style>
+  .confirm-backdrop {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: color-mix(in srgb, var(--pitch-black) 40%, transparent);
+    z-index: 20;
+  }
+  .confirm-box {
+    max-width: 440px;
+    padding: 18px 20px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--surface-raised);
+    box-shadow: 0 12px 40px color-mix(in srgb, var(--pitch-black) 30%, transparent);
+  }
+  .confirm-box h2 {
+    margin: 0 0 8px;
+    font-size: 16px;
+  }
+  .confirm-box p {
+    margin: 0;
+    font-size: 13px;
+  }
+  .confirm-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 16px;
+  }
+  .btn {
+    padding: 6px 12px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    font-weight: 600;
+  }
+  .btn.danger {
+    background: var(--danger);
+    border-color: transparent;
+    color: #ffffff;
+  }
   .app {
     display: grid;
     grid-template-columns: 240px 1fr;
