@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import { cubicOut } from 'svelte/easing'
+  import { slide } from 'svelte/transition'
   import Icon from './Icon.svelte'
   import { getBrandLogo, subscribeLogos } from './brandLogos'
   import { accountLabel, listDate } from './format'
@@ -32,6 +34,9 @@
   let listEl: HTMLUListElement | undefined = $state()
   let logoVersion = $state(0)
   let expandedThreadKeys = $state<Set<string>>(new Set())
+
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const EXPAND_MS = reduceMotion ? 0 : 180
 
   onMount(() =>
     subscribeLogos(() => {
@@ -291,24 +296,28 @@
               {#if showAccount}<span class="account">{accountLabel(m.account_email)}</span>{/if}
             </button>
           </li>
-        {:else if !isExpanded}
+        {:else}
           <li
-            class="thread-collapsed"
+            class="thread-item"
+            class:expanded={isExpanded}
             class:unread={group.hasUnread}
             class:case-highlighted={isHighlighted}
           >
             <button
               type="button"
+              class="thread-toggle"
               class:has-brand={!!logo}
               onclick={() => toggleThread(group.key)}
-              aria-expanded={false}
-              title="Unterhaltung aufklappen"
+              aria-expanded={isExpanded}
+              title={isExpanded ? 'Unterhaltung zuklappen' : 'Unterhaltung aufklappen'}
             >
               {#if logo?.bg}
                 <span class="brand-wash" style:--brand-wash={logo.bg} aria-hidden="true"></span>
               {/if}
               <span class="dot" aria-label={group.hasUnread ? 'ungelesen' : undefined}></span>
-              <span class="thread-chevron" aria-hidden="true"><Icon name="chevronRight" size={13} /></span>
+              <span class="thread-chevron" class:rotated={isExpanded} aria-hidden="true">
+                <Icon name="chevronRight" size={13} />
+              </span>
               {#if logo}
                 <span class="brand" aria-hidden="true">
                   <img
@@ -326,55 +335,45 @@
               </time>
               <span class="subject">
                 {#if group.hasAttachments}<Icon name="paperclip" size={13} />{/if}
-                {cleanSubject(m.header.subject)}{#if m.preview}<span class="preview"> – {m.preview}</span>{/if}
+                {cleanSubject(m.header.subject)}{#if !isExpanded && m.preview}<span class="preview"> – {m.preview}</span>{/if}
               </span>
-              {#if showAccount}<span class="account">{accountLabel(m.account_email)}</span>{/if}
+              {#if showAccount && !isExpanded}<span class="account">{accountLabel(m.account_email)}</span>{/if}
             </button>
-            <div class="thread-stack-lip" aria-hidden="true"></div>
-          </li>
-        {:else}
-          <li class="thread-frame" class:case-highlighted={isHighlighted}>
-            <button
-              type="button"
-              class="thread-head"
-              onclick={() => toggleThread(group.key)}
-              aria-expanded={true}
-              title="Unterhaltung zuklappen"
-            >
-              <Icon name="chevronDown" size={14} />
-              <span class="thread-title">{cleanSubject(m.header.subject)}</span>
-              <span class="thread-participants">{group.participants}</span>
-            </button>
-            <div class="thread-messages">
-              {#each group.items as item (item.id)}
-                {@const itemUnread = !isSeen(item)}
-                {@const isOutgoing = item.folder_role === 'sent'}
-                <button
-                  type="button"
-                  data-id={item.id}
-                  class="thread-msg"
-                  class:in={!isOutgoing}
-                  class:out={isOutgoing}
-                  class:selected={item.id === selectedId}
-                  class:unread={itemUnread}
-                  onclick={() => onselect(item.id)}
-                >
-                  <div class="thread-msg-top">
-                    <span class="thread-msg-sender">
-                      {#if itemUnread}<span class="inline-dot" aria-label="ungelesen"></span>{/if}
-                      {isOutgoing ? 'Du · Gesendet' : (item.header.from_name ?? item.header.from_addr ?? 'Unbekannt')}
-                    </span>
-                    <time>
-                      {#if item.has_attachments}<Icon name="paperclip" size={11} />{/if}
-                      {listDate(item.header.date)}
-                    </time>
-                  </div>
-                  <div class="thread-msg-preview">
-                    {item.preview ?? item.header.subject ?? '(kein Text)'}
-                  </div>
-                </button>
-              {/each}
-            </div>
+
+            {#if !isExpanded}
+              <div class="thread-stack-lip" aria-hidden="true"></div>
+            {:else}
+              <div class="thread-messages" transition:slide={{ duration: EXPAND_MS, easing: cubicOut }}>
+                {#each group.items as item (item.id)}
+                  {@const itemUnread = !isSeen(item)}
+                  {@const isOutgoing = item.folder_role === 'sent'}
+                  <button
+                    type="button"
+                    data-id={item.id}
+                    class="thread-msg"
+                    class:in={!isOutgoing}
+                    class:out={isOutgoing}
+                    class:selected={item.id === selectedId}
+                    class:unread={itemUnread}
+                    onclick={() => onselect(item.id)}
+                  >
+                    <div class="thread-msg-top">
+                      <span class="thread-msg-sender">
+                        {#if itemUnread}<span class="inline-dot" aria-label="ungelesen"></span>{/if}
+                        {isOutgoing ? 'Du · Gesendet' : (item.header.from_name ?? item.header.from_addr ?? 'Unbekannt')}
+                      </span>
+                      <time>
+                        {#if item.has_attachments}<Icon name="paperclip" size={11} />{/if}
+                        {listDate(item.header.date)}
+                      </time>
+                    </div>
+                    <div class="thread-msg-preview">
+                      {item.preview ?? item.header.subject ?? '(kein Text)'}
+                    </div>
+                  </button>
+                {/each}
+              </div>
+            {/if}
           </li>
         {/if}
       {/each}
@@ -422,7 +421,7 @@
     overflow-y: auto;
     flex: 1;
   }
-  li > button:not(.thread-head) {
+  li > button {
     position: relative;
     overflow: hidden;
     width: 100%;
@@ -495,7 +494,7 @@
     position: relative;
     z-index: 1;
   }
-  li > button:not(.thread-head):hover {
+  li > button:hover {
     background: var(--hover);
   }
   li.selected > button {
@@ -588,19 +587,31 @@
   .back-btn:hover {
     background: var(--hover);
   }
-  li.case-highlighted > button:not(.thread-head),
-  li.thread-frame.case-highlighted {
+  li.case-highlighted > button,
+  li.thread-item.case-highlighted {
     background: color-mix(in srgb, var(--highlight) 12%, transparent);
     box-shadow: inset 3px 0 0 var(--highlight);
   }
 
-  /* Collapsed thread: stacked-card edge below the row, no counter */
-  .thread-collapsed {
+  /* Thread item: unified header with animated chevron + sliding body */
+  .thread-item {
     margin: 3px 0 6px;
+    transition: margin 180ms cubic-bezier(0.22, 1, 0.36, 1);
   }
-  .thread-collapsed > button {
+  .thread-item.expanded {
+    margin: 6px 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    overflow: hidden;
+  }
+  .thread-item:not(.expanded) > .thread-toggle {
     border: 1px solid var(--border);
     background: var(--surface-raised);
+  }
+  .thread-item.expanded > .thread-toggle {
+    border-radius: 0;
+    border-bottom: 1px solid var(--border);
   }
   .thread-chevron {
     grid-area: sub-left;
@@ -609,6 +620,10 @@
     justify-self: center;
     display: inline-flex;
     color: var(--text-muted);
+    transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .thread-chevron.rotated {
+    transform: rotate(90deg);
   }
   .thread-stack-lip {
     height: 5px;
@@ -619,48 +634,6 @@
     border-bottom-left-radius: 6px;
     border-bottom-right-radius: 6px;
     background: var(--surface);
-  }
-
-  /* Expanded thread: enclosing frame with chat-aligned messages */
-  .thread-frame {
-    margin: 6px 0;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--surface);
-    overflow: hidden;
-  }
-  .thread-head {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 10px;
-    border: 0;
-    border-bottom: 1px solid var(--border);
-    background: none;
-    text-align: left;
-    color: var(--text-muted);
-  }
-  .thread-head:hover {
-    background: var(--hover);
-    color: var(--text);
-  }
-  .thread-title {
-    font-size: 12px;
-    font-weight: 650;
-    color: var(--text);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .thread-participants {
-    margin-left: auto;
-    font-size: 11px;
-    color: var(--text-muted);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 40%;
   }
   .thread-messages {
     display: flex;
