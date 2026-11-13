@@ -38,6 +38,8 @@
   let hoveredCaseId = $state<number | null>(null)
   /** The mail of all cases, wherever it is stored (not only the visible list). */
   let caseMessages = $state<MessageSummary[]>([])
+  /** Your own replies to the listed mail, from the Sent folders. */
+  let replyMessages = $state<MessageSummary[]>([])
   let query = $state('')
   let searchInput: HTMLInputElement | undefined = $state()
   let syncing = $state(false)
@@ -86,7 +88,7 @@
   const messagePool = $derived.by(() => {
     if (api.isMock) return mock.allMockMessages()
     const byId = new Map(messages.map((m) => [m.id, m]))
-    for (const m of caseMessages) if (!byId.has(m.id)) byId.set(m.id, m)
+    for (const m of [...caseMessages, ...replyMessages]) if (!byId.has(m.id)) byId.set(m.id, m)
     return [...byId.values()]
   })
   const selected = $derived(messagePool.find((m) => m.id === selectedId) ?? null)
@@ -133,11 +135,26 @@
       const result = searching ? await api.search(query.trim()) : await api.messages(view)
       if (seq !== requestSeq) return
       messages = result
-      if (!result.some((m) => m.id === selectedId)) selectedId = null
+      const kept = [...result, ...replyMessages, ...caseMessages]
+      if (!kept.some((m) => m.id === selectedId)) selectedId = null
+      loadReplies(result, seq)
     } catch (e) {
       errors = [...errors, String(e)]
     } finally {
       if (seq === requestSeq) loading = false
+    }
+  }
+
+  async function loadReplies(list: MessageSummary[], seq: number) {
+    const ids = list
+      .filter((m) => m.folder_role !== 'sent')
+      .map((m) => m.header.message_id)
+      .filter((id): id is string => !!id)
+    try {
+      const replies = ids.length > 0 ? await api.sentReplies(ids) : []
+      if (seq === requestSeq) replyMessages = replies
+    } catch (e) {
+      console.warn('Eigene Antworten nicht geladen', e)
     }
   }
 
@@ -793,11 +810,14 @@
   .pane-slot {
     position: relative;
     display: flex;
+    flex-direction: column;
     min-width: 0;
     min-height: 0;
   }
-  .pane-slot > :global(.pane) {
+  .pane-slot > :global(.pane),
+  .pane-slot > :global(.board) {
     flex: 1;
+    min-height: 0;
   }
   .compose {
     display: flex;
@@ -895,11 +915,16 @@
     color: #ffffff;
   }
   .pane-backbar {
+    flex-shrink: 0;
     padding: 6px 16px;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
   }
   .pane-backbtn {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     border: 0;
     background: none;
     padding: 2px 4px;

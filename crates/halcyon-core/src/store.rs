@@ -1658,6 +1658,52 @@ impl Store {
         )?)
     }
 
+    /// One-time job: removes `conversation` cases the linker created
+    /// before plain mail exchanges became threads in the list. Cases with a
+    /// manual event stay. Runs once (a marker in `meta`).
+    pub fn prune_auto_conversations(&self) -> Result<usize> {
+        const MARKER: &str = "cases.prune_conversations.v1";
+        let done: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM meta WHERE key = ?1)",
+            [MARKER],
+            |r| r.get(0),
+        )?;
+        if done {
+            return Ok(0);
+        }
+        let removed = self.conn.execute(
+            "DELETE FROM cases
+             WHERE kind = 'conversation'
+               AND id NOT IN (SELECT DISTINCT case_id FROM case_events WHERE manual = 1)",
+            [],
+        )?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, unixepoch())",
+            [MARKER],
+        )?;
+        Ok(removed)
+    }
+
+    /// Your own replies (in a Sent folder) to any of these `Message-ID`s, so
+    /// a list of incoming mail can show whole threads.
+    pub fn sent_replies_to(&self, rfc_ids: &[String]) -> Result<Vec<MessageSummary>> {
+        let mut out = Vec::new();
+        for chunk in rfc_ids.chunks(500) {
+            let marks = vec!["?"; chunk.len()].join(", ");
+            let sql = format!(
+                "{SUMMARY_SELECT}
+                 WHERE f.role = 'sent' AND m.in_reply_to IN ({marks})
+                 ORDER BY m.date ASC"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk), summary_from_row)?;
+            for r in rows {
+                out.push(r?);
+            }
+        }
+        Ok(out)
+    }
+
     fn touch_case(&self, case_id: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE cases SET updated_at = unixepoch() WHERE id = ?1",

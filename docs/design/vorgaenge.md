@@ -118,8 +118,10 @@ Schnittstellen legt Claude in Aufgabe A fest, bevor B–E starten.
 - F in Version 1 (`linker.rs`):
   - Bestellungen über Bestell- oder Sendungsnummer bzw. Artikelname desselben
     Absenders.
-  - Gespräche über Antwort-Header, nur wenn du selbst und jemand anderes
-    geschrieben haben.
+  - Einfache Gespräche sind keine Vorgänge, sondern Threads: Die
+    Nachrichtenliste fasst sie über die Antwort-Header zusammen, samt deinen
+    Antworten aus „Gesendet“. Früher erzeugte Gesprächskarten werden einmal
+    entfernt.
   - Versanddienste starten keinen Vorgang.
   - Betrachtet werden Mails der letzten 120 Tage. Offene Vorgänge ohne
     Neuigkeiten gelten nach 21 Tagen als erledigt.

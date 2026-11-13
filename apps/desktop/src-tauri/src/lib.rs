@@ -1210,6 +1210,21 @@ fn set_case_status(state: State<'_, AppState>, id: i64, status: String) -> CmdRe
         .map_err(err)
 }
 
+/// Your own replies to the listed mail, so the list can show whole threads.
+#[tauri::command]
+fn sent_replies(
+    state: State<'_, AppState>,
+    message_ids: Vec<String>,
+) -> CmdResult<Vec<MessageSummary>> {
+    let ids: Vec<String> = message_ids.into_iter().take(5_000).collect();
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .sent_replies_to(&ids)
+        .map_err(err)
+}
+
 /// The mail of a case, wherever it is stored.
 #[tauri::command]
 fn messages_by_ids(state: State<'_, AppState>, ids: Vec<i64>) -> CmdResult<Vec<MessageSummary>> {
@@ -1324,7 +1339,8 @@ pub fn run() {
             clear_brand_logos,
             cases,
             set_case_status,
-            messages_by_ids
+            messages_by_ids,
+            sent_replies
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Halcyon app");

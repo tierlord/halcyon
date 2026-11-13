@@ -98,39 +98,15 @@ export function createMockCases(messages: MessageSummary[]): {
   const findIds = (needle: RegExp) =>
     messages.filter((m) => needle.test(m.header.subject ?? '') || needle.test(m.header.from_addr ?? '')).map((m) => m.id)
 
-  const kleinanzeigenIds = findIds(/Rennrad 28 Zoll/)
   const stadtwerkeStrom = findId(/Abschlagsrechnung Strom/)
   const stadtwerkeJahr = findId(/Jahresabrechnung 2025/)
   const shopOrder = findId(/20 % auf alles/)
-  const kranzIds = findIds(/Ersatzteile|Angebot vom Dienstag/)
   const reiseId = findId(/Hamburg/)
   const fotobuchId = findId(/Fotobuch/)
   const versicherungId = findId(/Vertrag Nr\. 2026-1184/)
   const bankId = findId(/Neue Dokumente/)
 
   const cases: CaseItem[] = [
-    {
-      id: 1,
-      title: 'Rennrad 28 Zoll',
-      counterparty: 'Kleinanzeigen · Interessent',
-      domain: 'kleinanzeigen.example',
-      kind: 'conversation',
-      status: 'needs_you',
-      nextStep: 'Rückfrage zur Abholung am Samstag beantworten',
-      dueLabel: 'Heute',
-      reason: 'Verknüpft über Anzeigentitel „Rennrad 28 Zoll“ und Thread-Header',
-      keys: [
-        { label: 'Anzeige', value: 'Rennrad 28 Zoll' },
-        { label: 'Gegenüber', value: 'Kleinanzeigen' },
-      ],
-      events: [
-        { id: 1, day: dayOffset(-2), label: 'Anzeige online', phase: 'start', messageId: kleinanzeigenIds[2], direction: 'in' },
-        { id: 2, day: dayOffset(-1), label: 'Erste Anfrage', phase: 'update', messageId: kleinanzeigenIds[1], direction: 'in' },
-        { id: 3, day: dayOffset(-1), label: 'Deine Antwort', phase: 'update', messageId: kleinanzeigenIds[3], direction: 'out' },
-        { id: 4, day: dayOffset(0), label: 'Neue Rückfrage', phase: 'due', messageId: kleinanzeigenIds[0], direction: 'in' },
-      ],
-      messageIds: kleinanzeigenIds.filter((id): id is number => id != null),
-    },
     {
       id: 2,
       title: 'Jahresabrechnung Strom',
@@ -154,27 +130,6 @@ export function createMockCases(messages: MessageSummary[]): {
         { id: 'att-sw-1', name: 'Jahresabrechnung_2025.pdf', sizeLabel: '420 KB', messageId: stadtwerkeJahr ?? stadtwerkeStrom },
       ],
       messageIds: [stadtwerkeJahr, stadtwerkeStrom].filter((id): id is number => id != null),
-    },
-    {
-      id: 3,
-      title: 'Angebot Ersatzteile',
-      counterparty: 'Sabine Kranz · Zulieferer',
-      domain: null,
-      kind: 'support',
-      status: 'waiting',
-      nextStep: 'Wartet auf Auftragsbestätigung nach deiner Antwort',
-      dueLabel: 'bis Fr',
-      reason: 'Verknüpft über Thread-Header (In-Reply-To / References)',
-      keys: [{ label: 'Kontakt', value: 'kranz@zulieferer.example' }],
-      events: [
-        { id: 7, day: dayOffset(-1), label: 'Angebot erhalten', phase: 'start', messageId: kranzIds[0], direction: 'in' },
-        { id: 8, day: dayOffset(0), label: 'Freigabe gesendet', phase: 'update', messageId: kranzIds[1], direction: 'out' },
-        { id: 9, day: dayOffset(3), label: 'Rückmeldung erwartet', phase: 'due' },
-      ],
-      attachments: [
-        { id: 'att-kranz-1', name: 'Angebot_Ersatzteile.pdf', sizeLabel: '185 KB', messageId: kranzIds[0] },
-      ],
-      messageIds: kranzIds,
     },
     {
       id: 4,
