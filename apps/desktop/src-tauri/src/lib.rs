@@ -4,6 +4,8 @@
 //! database connection; a sync opens its own, which SQLite's WAL mode lets
 //! run alongside the UI's reads.
 
+mod watch;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -29,6 +31,7 @@ struct AppState {
     flushing: AtomicBool,
     /// … and more changes arrived while it ran.
     flush_again: AtomicBool,
+    watchers: watch::Watchers,
     /// Servers a freshly typed password may go to, per lower-cased address.
     ///
     /// The account dialog asks for the password only after the server check
@@ -225,6 +228,7 @@ async fn check_server(
 
 #[tauri::command]
 async fn save_account(
+    app: AppHandle,
     state: State<'_, AppState>,
     mut account: Account,
     password: Option<String>,
@@ -329,11 +333,15 @@ async fn save_account(
         .map_err(err)?;
     }
 
+    // The new or changed account gets a live watcher, and a first sync
+    // creates its folders.
+    watch::restart(&app);
+    begin_sync(&app);
     Ok(saved)
 }
 
 #[tauri::command]
-async fn delete_account(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
+async fn delete_account(app: AppHandle, state: State<'_, AppState>, id: i64) -> CmdResult<()> {
     let email = {
         let store = state.store.lock().map_err(err)?;
         let accounts = store.accounts().map_err(err)?;
@@ -354,6 +362,7 @@ async fn delete_account(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
     .map_err(err)?
     .map_err(err)?;
 
+    watch::restart(&app);
     Ok(())
 }
 
@@ -388,10 +397,17 @@ enum SyncUpdate {
 /// Starts syncing all accounts in the background. Progress arrives as
 /// `sync` events; a second call while a sync runs is ignored.
 #[tauri::command]
-fn start_sync(app: AppHandle, state: State<'_, AppState>) -> CmdResult<bool> {
+fn start_sync(app: AppHandle) -> CmdResult<bool> {
+    Ok(begin_sync(&app))
+}
+
+/// Starts a full sync of all accounts unless one is running.
+fn begin_sync(app: &AppHandle) -> bool {
+    let state = app.state::<AppState>();
     if state.syncing.swap(true, Ordering::SeqCst) {
-        return Ok(false);
+        return false;
     }
+    let app = app.clone();
     let db_path = state.db_path.clone();
     tauri::async_runtime::spawn(async move {
         let new_messages = run_sync(&app, &db_path).await;
@@ -408,7 +424,7 @@ fn start_sync(app: AppHandle, state: State<'_, AppState>) -> CmdResult<bool> {
             schedule_flush(&app);
         }
     });
-    Ok(true)
+    true
 }
 
 async fn run_sync(app: &AppHandle, db_path: &std::path::Path) -> usize {
@@ -785,7 +801,16 @@ pub fn run() {
             syncing: AtomicBool::new(false),
             flushing: AtomicBool::new(false),
             flush_again: AtomicBool::new(false),
+            watchers: watch::Watchers::default(),
             verified_servers: Mutex::new(HashMap::new()),
+        })
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            // Live mail from the start: watchers per account and one full
+            // sync to catch up on what arrived while the app was closed.
+            watch::restart(app.handle());
+            begin_sync(app.handle());
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             overview,

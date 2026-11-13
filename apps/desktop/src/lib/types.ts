@@ -116,5 +116,10 @@ export interface MessageView {
   attachments: Attachment[]
 }
 
+export type LiveState =
+  | { state: 'push'; email: string }
+  | { state: 'polling'; email: string }
+  | { state: 'offline'; email: string; error: string }
+
 export const isSeen = (m: MessageSummary) => m.header.flags.includes('\\Seen')
 export const isFlagged = (m: MessageSummary) => m.header.flags.includes('\\Flagged')

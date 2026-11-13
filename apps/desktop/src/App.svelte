@@ -7,7 +7,15 @@
   import ReadingPane from './lib/ReadingPane.svelte'
   import Sidebar from './lib/Sidebar.svelte'
   import { accountLabel } from './lib/format'
-  import { isFlagged, isSeen, type MessageSummary, type Overview, type SyncUpdate, type View } from './lib/types'
+  import {
+    isFlagged,
+    isSeen,
+    type LiveState,
+    type MessageSummary,
+    type Overview,
+    type SyncUpdate,
+    type View,
+  } from './lib/types'
 
   let overview: Overview | null = $state(null)
   let view: View = $state({ kind: 'unified', role: 'inbox' })
@@ -20,6 +28,9 @@
   let syncStatus = $state('')
   let errors: string[] = $state([])
   let accountDialogOpen = $state(false)
+  let live: Record<string, LiveState> = $state({})
+  const liveStates = $derived(Object.values(live))
+  const liveOffline = $derived(liveStates.filter((s) => s.state === 'offline'))
 
   const selected = $derived(messages.find((m) => m.id === selectedId) ?? null)
   const searching = $derived(query.trim().length > 0)
@@ -208,9 +219,18 @@
   onMount(() => {
     refreshOverview()
     load()
-    const unlisten = api.onSync(handleSync)
+    const unlisteners = [
+      api.onSync(handleSync),
+      api.onLive((s) => (live = { ...live, [s.email]: s })),
+      // Background changes: refresh counts and the visible list, keeping the
+      // selection (load() keeps it if the message still exists).
+      api.onMailChanged(() => {
+        refreshOverview()
+        if (!searching) load()
+      }),
+    ]
     return () => {
-      unlisten.then((f) => f())
+      unlisteners.forEach((u) => u.then((f) => f()))
     }
   })
 </script>
@@ -243,6 +263,24 @@
 
       <div class="status" aria-live="polite">
         {#if api.isMock}<span class="mock">Testdaten</span>{/if}
+        {#if liveStates.length}
+          <span
+            class="live"
+            class:offline={liveOffline.length > 0}
+            title={liveStates
+              .map((s) =>
+                s.state === 'push'
+                  ? `${s.email}: live`
+                  : s.state === 'polling'
+                    ? `${s.email}: wird alle 5 Minuten geprüft`
+                    : `${s.email}: offline – ${s.error}`,
+              )
+              .join('\n')}
+          >
+            <span class="dot"></span>
+            {liveOffline.length ? `${liveOffline.length} offline` : 'Live'}
+          </span>
+        {/if}
         <span>{syncStatus}</span>
       </div>
 
@@ -422,6 +460,25 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .live {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-weight: 600;
+    color: var(--accent-text);
+  }
+  .live .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--blue-green);
+  }
+  .live.offline {
+    color: var(--text-muted);
+  }
+  .live.offline .dot {
+    background: var(--ochre);
   }
   .mock {
     padding: 1px 8px;

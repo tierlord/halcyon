@@ -402,6 +402,85 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
+/// How long one IDLE lasts before it is renewed. RFC 2177 asks clients to
+/// re-issue IDLE at least every 29 minutes; many NAT routers drop idle TCP
+/// connections much sooner, so stay well below.
+pub const IDLE_RENEW: std::time::Duration = std::time::Duration::from_secs(9 * 60);
+
+/// Waits on the selected mailbox until the server reports a change or
+/// `timeout` passes. Returns the session for further use and whether
+/// something changed.
+pub async fn idle_wait(
+    session: ImapSession,
+    timeout: std::time::Duration,
+) -> Result<(ImapSession, bool)> {
+    use async_imap::extensions::idle::IdleResponse;
+
+    let mut handle = session.idle();
+    handle.init().await?;
+    let (wait, _stop) = handle.wait_with_timeout(timeout);
+    let response = wait.await?;
+    let session = handle.done().await?;
+    // Unsolicited responses (EXISTS, FETCH, …) queue up in a bounded
+    // channel; a long-lived session must empty it or it eventually blocks.
+    while session.unsolicited_responses.try_recv().is_ok() {}
+    Ok((session, matches!(response, IdleResponse::NewData(_))))
+}
+
+/// Result of a quick inbox sync.
+#[derive(Debug, Default)]
+pub struct InboxReport {
+    pub new_messages: usize,
+    pub removed: usize,
+    pub flags_updated: usize,
+}
+
+/// Brings only the inbox up to date: sends queued changes, then fetches new
+/// messages, flag changes and deletions of the inbox. Used after IDLE
+/// reported a change, so new mail shows up within seconds.
+///
+/// Returns `None` if the account was never fully synced (no inbox known
+/// yet); callers then run [`sync_account`].
+pub async fn sync_inbox(
+    store: &mut Store,
+    session: &mut ImapSession,
+    caps: &Capabilities,
+    account: &Account,
+) -> Result<Option<InboxReport>> {
+    flush_changes(store, session, caps, account.id).await?;
+    let Some(inbox) = store
+        .folders(account.id)?
+        .into_iter()
+        .find(|f| f.role == Some(FolderRole::Inbox))
+    else {
+        return Ok(None);
+    };
+    let r = sync_folder(
+        store,
+        session,
+        caps,
+        inbox.id,
+        &inbox.path,
+        false,
+        &mut |_| {},
+    )
+    .await?;
+    Ok(Some(InboxReport {
+        new_messages: r.new_messages,
+        removed: r.removed,
+        flags_updated: r.flags_updated,
+    }))
+}
+
+/// The inbox's server path for an account, if known.
+pub fn inbox_path(store: &Store, account_id: i64) -> Result<Option<String>> {
+    Ok(store
+        .folders(account_id)?
+        .into_iter()
+        .find(|f| f.role == Some(FolderRole::Inbox))
+        .map(|f| f.path))
+}
+
 /// Downloads one complete message (e.g. when an old or large message is
 /// opened). Takes no store, so callers can hold their database connection
 /// only briefly around it.

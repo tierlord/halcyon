@@ -6,6 +6,7 @@ import { listen } from '@tauri-apps/api/event'
 import type {
   Account,
   DiscoverResult,
+  LiveState,
   MessageView,
   MessageSummary,
   Overview,
@@ -42,6 +43,22 @@ export function startSync(): Promise<boolean> {
 export async function onSync(handler: (u: SyncUpdate) => void): Promise<() => void> {
   if (!native) return mock.onSync(handler)
   return listen<SyncUpdate>('sync', (e) => handler(e.payload))
+}
+
+/** Live watchers: connected with push, polling, or offline. */
+export async function onLive(handler: (s: LiveState) => void): Promise<() => void> {
+  if (!native) return () => {}
+  return listen<LiveState>('live', (e) => handler(e.payload))
+}
+
+/** An inbox changed in the background (new, removed or re-flagged mail). */
+export async function onMailChanged(
+  handler: (c: { account_id: number; new_messages: number }) => void,
+): Promise<() => void> {
+  if (!native) return () => {}
+  return listen<{ account_id: number; new_messages: number }>('mail-changed', (e) =>
+    handler(e.payload),
+  )
 }
 
 export function listAccounts(): Promise<Account[]> {

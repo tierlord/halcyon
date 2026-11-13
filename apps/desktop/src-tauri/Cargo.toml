@@ -20,8 +20,9 @@ tauri-build = { version = "2.7.4", features = [] }
 halcyon-core = { path = "../../../crates/halcyon-core" }
 serde = { version = "1.0", features = ["derive"] }
 tauri = { version = "2.12.5", features = [] }
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "time"] }
 directories = "6.0.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tauri-plugin-opener = "2"
+tauri-plugin-notification = "2"
