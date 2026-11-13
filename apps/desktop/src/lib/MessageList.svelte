@@ -222,9 +222,6 @@
           class:chat-out={isOutgoing}
         >
           <button class:has-brand={!!logo} onclick={() => onselect(m.id)}>
-            {#if logo?.bg}
-              <span class="brand-wash" style:--brand-wash={logo.bg} aria-hidden="true"></span>
-            {/if}
             <span class="dot" aria-label={unread ? 'ungelesen' : undefined}></span>
             {#if logo}
               <span class="brand" aria-hidden="true">
@@ -270,9 +267,6 @@
             class:case-highlighted={isHighlighted}
           >
             <button class:has-brand={!!logo} onclick={() => onselect(m.id)}>
-              {#if logo?.bg}
-                <span class="brand-wash" style:--brand-wash={logo.bg} aria-hidden="true"></span>
-              {/if}
               <span class="dot" aria-label={unread ? 'ungelesen' : undefined}></span>
               {#if logo}
                 <span class="brand" aria-hidden="true">
@@ -311,9 +305,6 @@
               aria-expanded={isExpanded}
               title={isExpanded ? 'Unterhaltung zuklappen' : 'Unterhaltung aufklappen'}
             >
-              {#if logo?.bg}
-                <span class="brand-wash" style:--brand-wash={logo.bg} aria-hidden="true"></span>
-              {/if}
               <span class="dot" aria-label={group.hasUnread ? 'ungelesen' : undefined}></span>
               <span class="thread-chevron" class:rotated={isExpanded} aria-hidden="true">
                 <Icon name="chevronRight" size={13} />
@@ -440,34 +431,20 @@
     text-align: left;
   }
   li > button.has-brand {
-    grid-template-columns: 12px 30px 1fr auto;
+    grid-template-columns: 12px 32px 1fr auto;
     grid-template-areas:
       'dot brand from date'
       'sub-left brand subject account';
-  }
-  .brand-wash {
-    --wash-edge: color-mix(in srgb, var(--brand-wash) var(--wash-mix), var(--bg));
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    z-index: 0;
-    background: linear-gradient(
-      90deg,
-      var(--wash-edge) 0%,
-      var(--wash-edge) 44px,
-      color-mix(in srgb, var(--wash-edge) 42%, transparent) 92px,
-      transparent 165px
-    );
-  }
-  li.selected > button .brand-wash {
-    left: 3px;
   }
   .brand {
     grid-area: brand;
     position: relative;
     z-index: 1;
-    width: 30px;
-    height: 30px;
+    width: 32px;
+    height: 32px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -475,16 +452,16 @@
     flex-shrink: 0;
   }
   .brand img {
-    width: 24px;
-    height: 24px;
+    width: 22px;
+    height: 22px;
     object-fit: contain;
     display: block;
   }
   .brand img.opaque {
-    width: 28px;
-    height: 28px;
+    width: 100%;
+    height: 100%;
     object-fit: cover;
-    border-radius: 6px;
+    border-radius: calc(var(--radius) - 1px);
   }
   .dot,
   .from,

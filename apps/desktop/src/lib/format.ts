@@ -20,12 +20,33 @@ export function longDate(ts: number | null): string {
   return ts == null ? '' : long.format(new Date(ts * 1000))
 }
 
-/** "Max Muster" → "MM", "rechnung@telekom.de" → "R". */
+const INITIAL_STOP_WORDS = new Set([
+  'über',
+  'via',
+  'von',
+  'by',
+  'for',
+  'für',
+  'and',
+  'und',
+  'at',
+  'bei',
+  'mit',
+  'with',
+  'de',
+  'van',
+  'der',
+  'die',
+  'das',
+])
+
+/** "Max Muster" → "MM", "Sensonics über Kleinanzeigen" → "SK", "rechnung@telekom.de" → "R". */
 export function initials(name: string | null, addr: string | null): string {
   const source = (name ?? addr ?? '?').trim()
   const words = source.split(/\s+/).filter((w) => /\p{L}/u.test(w))
-  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase()
-  return source[0]?.toUpperCase() ?? '?'
+  const significant = words.filter((w, i) => i === 0 || !INITIAL_STOP_WORDS.has(w.toLowerCase()))
+  if (significant.length >= 2) return (significant[0][0] + significant[1][0]).toUpperCase()
+  return (significant[0]?.[0] ?? source[0] ?? '?').toUpperCase()
 }
 
 /** Short label for an account, e.g. "example.org". */

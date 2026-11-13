@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte'
   import * as api from './api'
+  import { getBrandLogo, subscribeLogos } from './brandLogos'
   import Icon from './Icon.svelte'
   import { initials, longDate } from './format'
   import { isAppDark } from './theme.svelte'
@@ -47,6 +48,13 @@
   }
 
   const appDark = $derived(isAppDark())
+  let logoVersion = $state(0)
+  $effect(() => subscribeLogos(() => { logoVersion++ }))
+  const senderLogo = $derived.by(() => {
+    void logoVersion
+    if (!message || message.folder_role === 'sent' || !message.header.dmarc_pass) return null
+    return getBrandLogo(message.header.from_addr)
+  })
 
   // Requests can overlap while flipping through messages; only the newest
   // result is shown.
@@ -221,7 +229,18 @@
       <h1>{h.subject ?? '(kein Betreff)'}</h1>
 
       <div class="sender">
-        <div class="avatar" aria-hidden="true">{initials(h.from_name, h.from_addr)}</div>
+        {#if senderLogo}
+          <div class="avatar brand" aria-hidden="true">
+            <img
+              src={senderLogo.dataUrl}
+              alt=""
+              class:opaque={!senderLogo.padded}
+              style:transform={senderLogo.scale !== 1 ? `scale(${senderLogo.scale})` : undefined}
+            />
+          </div>
+        {:else}
+          <div class="avatar" aria-hidden="true">{initials(h.from_name, h.from_addr)}</div>
+        {/if}
         <div class="who">
           <div class="name">{h.from_name ?? h.from_addr}</div>
           {#if h.from_name}<div class="addr">{h.from_addr}</div>{/if}
@@ -435,6 +454,26 @@
     font-weight: 650;
     background: var(--accent-fill);
     color: var(--on-accent-fill);
+  }
+  .avatar.brand {
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  .avatar.brand img {
+    width: 28px;
+    height: 28px;
+    object-fit: contain;
+    display: block;
+  }
+  .avatar.brand img.opaque {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
   }
   .who {
     flex: 1;
