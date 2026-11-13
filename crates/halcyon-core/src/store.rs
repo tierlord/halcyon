@@ -220,7 +220,8 @@ CREATE TABLE cases (
     next_step    TEXT NOT NULL,
     due_at       INTEGER,
     due_label    TEXT,
-    amount       TEXT,
+    amount_cents INTEGER,
+    currency     TEXT,
     reason       TEXT NOT NULL DEFAULT '',
     created_at   INTEGER NOT NULL DEFAULT (unixepoch()),
     updated_at   INTEGER NOT NULL DEFAULT (unixepoch())
@@ -232,6 +233,7 @@ CREATE TABLE case_events (
     case_id     INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
     message_id  INTEGER REFERENCES messages(id) ON DELETE SET NULL,
     occurred_at INTEGER NOT NULL,
+    kind        TEXT,
     label       TEXT NOT NULL,
     phase       TEXT NOT NULL,
     direction   TEXT,
@@ -268,6 +270,13 @@ CREATE TABLE case_rules (
     created_at  INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX case_rules_domain ON case_rules(domain);
+
+-- Messages the linker has looked at. `with_body` records whether the text
+-- was available, so a message is looked at again once its body arrives.
+CREATE TABLE case_scan (
+    message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    with_body  INTEGER NOT NULL
+);
 "#,
 ];
 
@@ -1316,8 +1325,8 @@ impl Store {
     pub fn create_case(&self, new_case: &NewCase) -> Result<CaseView> {
         self.conn.execute(
             "INSERT INTO cases (title, counterparty, domain, kind, status, next_step,
-                                due_at, due_label, amount, reason)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                due_at, due_label, amount_cents, currency, reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 new_case.title,
                 new_case.counterparty,
@@ -1327,7 +1336,8 @@ impl Store {
                 new_case.next_step,
                 new_case.due_at,
                 new_case.due_label,
-                new_case.amount,
+                new_case.amount_cents,
+                new_case.currency,
                 new_case.reason,
             ],
         )?;
@@ -1338,13 +1348,14 @@ impl Store {
     /// Appends an event to an existing case and touches `cases.updated_at`.
     pub fn add_case_event(&self, case_id: i64, ev: &NewCaseEvent) -> Result<CaseEvent> {
         self.conn.execute(
-            "INSERT INTO case_events (case_id, message_id, occurred_at, label, phase,
+            "INSERT INTO case_events (case_id, message_id, occurred_at, kind, label, phase,
                                       direction, confidence, manual)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 case_id,
                 ev.message_id,
                 ev.occurred_at,
+                ev.kind,
                 ev.label,
                 ev.phase.to_string(),
                 ev.direction.map(|d| d.to_string()),
@@ -1354,21 +1365,24 @@ impl Store {
         )?;
         let id = self.conn.last_insert_rowid();
         self.touch_case(case_id)?;
-        Ok(self
-            .conn
-            .query_row("SELECT * FROM case_events WHERE id = ?1", [id], case_event_from_row)?)
+        Ok(self.conn.query_row(
+            "SELECT * FROM case_events WHERE id = ?1",
+            [id],
+            case_event_from_row,
+        )?)
     }
 
     /// Attaches an identifying key (order number, invoice number, thread root)
-    /// to a case, ignoring duplicates.
+    /// to a case. A value the case already has is ignored, whatever its label.
     pub fn add_case_key(&self, case_id: i64, label: &str, value: &str) -> Result<()> {
         let normalized = normalize_key(value);
         if normalized.is_empty() {
             return Ok(());
         }
         self.conn.execute(
-            "INSERT OR IGNORE INTO case_keys (case_id, label, value, normalized)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO case_keys (case_id, label, value, normalized)
+             SELECT ?1, ?2, ?3, ?4
+             WHERE NOT EXISTS (SELECT 1 FROM case_keys WHERE case_id = ?1 AND normalized = ?4)",
             params![case_id, label, value.trim(), normalized],
         )?;
         Ok(())
@@ -1395,7 +1409,11 @@ impl Store {
     pub fn get_case(&self, case_id: i64) -> Result<Option<CaseView>> {
         let Some(case) = self
             .conn
-            .query_row("SELECT * FROM cases WHERE id = ?1", [case_id], case_from_row)
+            .query_row(
+                "SELECT * FROM cases WHERE id = ?1",
+                [case_id],
+                case_from_row,
+            )
             .optional()?
         else {
             return Ok(None);
@@ -1464,6 +1482,7 @@ impl Store {
             &NewCaseEvent {
                 message_id: Some(message_id),
                 occurred_at,
+                kind: None,
                 label: label.to_string(),
                 phase,
                 direction: None,
@@ -1501,6 +1520,143 @@ impl Store {
         Ok(found.is_some())
     }
 
+    // ----- linker support -------------------------------------------------
+
+    /// Runs `f` in one transaction; rolled back if it fails.
+    pub fn in_transaction<T>(&mut self, f: impl FnOnce(&Store) -> Result<T>) -> Result<T> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        match f(self) {
+            Ok(v) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(v)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Mail since `since` the linker has not looked at yet, or looked at
+    /// before its text was downloaded. Oldest first, so an order
+    /// confirmation is seen before its shipping notice.
+    pub fn case_scan_batch(&self, since: i64, limit: usize) -> Result<Vec<ScanMessage>> {
+        let sql = format!(
+            "{SCAN_SELECT}
+             LEFT JOIN case_scan s ON s.message_id = m.id
+             WHERE m.date >= ?1
+               AND (s.message_id IS NULL OR (s.with_body = 0 AND m.body_text IS NOT NULL))
+               AND COALESCE(f.role, '') NOT IN ('junk', 'trash', 'drafts')
+             ORDER BY m.date ASC, m.id ASC
+             LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![since, limit as i64], scan_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn mark_case_scanned(&self, message_id: i64, with_body: bool) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO case_scan (message_id, with_body) VALUES (?1, ?2)
+             ON CONFLICT (message_id) DO UPDATE SET with_body = excluded.with_body",
+            params![message_id, with_body],
+        )?;
+        Ok(())
+    }
+
+    /// Stored mail with one of these `Message-ID`s (outside junk and trash).
+    pub fn scan_messages_by_rfc_ids(&self, ids: &[String]) -> Result<Vec<ScanMessage>> {
+        let sql = format!(
+            "{SCAN_SELECT}
+             WHERE m.message_id = ?1
+               AND COALESCE(f.role, '') NOT IN ('junk', 'trash', 'drafts')
+             LIMIT 1"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for id in ids {
+            if !seen.insert(id.as_str()) {
+                continue;
+            }
+            if let Some(m) = stmt.query_row([id], scan_from_row).optional()? {
+                out.push(m);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The case a mail with this `Message-ID` already belongs to, from any
+    /// of its copies.
+    pub fn case_of_rfc_message(&self, rfc_message_id: &str) -> Result<Option<i64>> {
+        if rfc_message_id.is_empty() {
+            return Ok(None);
+        }
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT e.case_id FROM case_events e
+                 JOIN messages m ON m.id = e.message_id
+                 WHERE m.message_id = ?1
+                 LIMIT 1",
+                [rfc_message_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Most recently updated case of `kind` that has one of the normalised
+    /// keys. Rejected cases count too, so a mail of a case the user
+    /// dismissed does not start it again.
+    pub fn case_for_keys(&self, kind: CaseKind, normalized: &[String]) -> Result<Option<i64>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT c.id FROM case_keys k JOIN cases c ON c.id = k.case_id
+             WHERE k.normalized = ?1 AND c.kind = ?2
+             ORDER BY c.updated_at DESC, c.id DESC LIMIT 1",
+        )?;
+        let kind = kind.to_string();
+        for key in normalized {
+            if key.is_empty() {
+                continue;
+            }
+            if let Some(id) = stmt
+                .query_row(params![key, kind], |r| r.get::<_, i64>(0))
+                .optional()?
+            {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Sets the derived status and next step. Leaves cases the user
+    /// rejected alone.
+    pub fn update_case_state(
+        &self,
+        case_id: i64,
+        status: CaseStatus,
+        next_step: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE cases SET status = ?1, next_step = ?2
+             WHERE id = ?3 AND status != 'rejected'",
+            params![status.to_string(), next_step, case_id],
+        )?;
+        Ok(())
+    }
+
+    /// Closes open cases whose last event is older than `before`.
+    pub fn close_stale_cases(&self, before: i64) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE cases SET status = 'done', next_step = 'Ohne Neuigkeiten abgeschlossen',
+                              updated_at = unixepoch()
+             WHERE status IN ('waiting', 'needs_you')
+               AND COALESCE((SELECT max(occurred_at) FROM case_events e WHERE e.case_id = cases.id),
+                            cases.created_at) < ?1",
+            [before],
+        )?)
+    }
+
     fn touch_case(&self, case_id: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE cases SET updated_at = unixepoch() WHERE id = ?1",
@@ -1517,19 +1673,19 @@ impl Store {
             .query_map([case.id], case_event_from_row)?
             .collect::<Result<_, _>>()?;
 
-        let mut key_stmt = self
-            .conn
-            .prepare("SELECT label, value, normalized FROM case_keys WHERE case_id = ?1 ORDER BY id ASC")?;
+        let mut key_stmt = self.conn.prepare(
+            "SELECT label, value, normalized FROM case_keys WHERE case_id = ?1 ORDER BY id ASC",
+        )?;
         let keys: Vec<CaseKey> = key_stmt
             .query_map([case.id], case_key_from_row)?
             .collect::<Result<_, _>>()?;
 
         let mut message_ids = Vec::new();
         for ev in &events {
-            if let Some(mid) = ev.message_id {
-                if !message_ids.contains(&mid) {
-                    message_ids.push(mid);
-                }
+            if let Some(mid) = ev.message_id
+                && !message_ids.contains(&mid)
+            {
+                message_ids.push(mid);
             }
         }
 
@@ -1742,6 +1898,52 @@ fn summary_from_row(row: &Row<'_>) -> rusqlite::Result<MessageSummary> {
     })
 }
 
+/// What the linker needs from a stored message.
+#[derive(Clone, Debug)]
+pub struct ScanMessage {
+    pub id: i64,
+    pub message_id: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
+    pub subject: Option<String>,
+    pub from_name: Option<String>,
+    pub from_addr: Option<String>,
+    pub to: Vec<String>,
+    pub date: i64,
+    pub list_id: Option<String>,
+    pub dmarc_pass: bool,
+    pub body_text: Option<String>,
+    pub folder_role: Option<FolderRole>,
+}
+
+const SCAN_SELECT: &str = "
+    SELECT m.id, m.message_id, m.in_reply_to, m.refs, m.subject, m.from_name,
+           m.from_addr, m.to_addrs, COALESCE(m.date, 0) AS date, m.list_id,
+           m.dmarc_pass, m.body_text, f.role AS folder_role
+    FROM messages m
+    JOIN folders f ON f.id = m.folder_id";
+
+fn scan_from_row(row: &Row<'_>) -> rusqlite::Result<ScanMessage> {
+    Ok(ScanMessage {
+        id: row.get("id")?,
+        message_id: row.get("message_id")?,
+        in_reply_to: row.get("in_reply_to")?,
+        references: json_list(row, "refs")?,
+        subject: row.get("subject")?,
+        from_name: row.get("from_name")?,
+        from_addr: row.get("from_addr")?,
+        to: json_list(row, "to_addrs")?,
+        date: row.get("date")?,
+        list_id: row.get("list_id")?,
+        dmarc_pass: row.get("dmarc_pass")?,
+        body_text: row.get("body_text")?,
+        folder_role: row
+            .get::<_, Option<String>>("folder_role")?
+            .as_deref()
+            .and_then(FolderRole::parse),
+    })
+}
+
 fn case_from_row(row: &Row<'_>) -> rusqlite::Result<Case> {
     Ok(Case {
         id: row.get("id")?,
@@ -1753,7 +1955,8 @@ fn case_from_row(row: &Row<'_>) -> rusqlite::Result<Case> {
         next_step: row.get("next_step")?,
         due_at: row.get("due_at")?,
         due_label: row.get("due_label")?,
-        amount: row.get("amount")?,
+        amount_cents: row.get("amount_cents")?,
+        currency: row.get("currency")?,
         reason: row.get("reason")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -1777,6 +1980,7 @@ fn case_event_from_row(row: &Row<'_>) -> rusqlite::Result<CaseEvent> {
         case_id: row.get("case_id")?,
         message_id: row.get("message_id")?,
         occurred_at: row.get("occurred_at")?,
+        kind: row.get("kind")?,
         label: row.get("label")?,
         phase: parse_col::<CaseEventPhase>(row, "phase")?,
         direction,
@@ -2303,7 +2507,8 @@ mod tests {
                 next_step: "Wartet auf Versand".into(),
                 due_at: None,
                 due_label: Some("bis Fr".into()),
-                amount: Some("49,90 €".into()),
+                amount_cents: Some(4990),
+                currency: Some("EUR".into()),
                 reason: "Bestellnummer erkannt".into(),
             })
             .unwrap();
@@ -2314,7 +2519,10 @@ mod tests {
         store
             .add_case_key(created.case.id, "Bestellnr.", "a-123")
             .unwrap();
-        assert_eq!(store.find_cases_by_key("a-123").unwrap(), vec![created.case.id]);
+        assert_eq!(
+            store.find_cases_by_key("a-123").unwrap(),
+            vec![created.case.id]
+        );
 
         store
             .add_case_event(
@@ -2322,6 +2530,7 @@ mod tests {
                 &NewCaseEvent {
                     message_id: None,
                     occurred_at: 1_000,
+                    kind: Some("order.placed".into()),
                     label: "Bestellt".into(),
                     phase: CaseEventPhase::Start,
                     direction: Some(EventDirection::In),
@@ -2372,7 +2581,8 @@ mod tests {
                 next_step: "Unterwegs".into(),
                 due_at: None,
                 due_label: None,
-                amount: None,
+                amount_cents: None,
+                currency: None,
                 reason: "Test".into(),
             })
             .unwrap();
