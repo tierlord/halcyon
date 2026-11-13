@@ -765,11 +765,14 @@
   .pane-slot {
     position: relative;
     display: flex;
+    flex-direction: column;
     min-width: 0;
     min-height: 0;
   }
-  .pane-slot > :global(.pane) {
+  .pane-slot > :global(.pane),
+  .pane-slot > :global(.board) {
     flex: 1;
+    min-height: 0;
   }
   .compose {
     display: flex;
@@ -867,11 +870,16 @@
     color: #ffffff;
   }
   .pane-backbar {
+    flex-shrink: 0;
     padding: 6px 16px;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
   }
   .pane-backbtn {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     border: 0;
     background: none;
     padding: 2px 4px;
