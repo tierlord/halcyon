@@ -1,9 +1,14 @@
 //! Recurring machine-mail sources ("Quellen") and anomaly detection
 //! ("Anders als sonst") as specified in `docs/design/am-zug.md`.
 
+use std::fmt;
+use std::str::FromStr;
+use std::sync::LazyLock;
+
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::sync::LazyLock;
+
+use crate::Error;
 
 /// How a recurring source should be presented on "Heute" and in the inbox.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,6 +22,31 @@ pub enum SourceMode {
     LatestOnly,
     /// Hide unless an anomaly occurs (`stumm`).
     Mute,
+}
+
+impl fmt::Display for SourceMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            SourceMode::Show => "show",
+            SourceMode::Bundle => "bundle",
+            SourceMode::LatestOnly => "latest_only",
+            SourceMode::Mute => "mute",
+        })
+    }
+}
+
+impl FromStr for SourceMode {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "show" => Ok(SourceMode::Show),
+            "bundle" => Ok(SourceMode::Bundle),
+            "latest_only" => Ok(SourceMode::LatestOnly),
+            "mute" => Ok(SourceMode::Mute),
+            other => Err(Error::Other(format!("unknown source mode {other:?}"))),
+        }
+    }
 }
 
 /// Kind of deviation detected for a recurring source ("Anders als sonst").
@@ -33,6 +63,85 @@ pub enum AnomalyKind {
     FrequencySpike,
     /// Regular source remained silent for much longer than its typical interval.
     LongSilence,
+}
+
+impl fmt::Display for AnomalyKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            AnomalyKind::DmarcFailed => "dmarc_failed",
+            AnomalyKind::UnusualAmount => "unusual_amount",
+            AnomalyKind::NewSubjectPattern => "new_subject_pattern",
+            AnomalyKind::FrequencySpike => "frequency_spike",
+            AnomalyKind::LongSilence => "long_silence",
+        })
+    }
+}
+
+impl FromStr for AnomalyKind {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "dmarc_failed" => Ok(AnomalyKind::DmarcFailed),
+            "unusual_amount" => Ok(AnomalyKind::UnusualAmount),
+            "new_subject_pattern" => Ok(AnomalyKind::NewSubjectPattern),
+            "frequency_spike" => Ok(AnomalyKind::FrequencySpike),
+            "long_silence" => Ok(AnomalyKind::LongSilence),
+            other => Err(Error::Other(format!("unknown anomaly kind {other:?}"))),
+        }
+    }
+}
+
+/// Stored recurring source row from the database.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceRecord {
+    pub id: i64,
+    pub source_key: String,
+    pub display_name: String,
+    pub domain: Option<String>,
+    pub mode: SourceMode,
+    pub user_mode: bool,
+    pub total_messages: u32,
+    pub read_messages: u32,
+    pub dmarc_pass_count: u32,
+    pub is_newsletter: bool,
+    pub first_seen_at: i64,
+    pub last_seen_at: i64,
+    pub median_interval_secs: Option<i64>,
+    pub median_amount_cents: Option<i64>,
+    pub amount_sample_count: u32,
+    pub anomaly: Option<SourceAnomaly>,
+    pub patterns: Vec<String>,
+}
+
+/// Privacy-preserving aggregate evaluation numbers for a mailbox (no message
+/// contents, addresses, or subjects).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MailboxEvalStats {
+    pub total_messages: usize,
+    pub unique_sources: usize,
+    pub unique_patterns: usize,
+    pub recurring_pattern_messages: usize,
+    pub top_100_patterns_messages: usize,
+    pub sources_show: usize,
+    pub sources_bundle: usize,
+    pub sources_latest_only: usize,
+    pub sources_mute: usize,
+    pub active_anomalies: usize,
+    pub cases_needs_you: usize,
+    pub cases_waiting: usize,
+    pub cases_done: usize,
+    pub cases_order: usize,
+    pub cases_invoice: usize,
+    pub cases_contract: usize,
+    pub human_threads_total: usize,
+    pub human_needs_you: usize,
+    pub human_waiting: usize,
+    pub human_follow_up_due: usize,
+    pub human_reading_along: usize,
+    pub human_done: usize,
+    pub recent_7d_incoming: usize,
+    pub recent_7d_today_rows: usize,
 }
 
 /// Anomaly assessment for a source or incoming message.
@@ -201,7 +310,7 @@ pub fn normalize_subject_pattern(subject: &str) -> String {
     // 5. Replace alphanumeric IDs/codes containing both letters and digits (or preceded by #) of length >= 4
     static ID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(
-            r#"\b(?:#\d{4,}|[a-zA-Z0-9]+(?:[a-zA-Z]+[0-9]+|[0-9]+[a-zA-Z]+)[a-zA-Z0-9-]*)\b"#,
+            r#"(?:#[a-zA-Z0-9-]{3,}|\b[a-zA-Z0-9]+(?:[a-zA-Z]+[0-9]+|[0-9]+[a-zA-Z]+)[a-zA-Z0-9-]*)\b"#,
         )
         .unwrap()
     });
@@ -413,8 +522,8 @@ mod tests {
     #[test]
     fn test_normalize_subject_pattern_ids_and_nums() {
         assert_eq!(
-            normalize_subject_pattern("Ticket #{num} erstellt"),
-            "Ticket #{num} erstellt"
+            normalize_subject_pattern("Ticket #12345 erstellt"),
+            "Ticket {id} erstellt"
         );
         assert_eq!(
             normalize_subject_pattern("Fehler 404 aufgetreten"),

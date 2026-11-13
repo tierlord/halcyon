@@ -183,9 +183,11 @@ fn parse_line_amounts(line: &str) -> Vec<(i64, String)> {
             (?i)
             (?:(?P<pre_cur>€|EUR|Euro|\$|USD|US\$|CHF|Fr\.?|£|GBP)\s*)?
             (?P<num>
+                [0-9]+[\.,]\s*[-–—]
+                |
                 [0-9]{1,3}(?:[,\.][0-9]{3})*(?:[\.,][0-9]{1,2})?
                 |
-                [0-9]+(?:[\.,]\s*[-–—])?
+                [0-9]+(?:[\.,][0-9]{1,2})?
             )
             \s*
             (?:(?P<suf_cur>€|EUR|Euro|\$|USD|US\$|CHF|Fr\.?|£|GBP))?
@@ -193,20 +195,6 @@ fn parse_line_amounts(line: &str) -> Vec<(i64, String)> {
         )
         .unwrap()
     });
-
-    let line_upper = line.to_uppercase();
-    let global_currency =
-        if line_upper.contains("EUR") || line_upper.contains('€') || line_upper.contains("EURO") {
-            Some("EUR".to_string())
-        } else if line_upper.contains("USD") || line_upper.contains('$') {
-            Some("USD".to_string())
-        } else if line_upper.contains("CHF") || line_upper.contains("FR.") {
-            Some("CHF".to_string())
-        } else if line_upper.contains("GBP") || line_upper.contains('£') {
-            Some("GBP".to_string())
-        } else {
-            None
-        };
 
     for cap in AMT_RE.captures_iter(line) {
         let pre = cap.name("pre_cur").map(|m| m.as_str());
@@ -216,7 +204,7 @@ fn parse_line_amounts(line: &str) -> Vec<(i64, String)> {
         let currency = match (pre, suf) {
             (Some(p), _) => normalize_currency(p),
             (None, Some(s)) => normalize_currency(s),
-            (None, None) => global_currency.clone(),
+            (None, None) => None,
         };
 
         if let Some(curr) = currency {
@@ -467,11 +455,11 @@ pub fn find_business_keys(subject: &str, body_text: &str) -> Vec<BusinessKey> {
         let patterns = [
             (
                 BusinessKeyKind::InvoiceNumber,
-                Regex::new(r#"(?i)(?:rechnungsnummer|rechnungs-nr\.?|rechnungsnr\.?|rechnung\s+nr\.?|belegnummer|invoice\s*(?:number|no\.?|id|#))\s*[:#]?\s*([A-Za-z0-9\-/]{4,28})"#).unwrap(),
+                Regex::new(r#"(?i)(?:rechnungsnummer|rechnungs-nr\.?|rechnungsnr\.?|rechnung(?:\s+nr\.?)?|belegnummer|invoice\s*(?:number|no\.?|id|#)?)\s*[:#]?\s*([A-Za-z0-9\-/]{4,28})"#).unwrap(),
             ),
             (
                 BusinessKeyKind::ContractNumber,
-                Regex::new(r#"(?i)(?:vertragsnummer|vertrags-nr\.?|vertragsnr\.?|vertragskonto|policennummer|contract\s*(?:number|no\.?|id|#))\s*[:#]?\s*([A-Za-z0-9\-/]{4,28})"#).unwrap(),
+                Regex::new(r#"(?i)(?:vertragsnummer|vertrags-nr\.?|vertragsnr\.?|vertragskonto|policennummer|vertrags\b|vertrag\b|contract\s*(?:number|no\.?|id|#)?)\s*[:#]?\s*([A-Za-z0-9\-/]{4,28})"#).unwrap(),
             ),
             (
                 BusinessKeyKind::CustomerNumber,

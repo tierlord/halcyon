@@ -22,8 +22,12 @@ use crate::Result;
 use crate::cases::{
     CaseEventPhase, CaseKind, CaseStatus, EventDirection, NewCase, NewCaseEvent, normalize_key,
 };
+use crate::extract::finance::{
+    BusinessKeyKind, PaymentDisposition, find_amounts, find_business_keys, find_due_info,
+};
 use crate::extract::tracking::{Evidence, find_shipments};
 use crate::model::FolderRole;
+use crate::sources::{derive_source_key, normalize_subject_pattern};
 use crate::store::{ScanMessage, Store};
 
 /// Only mail from this period is looked at, so a first run does not fill
@@ -318,24 +322,74 @@ fn link_message(
 ) -> Result<()> {
     let subject = m.subject.as_deref().unwrap_or("");
     let body = m.body_text.as_deref().unwrap_or("");
+    let amounts = find_amounts(subject, body);
+    let top_amount = amounts.first();
+    let due_info = find_due_info(subject, body, m.date);
+    let bkeys = find_business_keys(subject, body);
+
+    let dir = direction(m, own);
+    if dir == EventDirection::In
+        && m.in_reply_to.is_none()
+        && let Some(source_key) = derive_source_key(m.from_addr.as_deref(), m.list_id.as_deref())
+    {
+        let domain = m.from_addr.as_deref().and_then(base_domain);
+        let display_name = m
+            .from_name
+            .as_deref()
+            .filter(|n| !n.trim().is_empty())
+            .or(domain.as_deref())
+            .or(m.from_addr.as_deref())
+            .unwrap_or("Unbekannt");
+        let pattern = normalize_subject_pattern(subject);
+        let is_status = is_carrier(domain.as_deref()) || order_step(subject).is_some();
+        store.record_source_message(
+            m,
+            &source_key,
+            display_name,
+            if m.dmarc_pass {
+                domain.as_deref()
+            } else {
+                None
+            },
+            &pattern,
+            top_amount.map(|a| a.amount_cents),
+            top_amount.map(|a| a.currency.as_str()),
+            is_status,
+        )?;
+    }
 
     // The same mail can sit in several folders (Gmail labels, copies).
     if let Some(rfc) = m.message_id.as_deref()
         && let Some(case_id) = store.case_of_rfc_message(rfc)?
     {
-        // Seen before; its text may now be there with more numbers.
-        if m.body_text.is_some() && order_step(subject).is_some() {
-            let keys = order_keys(subject, body);
-            for (label, value) in &keys.numbers {
-                store.add_case_key(case_id, label, value)?;
+        // Seen before; its text may now be there with more numbers or amounts.
+        if m.body_text.is_some() {
+            if order_step(subject).is_some() {
+                let keys = order_keys(subject, body);
+                for (label, value) in &keys.numbers {
+                    store.add_case_key(case_id, label, value)?;
+                }
             }
+            for bk in &bkeys {
+                store.add_case_key(case_id, bk.kind.label(), &bk.value)?;
+            }
+            store.update_case_financials(
+                case_id,
+                top_amount.map(|a| a.amount_cents),
+                top_amount.map(|a| a.currency.as_str()),
+                due_info.as_ref().and_then(|d| d.due_at),
+                None,
+            )?;
         }
         return Ok(());
     }
 
-    let dir = direction(m, own);
     if m.list_id.is_none() && dir == EventDirection::In {
+        let before_linked = report.linked;
         link_order(store, m, subject, body, report)?;
+        if report.linked == before_linked {
+            link_invoice_or_contract(store, m, subject, body, report)?;
+        }
     }
     Ok(())
 }
@@ -446,9 +500,22 @@ fn link_order(
     for (label, value) in &keys.numbers {
         store.add_case_key(case_id, label, value)?;
     }
+    for bk in find_business_keys(subject, body) {
+        store.add_case_key(case_id, bk.kind.label(), &bk.value)?;
+    }
     if let Some(k) = &item_key {
         store.add_case_key(case_id, "Artikel", k)?;
     }
+    let amounts = find_amounts(subject, body);
+    let top_amount = amounts.first();
+    let due_info = find_due_info(subject, body, m.date);
+    store.update_case_financials(
+        case_id,
+        top_amount.map(|a| a.amount_cents),
+        top_amount.map(|a| a.currency.as_str()),
+        due_info.as_ref().and_then(|d| d.due_at),
+        None,
+    )?;
     store.add_case_event(
         case_id,
         &event_for(
@@ -461,6 +528,152 @@ fn link_order(
     )?;
     report.linked += 1;
     refresh_order(store, case_id)
+}
+
+static RE_CONTRACT_SUBJECT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(?:kündigungsbestätigung|kündigung\b|vertragsbestätigung|vertragsverlängerung|tarifwechsel|ihr vertrag\b|cancellation confirmed|contract confirmation)\b",
+    )
+    .unwrap()
+});
+static RE_CANCEL_CONFIRMED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:kündigungsbestätigung|kündigung bestätigt|wurde gekündigt|cancellation confirmed)\b")
+        .unwrap()
+});
+
+fn link_invoice_or_contract(
+    store: &Store,
+    m: &ScanMessage,
+    subject: &str,
+    body: &str,
+    report: &mut LinkReport,
+) -> Result<()> {
+    let bkeys = find_business_keys(subject, body);
+    let amounts = find_amounts(subject, body);
+    let top_amount = amounts.first();
+    let due_info = find_due_info(subject, body, m.date);
+
+    let is_contract = RE_CONTRACT_SUBJECT.is_match(subject)
+        || bkeys
+            .iter()
+            .any(|k| k.kind == BusinessKeyKind::ContractNumber);
+    let is_invoice = !is_contract
+        && (RE_INVOICE.is_match(subject)
+            || bkeys
+                .iter()
+                .any(|k| k.kind == BusinessKeyKind::InvoiceNumber))
+        && (top_amount.is_some()
+            || due_info.is_some()
+            || bkeys
+                .iter()
+                .any(|k| k.kind == BusinessKeyKind::InvoiceNumber));
+
+    if !is_contract && !is_invoice {
+        return Ok(());
+    }
+
+    let kind = if is_contract {
+        CaseKind::Contract
+    } else {
+        CaseKind::Invoice
+    };
+    let domain = m.from_addr.as_deref().and_then(base_domain);
+    let key_norms: Vec<String> = bkeys.iter().map(|k| normalize_key(&k.value)).collect();
+    let found = store.case_for_keys(kind, &key_norms)?;
+
+    let (status, next_step, event_kind, event_label, phase) = if is_contract {
+        if RE_CANCEL_CONFIRMED.is_match(subject) || RE_CANCEL_CONFIRMED.is_match(body) {
+            (
+                CaseStatus::Done,
+                "Kündigung bestätigt",
+                "contract.cancel_confirmed",
+                "Bestätigt",
+                CaseEventPhase::Done,
+            )
+        } else {
+            (
+                CaseStatus::Waiting,
+                "Wartet auf Bestätigung",
+                "contract.updated",
+                "Vertrag",
+                CaseEventPhase::Start,
+            )
+        }
+    } else {
+        match due_info.as_ref().map(|d| d.disposition) {
+            Some(PaymentDisposition::AlreadyPaid) => (
+                CaseStatus::Done,
+                "Bezahlt",
+                "invoice.paid",
+                "Bezahlt",
+                CaseEventPhase::Done,
+            ),
+            Some(PaymentDisposition::DirectDebit) => (
+                CaseStatus::Waiting,
+                "Wird per Lastschrift eingezogen",
+                "invoice.debit",
+                "Lastschrift",
+                CaseEventPhase::Update,
+            ),
+            _ => (
+                CaseStatus::NeedsYou,
+                "Rechnung offen · bitte überweisen",
+                "invoice.issued",
+                "Rechnung",
+                CaseEventPhase::Due,
+            ),
+        }
+    };
+
+    let case_id = match found {
+        Some(id) => id,
+        None => {
+            let counterparty = m
+                .from_name
+                .clone()
+                .filter(|n| !n.trim().is_empty())
+                .or_else(|| domain.clone())
+                .unwrap_or_else(|| "Unbekannt".into());
+            let title = clean_subject(subject);
+            let reason = match bkeys.first() {
+                Some(bk) => format!("{}: {} {}", event_label, bk.kind.label(), bk.value),
+                None => format!("{event_label} am Betreff erkannt"),
+            };
+            let created = store.create_case(&NewCase {
+                title,
+                counterparty,
+                domain: if m.dmarc_pass { domain } else { None },
+                kind,
+                status,
+                next_step: next_step.into(),
+                due_at: due_info.as_ref().and_then(|d| d.due_at),
+                due_label: None,
+                amount_cents: top_amount.map(|a| a.amount_cents),
+                currency: top_amount.map(|a| a.currency.clone()),
+                reason,
+            })?;
+            report.created += 1;
+            created.case.id
+        }
+    };
+
+    for bk in &bkeys {
+        store.add_case_key(case_id, bk.kind.label(), &bk.value)?;
+    }
+    store.update_case_financials(
+        case_id,
+        top_amount.map(|a| a.amount_cents),
+        top_amount.map(|a| a.currency.as_str()),
+        due_info.as_ref().and_then(|d| d.due_at),
+        None,
+    )?;
+    store.add_case_event(
+        case_id,
+        &event_for(m, event_kind, event_label.into(), phase, EventDirection::In),
+    )?;
+    store.update_case_state(case_id, status, next_step)?;
+    report.linked += 1;
+    Ok(())
 }
 
 /// Recomputes an order's status from its furthest step.
@@ -806,5 +1019,87 @@ mod tests {
             replies[0].header.subject.as_deref(),
             Some("Re: Tischreservierung")
         );
+    }
+
+    #[test]
+    fn invoices_and_contracts_build_cases_with_amounts() {
+        let (mut store, inbox, _) = store_with_inbox();
+        store
+            .insert_messages(
+                inbox,
+                &[
+                    mail(
+                        1,
+                        "Ihre Rechnung RE-2026-441 über 49,90 € – bitte überweisen",
+                        "billing@provider.example",
+                        NOW - 2 * DAY,
+                    ),
+                    mail(
+                        2,
+                        "Kündigung Ihres Vertrags V-998877 eingegangen",
+                        "service@power.example",
+                        NOW - 2 * DAY,
+                    ),
+                    mail(
+                        3,
+                        "Kündigungsbestätigung zu Vertragsnummer V-998877",
+                        "service@power.example",
+                        NOW - DAY,
+                    ),
+                ],
+            )
+            .unwrap();
+
+        let report = run(&mut store, NOW).unwrap();
+        assert_eq!(report.created, 2);
+        let cases = store.list_cases(false).unwrap();
+        let inv = cases
+            .iter()
+            .find(|c| c.case.kind == CaseKind::Invoice)
+            .unwrap();
+        assert_eq!(inv.case.status, CaseStatus::NeedsYou);
+        assert_eq!(inv.case.amount_cents, Some(4990));
+        assert_eq!(inv.case.currency.as_deref(), Some("EUR"));
+
+        let contract = cases
+            .iter()
+            .find(|c| c.case.kind == CaseKind::Contract)
+            .unwrap();
+        assert_eq!(contract.case.status, CaseStatus::Done);
+        assert_eq!(contract.events.len(), 2);
+    }
+
+    #[test]
+    fn sources_and_anomalies_recorded_during_link_run() {
+        let (mut store, inbox, _) = store_with_inbox();
+        let mut msgs = Vec::new();
+        for i in 1..=5 {
+            let num = 1000 + i;
+            msgs.push(mail(
+                i,
+                &format!("Ihre Monatsabrechnung #{num} über 29,99 €"),
+                "billing@telecom.example",
+                NOW - (6 - i as i64) * 10 * DAY,
+            ));
+        }
+        // 6th mail has a significantly higher amount (89,99 € vs 29,99 €).
+        msgs.push(mail(
+            6,
+            "Ihre Monatsabrechnung #1006 über 89,99 €",
+            "billing@telecom.example",
+            NOW - DAY,
+        ));
+        store.insert_messages(inbox, &msgs).unwrap();
+
+        run(&mut store, NOW).unwrap();
+        let sources = store.list_sources(10).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].total_messages, 6);
+        assert_eq!(
+            sources[0].patterns,
+            vec!["Ihre Monatsabrechnung {id} über {amount}".to_string()]
+        );
+        assert!(sources[0].anomaly.is_some());
+        assert!(sources[0].anomaly.as_ref().unwrap().needs_you);
     }
 }

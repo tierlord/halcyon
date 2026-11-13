@@ -49,6 +49,8 @@ enum Command {
         #[arg(short, long, default_value_t = 30)]
         limit: usize,
     },
+    /// Run local case/source analysis and print privacy-preserving numbers only.
+    Stats,
 }
 
 #[derive(Subcommand)]
@@ -162,6 +164,10 @@ async fn main() -> Result<()> {
             let store = Store::open(&db_path)?;
             print_messages(&store.search(&query.join(" "), limit)?);
             Ok(())
+        }
+        Command::Stats => {
+            let mut store = Store::open(&db_path)?;
+            print_stats(&mut store)
         }
     }
 }
@@ -390,4 +396,68 @@ fn print_messages(messages: &[MessageSummary]) {
             m.account_email,
         );
     }
+}
+
+fn print_stats(store: &mut Store) -> Result<()> {
+    let now = Local::now().timestamp();
+    let link_report = halcyon_core::linker::run(store, now)?;
+    let s = store.evaluate_mailbox_stats(now)?;
+    let pct = |n: usize, d: usize| -> f64 {
+        if d == 0 {
+            0.0
+        } else {
+            (n as f64 / d as f64) * 100.0
+        }
+    };
+
+    println!("=== Halcyon – Lokale Auswertung (nur Zahlen, keine Inhalte) ===");
+    println!(
+        "Verknüpfer-Lauf: {} geprüft, {} verknüpft, {} neu, {} abgeschlossen",
+        link_report.scanned, link_report.linked, link_report.created, link_report.closed
+    );
+    println!(
+        "Nachrichten gesamt (ohne Spam/Papierkorb/Entwürfe): {}",
+        s.total_messages
+    );
+    println!(
+        "Quellen: {} · Betreffmuster: {} · Wiederholungen (>=2): {} ({:.1}%)",
+        s.unique_sources,
+        s.unique_patterns,
+        s.recurring_pattern_messages,
+        pct(s.recurring_pattern_messages, s.total_messages)
+    );
+    println!(
+        "Abdeckung Top-100-Muster: {} Mails ({:.1}%)",
+        s.top_100_patterns_messages,
+        pct(s.top_100_patterns_messages, s.total_messages)
+    );
+    println!(
+        "Quellen-Modi: anzeigen={} · zusammenfassen={} · nur Stand={} · stumm={} · Abweichungen={}",
+        s.sources_show, s.sources_bundle, s.sources_latest_only, s.sources_mute, s.active_anomalies
+    );
+    println!(
+        "Vorgänge: braucht dich={} · wartet={} · erledigt={} (Bestellungen={}, Rechnungen={}, Verträge={})",
+        s.cases_needs_you,
+        s.cases_waiting,
+        s.cases_done,
+        s.cases_order,
+        s.cases_invoice,
+        s.cases_contract
+    );
+    println!(
+        "Gespräche (Threads): gesamt={} · braucht dich={} · wartet={} (Nachhaken={}) · mitlesen={} · erledigt={}",
+        s.human_threads_total,
+        s.human_needs_you,
+        s.human_waiting,
+        s.human_follow_up_due,
+        s.human_reading_along,
+        s.human_done
+    );
+    println!(
+        "Verdichtung (letzte 7 Tage): {} Zeilen auf 'Heute' bei {} eingehenden Mails ({:.1}%)",
+        s.recent_7d_today_rows,
+        s.recent_7d_incoming,
+        pct(s.recent_7d_today_rows, s.recent_7d_incoming)
+    );
+    Ok(())
 }

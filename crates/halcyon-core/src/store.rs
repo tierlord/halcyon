@@ -19,6 +19,11 @@ use crate::model::{
     PendingOp, Security, ServerConfig,
 };
 use crate::send::{Built, Draft};
+use crate::sources::{
+    AnomalyKind, IncomingSourceMail, MailboxEvalStats, SourceAnomaly, SourceMode, SourceRecord,
+    SourceStats, detect_anomaly, suggest_source_mode,
+};
+use crate::turn::{TurnStatus, assess_turn};
 
 /// Schema migrations, applied in order. The index + 1 is stored in
 /// `PRAGMA user_version`, so new migrations must only ever be appended.
@@ -284,6 +289,46 @@ CREATE TABLE trusted_remote_senders (
     sender     TEXT PRIMARY KEY,
     created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
+"#,
+    // 12: recurring machine-mail sources ("Quellen") and normalized subject
+    // patterns ("Wer ist am Zug?" concept).
+    r#"
+CREATE TABLE sources (
+    id                   INTEGER PRIMARY KEY,
+    source_key           TEXT NOT NULL UNIQUE,
+    display_name         TEXT NOT NULL,
+    domain               TEXT,
+    mode                 TEXT NOT NULL DEFAULT 'show',
+    user_mode            INTEGER NOT NULL DEFAULT 0,
+    total_messages       INTEGER NOT NULL DEFAULT 0,
+    read_messages        INTEGER NOT NULL DEFAULT 0,
+    dmarc_pass_count     INTEGER NOT NULL DEFAULT 0,
+    is_newsletter        INTEGER NOT NULL DEFAULT 0,
+    first_seen_at        INTEGER NOT NULL DEFAULT 0,
+    last_seen_at         INTEGER NOT NULL DEFAULT 0,
+    median_interval_secs INTEGER,
+    median_amount_cents  INTEGER,
+    amount_sample_count  INTEGER NOT NULL DEFAULT 0,
+    anomaly_kind         TEXT,
+    anomaly_needs_you    INTEGER NOT NULL DEFAULT 0,
+    anomaly_reason       TEXT,
+    anomaly_message_id   INTEGER REFERENCES messages(id) ON DELETE SET NULL
+);
+CREATE INDEX sources_last_seen ON sources(last_seen_at DESC);
+
+CREATE TABLE source_patterns (
+    id            INTEGER PRIMARY KEY,
+    source_id     INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    pattern       TEXT NOT NULL,
+    message_count INTEGER NOT NULL DEFAULT 0,
+    last_seen_at  INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (source_id, pattern)
+);
+
+ALTER TABLE messages ADD COLUMN source_id INTEGER REFERENCES sources(id) ON DELETE SET NULL;
+ALTER TABLE messages ADD COLUMN subject_pattern TEXT;
+CREATE INDEX messages_source ON messages(source_id, date DESC);
+DELETE FROM case_scan;
 "#,
 ];
 
@@ -1604,6 +1649,29 @@ impl Store {
         Ok(())
     }
 
+    /// Updates optional financial and deadline metadata on a case without
+    /// overwriting existing values with `None`.
+    pub fn update_case_financials(
+        &self,
+        case_id: i64,
+        amount_cents: Option<i64>,
+        currency: Option<&str>,
+        due_at: Option<i64>,
+        due_label: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE cases
+             SET amount_cents = COALESCE(?1, amount_cents),
+                 currency     = COALESCE(?2, currency),
+                 due_at       = COALESCE(?3, due_at),
+                 due_label    = COALESCE(?4, due_label),
+                 updated_at   = unixepoch()
+             WHERE id = ?5 AND status != 'rejected'",
+            params![amount_cents, currency, due_at, due_label, case_id],
+        )?;
+        Ok(())
+    }
+
     /// Closes open cases whose last event is older than `before`.
     pub fn close_stale_cases(&self, before: i64) -> Result<usize> {
         Ok(self.conn.execute(
@@ -1712,6 +1780,507 @@ impl Store {
             [norm],
         )?;
         Ok(())
+    }
+
+    // ----- sources ("Quellen") & evaluation -------------------------------
+
+    /// Records a message under its recurring source (`source_key`) and
+    /// normalized subject `pattern`, updating source statistics, suggested
+    /// display mode, and anomaly detection ("Anders als sonst").
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn record_source_message(
+        &self,
+        m: &ScanMessage,
+        source_key: &str,
+        display_name: &str,
+        domain: Option<&str>,
+        pattern: &str,
+        amount_cents: Option<i64>,
+        currency: Option<&str>,
+        is_status_update: bool,
+    ) -> Result<i64> {
+        let is_newsletter = m.list_id.is_some() || m.has_unsubscribe;
+        // Check if this message was already counted for a source (e.g. body arrived later).
+        let existing_source_id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT source_id FROM messages WHERE id = ?1",
+                [m.id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+
+        if let Some(sid) = existing_source_id {
+            // If an amount was newly extracted from the body, update running amount stats.
+            if let Some(cents) = amount_cents
+                && cents > 0
+            {
+                self.update_source_amount(sid, m, pattern, cents, currency)?;
+            }
+            return Ok(sid);
+        }
+
+        self.conn.execute(
+            "INSERT INTO sources (source_key, display_name, domain, is_newsletter,
+                                  first_seen_at, last_seen_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT (source_key) DO UPDATE SET
+                 display_name  = CASE WHEN sources.display_name = '' THEN excluded.display_name ELSE sources.display_name END,
+                 domain        = COALESCE(sources.domain, excluded.domain),
+                 is_newsletter = MAX(sources.is_newsletter, excluded.is_newsletter)",
+            params![source_key, display_name, domain, is_newsletter as i64, m.date],
+        )?;
+
+        let (
+            source_id,
+            total_messages,
+            read_messages,
+            dmarc_pass_count,
+            user_mode,
+            last_seen_at,
+            median_interval_secs,
+            median_amount_cents,
+            amount_sample_count,
+            stored_newsletter,
+        ): (
+            i64,
+            u32,
+            u32,
+            u32,
+            bool,
+            i64,
+            Option<i64>,
+            Option<i64>,
+            u32,
+            bool,
+        ) = self.conn.query_row(
+            "SELECT id, total_messages, read_messages, dmarc_pass_count, user_mode != 0,
+                    last_seen_at, median_interval_secs, median_amount_cents,
+                    amount_sample_count, is_newsletter != 0
+             FROM sources WHERE source_key = ?1",
+            [source_key],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                ))
+            },
+        )?;
+
+        let known_patterns: Vec<String> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT pattern FROM source_patterns WHERE source_id = ?1 ORDER BY message_count DESC LIMIT 10",
+            )?;
+            stmt.query_map([source_id], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+
+        let recent_hour_count: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE source_id = ?1 AND date >= ?2 AND date <= ?3",
+            params![source_id, m.date - 3600, m.date],
+            |r| r.get(0),
+        )?;
+
+        let stats = SourceStats {
+            total_messages,
+            dmarc_pass_count,
+            known_patterns,
+            median_interval_secs,
+            last_seen_at: (total_messages > 0).then_some(last_seen_at),
+            recent_hour_count: recent_hour_count + 1,
+            median_amount_cents,
+            amount_sample_count,
+        };
+        let incoming = IncomingSourceMail {
+            occurred_at: m.date,
+            normalized_pattern: pattern.to_string(),
+            dmarc_pass: m.dmarc_pass,
+            amount_cents,
+            currency: currency.map(str::to_string),
+        };
+        let anomaly = detect_anomaly(&stats, &incoming);
+
+        let new_total = total_messages + 1;
+        let new_read = read_messages + u32::from(m.is_seen);
+        let new_dmarc = dmarc_pass_count + u32::from(m.dmarc_pass);
+        let new_interval = if total_messages > 0 && m.date > last_seen_at {
+            let delta = m.date - last_seen_at;
+            Some(match median_interval_secs {
+                Some(prev) => (prev * 3 + delta) / 4,
+                None => delta,
+            })
+        } else {
+            median_interval_secs
+        };
+        let (new_median_amount, new_amount_samples) = match amount_cents.filter(|&c| c > 0) {
+            Some(c) => (
+                Some(match median_amount_cents {
+                    Some(prev) => (prev * 3 + c) / 4,
+                    None => c,
+                }),
+                amount_sample_count + 1,
+            ),
+            None => (median_amount_cents, amount_sample_count),
+        };
+        let new_last_seen = m.date.max(last_seen_at);
+        let suggested = suggest_source_mode(
+            new_total,
+            new_read,
+            stored_newsletter || is_newsletter,
+            is_status_update,
+        );
+
+        self.conn.execute(
+            "UPDATE sources
+             SET total_messages       = ?1,
+                 read_messages        = ?2,
+                 dmarc_pass_count     = ?3,
+                 last_seen_at         = ?4,
+                 median_interval_secs = ?5,
+                 median_amount_cents  = ?6,
+                 amount_sample_count  = ?7,
+                 mode                 = CASE WHEN user_mode = 0 THEN ?8 ELSE mode END,
+                 anomaly_kind         = COALESCE(?9, anomaly_kind),
+                 anomaly_needs_you    = CASE WHEN ?9 IS NOT NULL THEN ?10 ELSE anomaly_needs_you END,
+                 anomaly_reason       = COALESCE(?11, anomaly_reason),
+                 anomaly_message_id   = CASE WHEN ?9 IS NOT NULL THEN ?12 ELSE anomaly_message_id END
+             WHERE id = ?13",
+            params![
+                new_total,
+                new_read,
+                new_dmarc,
+                new_last_seen,
+                new_interval,
+                new_median_amount,
+                new_amount_samples,
+                suggested.to_string(),
+                anomaly.as_ref().map(|a| a.kind.to_string()),
+                anomaly.as_ref().is_some_and(|a| a.needs_you) as i64,
+                anomaly.as_ref().map(|a| a.reason.as_str()),
+                m.id,
+                source_id,
+            ],
+        )?;
+        let _ = user_mode;
+
+        self.conn.execute(
+            "INSERT INTO source_patterns (source_id, pattern, message_count, last_seen_at)
+             VALUES (?1, ?2, 1, ?3)
+             ON CONFLICT (source_id, pattern) DO UPDATE SET
+                 message_count = source_patterns.message_count + 1,
+                 last_seen_at  = MAX(source_patterns.last_seen_at, excluded.last_seen_at)",
+            params![source_id, pattern, m.date],
+        )?;
+
+        self.conn.execute(
+            "UPDATE messages SET source_id = ?1, subject_pattern = ?2 WHERE id = ?3",
+            params![source_id, pattern, m.id],
+        )?;
+
+        Ok(source_id)
+    }
+
+    fn update_source_amount(
+        &self,
+        source_id: i64,
+        m: &ScanMessage,
+        pattern: &str,
+        cents: i64,
+        currency: Option<&str>,
+    ) -> Result<()> {
+        let (total_messages, dmarc_pass_count, median_amount_cents, amount_sample_count): (
+            u32,
+            u32,
+            Option<i64>,
+            u32,
+        ) = self.conn.query_row(
+            "SELECT total_messages, dmarc_pass_count, median_amount_cents, amount_sample_count
+             FROM sources WHERE id = ?1",
+            [source_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        let stats = SourceStats {
+            total_messages,
+            dmarc_pass_count,
+            median_amount_cents,
+            amount_sample_count,
+            ..Default::default()
+        };
+        let incoming = IncomingSourceMail {
+            occurred_at: m.date,
+            normalized_pattern: pattern.to_string(),
+            dmarc_pass: m.dmarc_pass,
+            amount_cents: Some(cents),
+            currency: currency.map(str::to_string),
+        };
+        let anomaly = detect_anomaly(&stats, &incoming);
+        let new_median = match median_amount_cents {
+            Some(prev) => (prev * 3 + cents) / 4,
+            None => cents,
+        };
+        self.conn.execute(
+            "UPDATE sources
+             SET median_amount_cents = ?1,
+                 amount_sample_count = amount_sample_count + 1,
+                 anomaly_kind        = COALESCE(?2, anomaly_kind),
+                 anomaly_needs_you   = CASE WHEN ?2 IS NOT NULL THEN ?3 ELSE anomaly_needs_you END,
+                 anomaly_reason      = COALESCE(?4, anomaly_reason),
+                 anomaly_message_id  = CASE WHEN ?2 IS NOT NULL THEN ?5 ELSE anomaly_message_id END
+             WHERE id = ?6",
+            params![
+                new_median,
+                anomaly.as_ref().map(|a| a.kind.to_string()),
+                anomaly.as_ref().is_some_and(|a| a.needs_you) as i64,
+                anomaly.as_ref().map(|a| a.reason.as_str()),
+                m.id,
+                source_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Lists recurring sources ordered by message volume descending.
+    pub fn list_sources(&self, limit: usize) -> Result<Vec<SourceRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_key, display_name, domain, mode, user_mode != 0,
+                    total_messages, read_messages, dmarc_pass_count, is_newsletter != 0,
+                    first_seen_at, last_seen_at, median_interval_secs, median_amount_cents,
+                    amount_sample_count, anomaly_kind, anomaly_needs_you != 0, anomaly_reason
+             FROM sources
+             ORDER BY total_messages DESC, last_seen_at DESC
+             LIMIT ?1",
+        )?;
+        let mut pat_stmt = self.conn.prepare(
+            "SELECT pattern FROM source_patterns
+             WHERE source_id = ?1
+             ORDER BY message_count DESC, last_seen_at DESC
+             LIMIT 5",
+        )?;
+        let rows = stmt.query_map([limit as i64], |r| {
+            let id: i64 = r.get(0)?;
+            let anomaly_kind: Option<String> = r.get(15)?;
+            let anomaly_needs_you: bool = r.get(16)?;
+            let anomaly_reason: Option<String> = r.get(17)?;
+            let anomaly = match (anomaly_kind.as_deref(), anomaly_reason) {
+                (Some(k), Some(reason)) => {
+                    k.parse::<AnomalyKind>().ok().map(|kind| SourceAnomaly {
+                        kind,
+                        needs_you: anomaly_needs_you,
+                        reason,
+                    })
+                }
+                _ => None,
+            };
+            Ok(SourceRecord {
+                id,
+                source_key: r.get(1)?,
+                display_name: r.get(2)?,
+                domain: r.get(3)?,
+                mode: parse_col::<SourceMode>(r, "mode")?,
+                user_mode: r.get(5)?,
+                total_messages: r.get(6)?,
+                read_messages: r.get(7)?,
+                dmarc_pass_count: r.get(8)?,
+                is_newsletter: r.get(9)?,
+                first_seen_at: r.get(10)?,
+                last_seen_at: r.get(11)?,
+                median_interval_secs: r.get(12)?,
+                median_amount_cents: r.get(13)?,
+                amount_sample_count: r.get(14)?,
+                anomaly,
+                patterns: Vec::new(),
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let mut rec = row?;
+            rec.patterns = pat_stmt
+                .query_map([rec.id], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            out.push(rec);
+        }
+        Ok(out)
+    }
+
+    /// Sets the user's explicit display mode for a source (`user_mode = 1`).
+    pub fn set_source_mode(&self, source_id: i64, mode: SourceMode) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sources SET mode = ?1, user_mode = 1 WHERE id = ?2",
+            params![mode.to_string(), source_id],
+        )?;
+        Ok(())
+    }
+
+    /// Computes privacy-preserving numerical metrics for "Wer ist am Zug?"
+    /// (sources, cases, human conversations, and "Heute" compression ratio).
+    pub fn evaluate_mailbox_stats(&self, now: i64) -> Result<MailboxEvalStats> {
+        let total_messages = self.conn.query_row(
+            "SELECT COUNT(*) FROM messages m
+             JOIN folders f ON f.id = m.folder_id
+             WHERE COALESCE(f.role, '') NOT IN ('junk', 'trash', 'drafts')",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as usize;
+
+        let unique_sources = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM sources", [], |r| r.get::<_, i64>(0))?
+            as usize;
+        let unique_patterns =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM source_patterns", [], |r| {
+                    r.get::<_, i64>(0)
+                })? as usize;
+        let recurring_pattern_messages = self.conn.query_row(
+            "SELECT COALESCE(SUM(message_count), 0) FROM source_patterns WHERE message_count >= 2",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as usize;
+        let top_100_patterns_messages = self.conn.query_row(
+            "SELECT COALESCE(SUM(cnt), 0) FROM (
+                 SELECT message_count AS cnt FROM source_patterns
+                 ORDER BY message_count DESC LIMIT 100
+             )",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as usize;
+
+        let mut stats = MailboxEvalStats {
+            total_messages,
+            unique_sources,
+            unique_patterns,
+            recurring_pattern_messages,
+            top_100_patterns_messages,
+            ..Default::default()
+        };
+
+        let mut mode_stmt = self
+            .conn
+            .prepare("SELECT mode, COUNT(*) FROM sources GROUP BY mode")?;
+        for row in mode_stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+            let (mode, count) = row?;
+            match mode.as_str() {
+                "show" => stats.sources_show = count as usize,
+                "bundle" => stats.sources_bundle = count as usize,
+                "latest_only" => stats.sources_latest_only = count as usize,
+                "mute" => stats.sources_mute = count as usize,
+                _ => {}
+            }
+        }
+
+        stats.active_anomalies = self.conn.query_row(
+            "SELECT COUNT(*) FROM sources WHERE anomaly_kind IS NOT NULL",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as usize;
+
+        for c in self.list_cases(false)? {
+            match c.case.status {
+                CaseStatus::NeedsYou => stats.cases_needs_you += 1,
+                CaseStatus::Waiting => stats.cases_waiting += 1,
+                CaseStatus::Done => stats.cases_done += 1,
+                _ => {}
+            }
+            match c.case.kind {
+                CaseKind::Order => stats.cases_order += 1,
+                CaseKind::Invoice => stats.cases_invoice += 1,
+                CaseKind::Contract => stats.cases_contract += 1,
+                _ => {}
+            }
+        }
+
+        // Evaluate human conversation threads (messages with in_reply_to or sent replies).
+        let own: Vec<String> = self
+            .accounts()?
+            .into_iter()
+            .map(|a| a.email.to_ascii_lowercase())
+            .collect();
+        let mut thread_stmt = self.conn.prepare(&format!(
+            "{SUMMARY_SELECT}
+             WHERE COALESCE(f.role, '') NOT IN ('junk', 'trash', 'drafts')
+               AND m.in_reply_to IS NOT NULL AND m.in_reply_to != ''
+             ORDER BY m.date DESC
+             LIMIT 500"
+        ))?;
+        let reply_msgs: Vec<MessageSummary> = thread_stmt
+            .query_map([], summary_from_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut seen_threads = std::collections::HashSet::new();
+        for m in reply_msgs {
+            let root = m
+                .header
+                .references
+                .first()
+                .or(m.header.in_reply_to.as_ref())
+                .cloned()
+                .unwrap_or_default();
+            if !root.is_empty() && !seen_threads.insert(root) {
+                continue;
+            }
+            let body: String = self
+                .conn
+                .query_row(
+                    "SELECT COALESCE(body_text, preview, '') FROM messages WHERE id = ?1",
+                    [m.id],
+                    |r| r.get(0),
+                )
+                .unwrap_or_default();
+            let turn = assess_turn(&m.header, &body, &own, now);
+            stats.human_threads_total += 1;
+            match turn.status {
+                TurnStatus::NeedsYou => stats.human_needs_you += 1,
+                TurnStatus::Waiting { follow_up_due } => {
+                    stats.human_waiting += 1;
+                    if follow_up_due {
+                        stats.human_follow_up_due += 1;
+                    }
+                }
+                TurnStatus::ReadingAlong => stats.human_reading_along += 1,
+                TurnStatus::Done => stats.human_done += 1,
+            }
+        }
+
+        let seven_days_ago = now - 7 * 86_400;
+        stats.recent_7d_incoming = self.conn.query_row(
+            "SELECT COUNT(*) FROM messages m
+             JOIN folders f ON f.id = m.folder_id
+             WHERE m.date >= ?1
+               AND COALESCE(f.role, '') NOT IN ('junk', 'trash', 'drafts', 'sent')",
+            [seven_days_ago],
+            |r| r.get::<_, i64>(0),
+        )? as usize;
+
+        // "Heute" rows: active cases + human conversations (NeedsYou + Waiting) + active anomalies + 1 summary line for bundled/muted sources + unbundled individual messages in 7d.
+        let unbundled_7d: usize = self.conn.query_row(
+            "SELECT COUNT(DISTINCT COALESCE(m.source_id, -m.id))
+             FROM messages m
+             JOIN folders f ON f.id = m.folder_id
+             LEFT JOIN sources s ON s.id = m.source_id
+             WHERE m.date >= ?1
+               AND COALESCE(f.role, '') NOT IN ('junk', 'trash', 'drafts', 'sent')
+               AND COALESCE(s.mode, 'show') IN ('show', 'latest_only')
+               AND NOT EXISTS (SELECT 1 FROM case_events ce WHERE ce.message_id = m.id)",
+            [seven_days_ago],
+            |r| r.get::<_, i64>(0),
+        )? as usize;
+        stats.recent_7d_today_rows = stats.cases_needs_you
+            + stats.cases_waiting
+            + stats.human_needs_you
+            + stats.human_waiting
+            + stats.active_anomalies
+            + unbundled_7d
+            + usize::from(stats.sources_bundle + stats.sources_mute > 0);
+
+        Ok(stats)
     }
 }
 
@@ -1926,8 +2495,11 @@ pub struct ScanMessage {
     pub from_name: Option<String>,
     pub from_addr: Option<String>,
     pub to: Vec<String>,
+    pub cc: Vec<String>,
     pub date: i64,
     pub list_id: Option<String>,
+    pub has_unsubscribe: bool,
+    pub is_seen: bool,
     pub dmarc_pass: bool,
     pub body_text: Option<String>,
     pub folder_role: Option<FolderRole>,
@@ -1935,7 +2507,9 @@ pub struct ScanMessage {
 
 const SCAN_SELECT: &str = "
     SELECT m.id, m.message_id, m.in_reply_to, m.refs, m.subject, m.from_name,
-           m.from_addr, m.to_addrs, COALESCE(m.date, 0) AS date, m.list_id,
+           m.from_addr, m.to_addrs, m.cc_addrs, COALESCE(m.date, 0) AS date, m.list_id,
+           m.list_unsubscribe != '[]' OR m.list_unsubscribe_post != 0 AS has_unsubscribe,
+           instr(m.flags, '\\Seen') > 0 AS is_seen,
            m.dmarc_pass, m.body_text, f.role AS folder_role
     FROM messages m
     JOIN folders f ON f.id = m.folder_id";
@@ -1950,8 +2524,11 @@ fn scan_from_row(row: &Row<'_>) -> rusqlite::Result<ScanMessage> {
         from_name: row.get("from_name")?,
         from_addr: row.get("from_addr")?,
         to: json_list(row, "to_addrs")?,
+        cc: json_list(row, "cc_addrs")?,
         date: row.get("date")?,
         list_id: row.get("list_id")?,
+        has_unsubscribe: row.get("has_unsubscribe")?,
+        is_seen: row.get("is_seen")?,
         dmarc_pass: row.get("dmarc_pass")?,
         body_text: row.get("body_text")?,
         folder_role: row
