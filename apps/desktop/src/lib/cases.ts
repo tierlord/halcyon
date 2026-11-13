@@ -28,6 +28,13 @@ export interface CaseKey {
   value: string
 }
 
+export interface CaseAttachment {
+  id: string
+  name: string
+  sizeLabel?: string
+  messageId?: number
+}
+
 export interface CaseItem {
   id: string
   title: string
@@ -41,6 +48,7 @@ export interface CaseItem {
   reason: string
   keys: CaseKey[]
   events: CaseEvent[]
+  attachments?: CaseAttachment[]
   messageIds: number[]
 }
 
@@ -142,6 +150,9 @@ export function createMockCases(messages: MessageSummary[]): {
         { id: 'e5', day: dayOffset(-3), label: 'Rechnung gestellt', phase: 'start', messageId: stadtwerkeJahr ?? stadtwerkeStrom, direction: 'in' },
         { id: 'e6', day: dayOffset(2), label: 'Fällig', phase: 'due' },
       ],
+      attachments: [
+        { id: 'att-sw-1', name: 'Jahresabrechnung_2025.pdf', sizeLabel: '420 KB', messageId: stadtwerkeJahr ?? stadtwerkeStrom },
+      ],
       messageIds: [stadtwerkeJahr, stadtwerkeStrom].filter((id): id is number => id != null),
     },
     {
@@ -160,6 +171,9 @@ export function createMockCases(messages: MessageSummary[]): {
         { id: 'e8', day: dayOffset(0), label: 'Freigabe gesendet', phase: 'update', messageId: kranzIds[1], direction: 'out' },
         { id: 'e9', day: dayOffset(3), label: 'Rückmeldung erwartet', phase: 'due' },
       ],
+      attachments: [
+        { id: 'att-kranz-1', name: 'Angebot_Ersatzteile.pdf', sizeLabel: '185 KB', messageId: kranzIds[0] },
+      ],
       messageIds: kranzIds,
     },
     {
@@ -177,6 +191,9 @@ export function createMockCases(messages: MessageSummary[]): {
         { id: 'e10', day: dayOffset(-6), label: 'Gebucht', phase: 'start', messageId: reiseId, direction: 'in' },
         { id: 'e11', day: dayOffset(4), label: 'Ticket-Abruf', phase: 'due' },
       ],
+      attachments: [
+        { id: 'att-reise-1', name: 'Buchungsbestaetigung_HH.pdf', sizeLabel: '310 KB', messageId: reiseId },
+      ],
       messageIds: reiseId != null ? [reiseId] : [],
     },
     {
@@ -191,6 +208,9 @@ export function createMockCases(messages: MessageSummary[]): {
       keys: [{ label: 'Vertragsnr.', value: '2026-1184' }],
       events: [
         { id: 'e12', day: dayOffset(-4), label: 'Unterlagen erhalten', phase: 'done', messageId: versicherungId, direction: 'in' },
+      ],
+      attachments: [
+        { id: 'att-vers-1', name: 'Police_2026-1184.pdf', sizeLabel: '640 KB', messageId: versicherungId },
       ],
       messageIds: versicherungId != null ? [versicherungId] : [],
     },
@@ -207,6 +227,9 @@ export function createMockCases(messages: MessageSummary[]): {
       events: [
         { id: 'e13', day: dayOffset(-8), label: 'Bestellt', phase: 'start', messageId: fotobuchId, direction: 'in' },
         { id: 'e14', day: dayOffset(-5), label: 'Versandt', phase: 'done', messageId: fotobuchId, direction: 'in' },
+      ],
+      attachments: [
+        { id: 'att-fb-1', name: 'Rechnung_FB-9021.pdf', sizeLabel: '142 KB', messageId: fotobuchId },
       ],
       messageIds: fotobuchId != null ? [fotobuchId] : [],
     },
