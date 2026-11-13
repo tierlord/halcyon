@@ -140,17 +140,6 @@ pub async fn resolve_logo(domain: &str) -> Option<String> {
         }
     }
 
-    // 3. Smart fallback via public icon services.
-    let fallback_candidates = [
-        format!("https://icons.duckduckgo.com/ip3/{domain}.ico"),
-        format!("https://www.google.com/s2/favicons?domain={domain}&sz=64"),
-    ];
-    for url in &fallback_candidates {
-        if let Some(data_url) = fetch_image_as_data_url(&http, url, 120).await {
-            return Some(data_url);
-        }
-    }
-
     None
 }
 

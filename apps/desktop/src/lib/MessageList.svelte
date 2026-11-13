@@ -48,7 +48,7 @@
   <ul bind:this={listEl} role="listbox" aria-label={title}>
     {#each messages as m (m.id)}
       {@const unread = !isSeen(m)}
-      {@const logo = (void logoVersion, getBrandLogo(m.header.from_addr))}
+      {@const logo = (void logoVersion, m.header.dmarc_pass ? getBrandLogo(m.header.from_addr) : null)}
       <li
         role="option"
         aria-selected={m.id === selectedId}

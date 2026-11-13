@@ -21,7 +21,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// The header fields fetched for every message. Fetching only these instead
 /// of the full header keeps the initial sync of large mailboxes small.
 pub const HEADER_FIELDS: &str = "FROM TO CC REPLY-TO SUBJECT DATE MESSAGE-ID IN-REPLY-TO \
-     REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST";
+     REFERENCES LIST-ID LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST AUTHENTICATION-RESULTS";
 
 /// Any byte stream an IMAP session can run over (plain TCP or TLS).
 pub trait ImapIo: AsyncRead + AsyncWrite + Unpin + Send + Debug {}
@@ -358,7 +358,35 @@ pub fn parse_header_block(raw: &[u8]) -> MessageHeader {
             .unwrap_or_default(),
         list_unsubscribe_post: raw_header("List-Unsubscribe-Post")
             .is_some_and(|v| v.contains("List-Unsubscribe=One-Click")),
+        dmarc_pass: has_dmarc_pass(headers),
     }
+}
+
+fn has_dmarc_pass(headers: mail_parser::Headers<'_>) -> bool {
+    headers.iter().any(|h| {
+        h.name()
+            .as_str()
+            .eq_ignore_ascii_case("Authentication-Results")
+            && parse_dmarc_pass(&String::from_utf8_lossy(h.raw_value()))
+    })
+}
+
+fn parse_dmarc_pass(value: &str) -> bool {
+    value.split(';').skip(1).any(|clause| {
+        let lower = clause.trim().to_ascii_lowercase();
+        let Some(rest) = lower.strip_prefix("dmarc") else {
+            return false;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            return false;
+        };
+        let rest = rest.trim_start();
+        let Some(after) = rest.strip_prefix("pass") else {
+            return false;
+        };
+        after.is_empty() || after.starts_with(|c: char| c.is_ascii_whitespace() || c == '(')
+    })
 }
 
 fn addresses(list: Option<AddressList<'_>>) -> Vec<String> {
@@ -431,6 +459,22 @@ List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n\r\n";
             ]
         );
         assert!(h.list_unsubscribe_post);
+        assert!(!h.dmarc_pass);
+    }
+
+    #[test]
+    fn detects_dmarc_pass_only_on_valid_clauses() {
+        let raw_pass = b"From: Info <info@shop.example>\r\n\
+Authentication-Results: mx.example.org; dkim=pass; spf=pass; dmarc=pass (p=REJECT) header.from=shop.example\r\n\r\n";
+        assert!(parse_header_block(raw_pass).dmarc_pass);
+
+        let raw_fail = b"From: Info <info@shop.example>\r\n\
+Authentication-Results: mx.example.org; dkim=fail; dmarc=fail header.from=shop.example\r\n\r\n";
+        assert!(!parse_header_block(raw_fail).dmarc_pass);
+
+        let raw_spoofed_prefix = b"From: Info <info@shop.example>\r\n\
+Authentication-Results: mx.example.org; x-dmarc=pass; dmarc=bestguesspass\r\n\r\n";
+        assert!(!parse_header_block(raw_spoofed_prefix).dmarc_pass);
     }
 
     #[test]

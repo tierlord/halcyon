@@ -76,7 +76,7 @@ function msg(
   from: [string | null, string],
   subject: string,
   ago: number,
-  opts: { seen?: boolean; list?: boolean; to?: string[] } = {},
+  opts: { seen?: boolean; list?: boolean; to?: string[]; dmarcPass?: boolean } = {},
 ): MessageSummary {
   const account = accounts.find((a) => a.id === accountId)!
   const id = nextId++
@@ -108,6 +108,7 @@ function msg(
       list_id: opts.list ? 'news.example.invalid' : null,
       list_unsubscribe: opts.list ? ['https://example.invalid/unsubscribe'] : [],
       list_unsubscribe_post: !!opts.list,
+      dmarc_pass: opts.dmarcPass ?? false,
     },
   }
 }
@@ -119,19 +120,19 @@ const all: MessageSummary[] = [
   msg(2, ['Sabine Kranz', 'kranz@zulieferer.example'], 'Angebot Ersatzteile – bitte bis Freitag bestätigen', 5 * hour),
   msg(1, ['PayPal', 'service@paypal.example'], 'Dein Bestätigungscode: 482913', 6 * hour, { seen: true }),
   msg(3, ['DHL Paket', 'noreply@dhl.example'], 'Ihre Sendung kommt heute zwischen 14:00 und 16:00', 8 * hour),
-  msg(1, ['Stadtwerke', 'kundenservice@stadtwerke.example'], 'Abschlagsrechnung Strom', 1 * day + 2 * hour, { seen: true }),
-  msg(3, ['Shop Wochenpost', 'news@shop.example'], 'Nur heute: 20 % auf alles ☀', 1 * day + 5 * hour, { list: true }),
+  msg(1, ['Stadtwerke', 'kundenservice@stadtwerke.example'], 'Abschlagsrechnung Strom', 1 * day + 2 * hour, { seen: true, dmarcPass: true }),
+  msg(3, ['Shop Wochenpost', 'news@shop.example'], 'Nur heute: 20 % auf alles ☀', 1 * day + 5 * hour, { list: true, dmarcPass: true }),
   msg(2, ['Jonas Becker', 'jonas@muster-werkstatt.example'], 'Re: Dienstplan Dezember', 2 * day, { seen: true }),
   msg(3, ['GitHub', 'noreply@github.example'], '[halcyon] New sign-in from Linux', 3 * day, { seen: true }),
-  msg(1, ['Versicherung Plus', 'vertrag@versicherung.example'], 'Ihr Vertrag Nr. 2026-1184 – Vertragsunterlagen', 4 * day, { seen: true }),
-  msg(3, ['Reiseportal', 'buchung@reise.example'], 'Buchungsbestätigung: Hamburg, 12.–14. Dezember', 6 * day, { seen: true }),
+  msg(1, ['Versicherung Plus', 'vertrag@versicherung.example'], 'Ihr Vertrag Nr. 2026-1184 – Vertragsunterlagen', 4 * day, { seen: true, dmarcPass: true }),
+  msg(3, ['Reiseportal', 'buchung@reise.example'], 'Buchungsbestätigung: Hamburg, 12.–14. Dezember', 6 * day, { seen: true, dmarcPass: true }),
   msg(2, [null, 'buchhaltung@muster-werkstatt.example'], 'Rechnung 2026-0417 Werkzeugbedarf', 9 * day, { seen: true }),
-  msg(3, ['Streamingdienst', 'info@stream.example'], 'Neu diesen Monat', 12 * day, { seen: true, list: true }),
-  msg(1, ['Online-Banking', 'hinweis@bank.example'], 'Neue Dokumente in Ihrem Postfach', 20 * day, { seen: true }),
+  msg(3, ['Streamingdienst', 'info@stream.example'], 'Neu diesen Monat', 12 * day, { seen: true, list: true, dmarcPass: true }),
+  msg(1, ['Online-Banking', 'hinweis@bank.example'], 'Neue Dokumente in Ihrem Postfach', 20 * day, { seen: true, dmarcPass: true }),
   msg(3, ['Kleinanzeigen', 'noreply@kleinanzeigen.example'], 'Deine Anzeige "Rennrad 28 Zoll" ist online', 26 * day, { seen: true }),
   msg(2, ['Sabine Kranz', 'kranz@zulieferer.example'], 'Lieferung KW 44', 40 * day, { seen: true }),
   msg(1, ['Telekom', 'rechnung@telekom.example'], 'Ihre Rechnung für Oktober 2026', 31 * day, { seen: true }),
-  msg(3, ['Fotobuch Studio', 'hallo@fotobuch.example'], 'Dein Fotobuch wurde versendet', 400 * day, { seen: true }),
+  msg(3, ['Fotobuch Studio', 'hallo@fotobuch.example'], 'Dein Fotobuch wurde versendet', 400 * day, { seen: true, dmarcPass: true }),
 ]
 
 const delay = <T>(value: T, ms = 120) => new Promise<T>((r) => setTimeout(() => r(value), ms))
@@ -337,10 +338,10 @@ function svgDataUrl(svg: string): string {
 
 const mockBrandStore = new Map<string, BrandLogo>([
   [
-    'kleinanzeigen.example',
+    'stadtwerke.example',
     {
       data_url: svgDataUrl(
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="#B5E941" d="M32 10c12.15 0 22 9.85 22 22s-9.85 22-22 22-22-9.85-22-22 9.85-22 22-22zm-4 12v20h8v-7l7 7h9l-9.5-9.5L52 22h-9l-7 7v-7h-8z"/></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><circle cx="32" cy="32" r="22" fill="#8CD748"/><path fill="#ffffff" d="M35 16L22 34h10l-3 14 13-18H32l3-14z"/></svg>',
       ),
       bg: null,
       padded: true,
@@ -348,10 +349,10 @@ const mockBrandStore = new Map<string, BrandLogo>([
     },
   ],
   [
-    'paypal.example',
+    'shop.example',
     {
       data_url: svgDataUrl(
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="#003087" d="M21 12h17c7.5 0 12 4.2 11 11.2C48 30.5 42.5 35 34.5 35H28l-2.5 15H16l5-38zm8 15h5.5c3.5 0 5.8-1.6 6.2-4.6.4-2.8-1.3-4.4-4.7-4.4H30.5L29 27z"/></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="#C23B2B" d="M14 22h36l-4 28H18L14 22z"/><path fill="none" stroke="#C23B2B" stroke-width="5" d="M24 22v-4a8 8 0 0 1 16 0v4"/></svg>',
       ),
       bg: null,
       padded: true,
@@ -359,10 +360,10 @@ const mockBrandStore = new Map<string, BrandLogo>([
     },
   ],
   [
-    'telekom.example',
+    'bank.example',
     {
       data_url: svgDataUrl(
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="#E20074" d="M14 12h36v11H44v-4H36v26h5v7H23v-7h5V19h-8v4h-6V12zm0 18h7v7h-7v-7zm29 0h7v7h-7v-7z"/></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="#1E3A5F" d="M32 10L10 22v5h44v-5L32 10zM16 31v15h6V31h-6zm13 0v15h6V31h-6zm13 0v15h6V31h-6zM10 49v5h44v-5H10z"/></svg>',
       ),
       bg: null,
       padded: true,
@@ -370,10 +371,10 @@ const mockBrandStore = new Map<string, BrandLogo>([
     },
   ],
   [
-    'dhl.example',
+    'reise.example',
     {
       data_url: svgDataUrl(
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect x="4" y="16" width="56" height="32" rx="6" fill="#FFCC00"/><path fill="#D40511" d="M12 24h18l-4 16H12l2-6h6l1-4h-6l-3 0 0-6zm19 0h7l-2 6h5l2-6h7l-4 16h-7l2-6h-5l-2 6h-7l4-16z"/></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><circle cx="32" cy="32" r="22" fill="#2A9D8F"/><polygon fill="#ffffff" points="32,16 38,32 32,48 26,32"/></svg>',
       ),
       bg: null,
       padded: true,
@@ -381,10 +382,32 @@ const mockBrandStore = new Map<string, BrandLogo>([
     },
   ],
   [
-    'github.example',
+    'versicherung.example',
     {
       data_url: svgDataUrl(
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="#181717" d="M32 8C18.7 8 8 18.7 8 32c0 10.6 6.9 19.6 16.4 22.8 1.2.2 1.6-.5 1.6-1.1v-4.2c-6.7 1.4-8.1-3.2-8.1-3.2-1.1-2.8-2.7-3.5-2.7-3.5-2.2-1.5.2-1.5.2-1.5 2.4.2 3.7 2.5 3.7 2.5 2.2 3.7 5.7 2.6 7.1 2 .2-1.6.9-2.6 1.5-3.2-5.3-.6-10.9-2.7-10.9-11.9 0-2.6.9-4.8 2.5-6.5-.2-.6-1.1-3.1.2-6.4 0 0 2-.6 6.6 2.5 1.9-.5 4-.8 6-.8s4.1.3 6 .8c4.6-3.1 6.6-2.5 6.6-2.5 1.3 3.3.5 5.8.2 6.4 1.6 1.7 2.5 3.9 2.5 6.5 0 9.2-5.6 11.3-11 11.9.9.7 1.6 2.2 1.6 4.4v6.6c0 .6.4 1.3 1.6 1.1C49.1 51.6 56 42.6 56 32 56 18.7 45.3 8 32 8z"/></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="#334155" d="M32 10l18 7v14c0 12-7.8 21.5-18 25-10.2-3.5-18-13-18-25V17l18-7z"/></svg>',
+      ),
+      bg: null,
+      padded: true,
+      scale: 1,
+    },
+  ],
+  [
+    'stream.example',
+    {
+      data_url: svgDataUrl(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect x="10" y="14" width="44" height="36" rx="10" fill="#6D28D9"/><polygon fill="#ffffff" points="26,23 44,32 26,41"/></svg>',
+      ),
+      bg: null,
+      padded: true,
+      scale: 1,
+    },
+  ],
+  [
+    'fotobuch.example',
+    {
+      data_url: svgDataUrl(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect x="12" y="14" width="40" height="36" rx="8" fill="#E9C46A"/><circle cx="32" cy="32" r="10" fill="#264653"/></svg>',
       ),
       bg: null,
       padded: true,

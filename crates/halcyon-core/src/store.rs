@@ -165,6 +165,10 @@ CREATE TABLE brand_logos (
     fetched_at  INTEGER NOT NULL DEFAULT (unixepoch())
 );
 "#,
+    // 5: DMARC authentication status per message header.
+    r#"
+ALTER TABLE messages ADD COLUMN dmarc_pass INTEGER NOT NULL DEFAULT 0;
+"#,
 ];
 
 /// Result of looking up a domain in the persistent brand logo cache.
@@ -409,9 +413,9 @@ impl Store {
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO messages (folder_id, uid, message_id, in_reply_to, refs, subject,
                     from_name, from_addr, reply_to, to_addrs, cc_addrs, date, size, flags,
-                    list_id, list_unsubscribe, list_unsubscribe_post)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
-                 ON CONFLICT (folder_id, uid) DO UPDATE SET flags = excluded.flags",
+                    list_id, list_unsubscribe, list_unsubscribe_post, dmarc_pass)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                 ON CONFLICT (folder_id, uid) DO UPDATE SET flags = excluded.flags, dmarc_pass = excluded.dmarc_pass",
             )?;
             for h in headers {
                 stmt.execute(params![
@@ -432,6 +436,7 @@ impl Store {
                     h.list_id,
                     json(&h.list_unsubscribe),
                     h.list_unsubscribe_post,
+                    h.dmarc_pass,
                 ])?;
             }
         }
@@ -925,7 +930,7 @@ impl Store {
 const SUMMARY_SELECT: &str = "
     SELECT m.id, m.folder_id, m.uid, m.message_id, m.in_reply_to, m.refs, m.subject,
            m.from_name, m.from_addr, m.reply_to, m.to_addrs, m.cc_addrs, m.date, m.size,
-           m.flags, m.list_id, m.list_unsubscribe, m.list_unsubscribe_post,
+           m.flags, m.list_id, m.list_unsubscribe, m.list_unsubscribe_post, m.dmarc_pass,
            m.preview, m.has_attachments,
            EXISTS (SELECT 1 FROM message_bodies b WHERE b.message_id = m.id) AS has_body,
            f.account_id AS account_id, f.path AS folder_path, f.role AS folder_role,
@@ -1060,6 +1065,7 @@ fn summary_from_row(row: &Row<'_>) -> rusqlite::Result<MessageSummary> {
             list_id: row.get("list_id")?,
             list_unsubscribe: json_list(row, "list_unsubscribe")?,
             list_unsubscribe_post: row.get("list_unsubscribe_post")?,
+            dmarc_pass: row.get("dmarc_pass")?,
         },
     })
 }
