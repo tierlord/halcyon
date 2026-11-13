@@ -301,7 +301,7 @@ pub fn flag_names(fetch: &Fetch) -> Vec<String> {
 /// `UID BODY.PEEK[HEADER.FIELDS (FROM AUTHENTICATION-RESULTS)]`.
 pub fn dmarc_from_fetch(fetch: &Fetch) -> Option<(u32, bool)> {
     let uid = fetch.uid?;
-    let raw = fetch.header().unwrap_or_default();
+    let raw = fetch.header()?;
     Some((uid, parse_header_block(raw).dmarc_pass))
 }
 

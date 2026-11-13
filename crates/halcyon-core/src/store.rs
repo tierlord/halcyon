@@ -205,6 +205,11 @@ CREATE TABLE meta (
 ALTER TABLE messages ADD COLUMN dmarc_checked INTEGER NOT NULL DEFAULT 0;
 DELETE FROM brand_logos WHERE data_url IS NULL;
 "#,
+    // 9: re-run offline DMARC backfill from stored bodies in case a server
+    // returned incomplete partial headers during IMAP backfill.
+    r#"
+DELETE FROM meta WHERE key = 'backfill.dmarc.v1';
+"#,
 ];
 
 /// Result of looking up a domain in the persistent brand logo cache.
@@ -497,7 +502,7 @@ impl Store {
     pub fn unchecked_dmarc_uids(&self, folder_id: i64, limit: usize) -> Result<Vec<u32>> {
         let mut stmt = self.conn.prepare(
             "SELECT uid FROM messages
-             WHERE folder_id = ?1 AND dmarc_checked = 0
+             WHERE folder_id = ?1 AND dmarc_checked = 0 AND dmarc_pass = 0
              ORDER BY uid DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![folder_id, limit as i64], |r| r.get::<_, u32>(0))?;
@@ -514,7 +519,7 @@ impl Store {
         let mut changed = 0;
         {
             let mut stmt = tx.prepare_cached(
-                "UPDATE messages SET dmarc_pass = ?3, dmarc_checked = 1
+                "UPDATE messages SET dmarc_pass = MAX(dmarc_pass, ?3), dmarc_checked = 1
                  WHERE folder_id = ?1 AND uid = ?2",
             )?;
             for &(uid, pass) in updates {
