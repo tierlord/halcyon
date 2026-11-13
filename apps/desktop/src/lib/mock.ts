@@ -278,7 +278,7 @@ function mockDocument(body: string, allowRemote: boolean): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${img}; style-src 'unsafe-inline'; script-src 'none'"><style>body{margin:16px;font:14px/1.5 system-ui,sans-serif;color:#15110e;background:#ffffff}a{color:#3b5966}img{max-width:100%}</style></head><body>${body}</body></html>`
 }
 
-export function messageContent(id: number, allowRemote: boolean): Promise<MessageView> {
+export function messageContent(id: number, allowRemote: boolean, _dark: boolean): Promise<MessageView> {
   const m = all.find((x) => x.id === id)
   const subject = escapeHtml(m?.header.subject ?? '')
   const isNewsletter = !!m?.header.list_unsubscribe.length
@@ -295,7 +295,7 @@ export function messageContent(id: number, allowRemote: boolean): Promise<Messag
   }
   return delay(
     {
-      rendered: { document: mockDocument(body, allowRemote), remote_blocked: blocked, is_html: true },
+      rendered: { document: mockDocument(body, allowRemote), remote_blocked: blocked, is_html: true, dark: false },
       attachments: m?.has_attachments
         ? [{ part: 3, name: 'Rechnung-2026-11.pdf', mime_type: 'application/pdf', size: 48_213, inline: false }]
         : [],

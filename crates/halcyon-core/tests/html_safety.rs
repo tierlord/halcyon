@@ -77,7 +77,12 @@ fn assert_html_is_safe(name: &str, raw_html: &str) -> usize {
     let raw_mail = format!(
         "From: sender@mail.example\r\nTo: max@mail.example\r\nSubject: Test\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{raw_html}"
     );
-    let rendered = render(&parse(raw_mail.as_bytes()), false);
+    let rendered = render(&parse(raw_mail.as_bytes()), false, false);
+    let dark = render(&parse(raw_mail.as_bytes()), false, true);
+    assert!(
+        dark.document.contains("script-src 'none'"),
+        "[{name}] dark document missing script-src 'none'"
+    );
     assert!(
         rendered.document.contains("script-src 'none'"),
         "[{name}] rendered document missing script-src 'none'"

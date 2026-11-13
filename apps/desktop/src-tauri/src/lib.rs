@@ -566,11 +566,12 @@ async fn message_content(
     state: State<'_, AppState>,
     id: i64,
     allow_remote: bool,
+    dark: bool,
 ) -> CmdResult<MessageView> {
     let raw = raw_message(&state, id).await?;
     let parsed = content::parse(&raw);
     Ok(MessageView {
-        rendered: content::render(&parsed, allow_remote),
+        rendered: content::render(&parsed, allow_remote, dark),
         attachments: parsed.attachments.clone(),
     })
 }

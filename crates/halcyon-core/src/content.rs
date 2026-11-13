@@ -158,29 +158,64 @@ pub struct Rendered {
     /// Remote images or styles that were blocked.
     pub remote_blocked: usize,
     pub is_html: bool,
+    /// The document is shown on a dark page (see [`render`]).
+    pub dark: bool,
 }
 
 /// Renders a message for display. With `allow_remote`, remote images are
 /// loaded (HTTPS only; the user explicitly asked for this message).
-pub fn render(content: &MessageContent, allow_remote: bool) -> Rendered {
+///
+/// With `dark` (the app is in dark mode), plain-text mails and HTML mails
+/// that bring their own dark design (`prefers-color-scheme: dark`) are shown
+/// dark. All other HTML mails stay on a light page, the way they were
+/// designed, and their dark-mode rules are switched off – otherwise a mail
+/// may turn its text light while its backgrounds stay light.
+pub fn render(content: &MessageContent, allow_remote: bool, dark: bool) -> Rendered {
     match &content.html {
         Some(html) => {
-            let (body, remote_blocked) = sanitize_html(html, &content.inline_images, allow_remote);
+            let dark = dark && supports_dark_mode(html);
+            let (body, remote_blocked) =
+                sanitize(html, &content.inline_images, allow_remote, !dark);
             Rendered {
-                document: wrap_document(&body, allow_remote, false),
+                document: wrap_document(&body, allow_remote, false, dark),
                 remote_blocked,
                 is_html: true,
+                dark,
             }
         }
         None => {
             let body = text_to_html(content.text.as_deref().unwrap_or(""));
             Rendered {
-                document: wrap_document(&body, false, true),
+                document: wrap_document(&body, false, true, dark),
                 remote_blocked: 0,
                 is_html: false,
+                dark,
             }
         }
     }
+}
+
+static RE_DARK_SUPPORT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?i)prefers-color-scheme\s*:\s*dark|<meta[^>]+(?:supported-)?color-scheme[^>]+dark|(?:^|[^-\w])color-scheme\s*:[^;}]*dark"#,
+    )
+    .unwrap()
+});
+// The `color-scheme` property (not the media feature): a mail declaring
+// `light dark` would otherwise switch `light-dark()` colours to dark.
+static RE_COLOR_SCHEME_PROP: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(^|[^-\w])color-scheme\s*:\s*[^;}]+").unwrap());
+static RE_DARK_QUERY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)prefers-color-scheme\s*:\s*dark").unwrap());
+// `class` cannot pass ammonia's generic allow-list, so it travels under a
+// private name and is restored afterwards. Mail styles mostly target classes.
+static RE_CLASS_ATTR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(\s)class(\s*=)").unwrap());
+const CLASS_CARRIER: &str = "data-hc";
+
+/// Whether a mail declares its own dark design.
+pub fn supports_dark_mode(html: &str) -> bool {
+    RE_DARK_SUPPORT.is_match(html)
 }
 
 static RE_CID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)cid:([^"'\s>)]+)"#).unwrap());
@@ -239,6 +274,15 @@ pub fn sanitize_html(
     inline_images: &HashMap<String, String>,
     allow_remote: bool,
 ) -> (String, usize) {
+    sanitize(html, inline_images, allow_remote, true)
+}
+
+fn sanitize(
+    html: &str,
+    inline_images: &HashMap<String, String>,
+    allow_remote: bool,
+    force_light: bool,
+) -> (String, usize) {
     if html.len() > MAX_HTML_BYTES || nesting_depth(html) > MAX_NESTING {
         // Strip tags without building a tree: building it is the slow part.
         let text = RE_ANY_TAG.replace_all(html, " ");
@@ -253,6 +297,7 @@ pub fn sanitize_html(
         );
     }
 
+    let html = RE_CLASS_ATTR.replace_all(html, format!("${{1}}{CLASS_CARRIER}${{2}}"));
     let filter_blocked = blocked.clone();
     let inline = Arc::new(inline_images.clone());
     let mut builder = ammonia::Builder::default();
@@ -275,6 +320,7 @@ pub fn sanitize_html(
         .add_tag_attributes("th", ["colspan", "rowspan", "nowrap", "background"])
         .url_schemes(["http", "https", "mailto", "cid", "data"].into())
         .url_relative(ammonia::UrlRelative::Deny)
+        .add_generic_attribute_prefixes([CLASS_CARRIER])
         .link_rel(Some("noopener noreferrer"))
         .strip_comments(true)
         .attribute_filter(move |element, attribute, value| {
@@ -284,10 +330,12 @@ pub fn sanitize_html(
                 value,
                 &inline,
                 allow_remote,
+                force_light,
                 &filter_blocked,
             )
         });
-    let body = builder.clean(html).to_string();
+    let body = builder.clean(&html).to_string();
+    let body = body.replace(&format!(" {CLASS_CARRIER}=\""), " class=\"");
     // <style> blocks pass the allow-list unchanged; clean their CSS the same
     // way as style attributes.
     let body = RE_STYLE_BLOCK
@@ -295,7 +343,7 @@ pub fn sanitize_html(
             format!(
                 "{}{}{}",
                 &c[1],
-                clean_css(&c[2], allow_remote, &blocked),
+                clean_css(&c[2], allow_remote, force_light, &blocked),
                 &c[3]
             )
         })
@@ -308,8 +356,17 @@ pub fn sanitize_html(
 /// legacy script hooks are removed and remote `url()`s are blocked unless
 /// allowed. The CSP would stop the loads anyway; this keeps the first layer
 /// honest and lets the UI count what was blocked.
-fn clean_css(css: &str, allow_remote: bool, blocked: &AtomicUsize) -> String {
+fn clean_css(css: &str, allow_remote: bool, force_light: bool, blocked: &AtomicUsize) -> String {
     let plain = decode_css_escapes(&strip_css_comments(css));
+    // An unknown value makes the media query false, so dark rules never apply.
+    let plain = if force_light {
+        let plain = RE_DARK_QUERY.replace_all(&plain, "prefers-color-scheme: halcyon-light-page");
+        RE_COLOR_SCHEME_PROP
+            .replace_all(&plain, "${1}color-scheme: light")
+            .into_owned()
+    } else {
+        plain
+    };
     if !allow_remote {
         let imports = RE_CSS_IMPORT
             .find_iter(&plain)
@@ -405,6 +462,7 @@ fn filter_attribute<'u>(
     value: &'u str,
     inline: &HashMap<String, String>,
     allow_remote: bool,
+    force_light: bool,
     blocked: &AtomicUsize,
 ) -> Option<Cow<'u, str>> {
     let lower = value.trim().to_ascii_lowercase();
@@ -442,7 +500,15 @@ fn filter_attribute<'u>(
                 None
             }
         }
-        (_, "style") => Some(Cow::Owned(clean_css(value, allow_remote, blocked))),
+        // Old `bgcolor` attributes ignore the mail's own dark-mode CSS and leave
+        // light bands around dark content; on a dark page that CSS decides.
+        (_, "bgcolor") if !force_light => None,
+        (_, "style") => Some(Cow::Owned(clean_css(
+            value,
+            allow_remote,
+            force_light,
+            blocked,
+        ))),
         _ => Some(Cow::Borrowed(value)),
     }
 }
@@ -497,7 +563,7 @@ fn escape(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-fn wrap_document(body: &str, allow_remote: bool, plain: bool) -> String {
+fn wrap_document(body: &str, allow_remote: bool, plain: bool, dark: bool) -> String {
     let img_src = if allow_remote {
         "data: https:"
     } else {
@@ -512,17 +578,23 @@ fn wrap_document(body: &str, allow_remote: bool, plain: bool) -> String {
     } else {
         "font: 14px/1.5 system-ui, sans-serif;"
     };
+    // Dark page: Pitch Black lifted a little so mail backgrounds still show.
+    let (scheme, fg, bg, link, quote) = if dark {
+        ("dark", "#f7f0f0", "#1d1b1a", "#4cb8d4", "#9fb6c0")
+    } else {
+        ("light", "#15110e", "#ffffff", "#3b5966", "#3b5966")
+    };
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
          <meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">\
          <meta name=\"referrer\" content=\"no-referrer\">\
          <style>\
-         html{{color-scheme:light;}}\
-         body{{margin:16px;{font}color:#15110e;background:#ffffff;overflow-wrap:anywhere;}}\
+         html{{color-scheme:{scheme};}}\
+         body{{margin:16px;{font}color:{fg};background:{bg};overflow-wrap:anywhere;}}\
          img{{max-width:100%;height:auto;}}\
-         a{{color:#3b5966;}}\
+         a{{color:{link};}}\
          .plain div{{white-space:pre-wrap;}}\
-         .q1{{color:#3b5966;border-left:3px solid #1698b5;padding-left:8px;}}\
+         .q1{{color:{quote};border-left:3px solid #1698b5;padding-left:8px;}}\
          .q2{{color:#6b6460;border-left:3px solid #df7618;padding-left:8px;}}\
          </style></head><body>{body}</body></html>"
     )
@@ -602,10 +674,10 @@ mod tests {
             html: Some("<p>Hallo</p>".into()),
             ..Default::default()
         };
-        let doc = render(&content, false).document;
+        let doc = render(&content, false, false).document;
         assert!(doc.contains("script-src 'none'"));
         assert!(doc.contains("img-src data:;"));
-        let doc = render(&content, true).document;
+        let doc = render(&content, true, false).document;
         assert!(doc.contains("img-src data: https:;"));
     }
 
@@ -648,7 +720,7 @@ mod tests {
             b"%PDF-1.4"
         );
 
-        let rendered = render(&content, false);
+        let rendered = render(&content, false, false);
         assert!(rendered.document.contains("data:image/png;base64,"));
         assert_eq!(rendered.remote_blocked, 0);
     }
@@ -688,5 +760,70 @@ mod tests {
         let (out, _) = clean(&html);
         assert!(out.contains("Hallo"));
         assert!(!out.contains("<b") && !out.contains("onclick"));
+    }
+
+    #[test]
+    fn mail_classes_survive_for_its_styles() {
+        let (out, _) =
+            clean(r#"<table class="box wide" onclick="x"><tr><td CLASS='c'>a</td></tr></table>"#);
+        assert!(out.contains(r#"class="box wide""#), "{out}");
+        assert!(out.contains(r#"class="c""#), "{out}");
+        assert!(!out.contains("data-hc") && !out.contains("onclick"));
+    }
+
+    #[test]
+    fn dark_mode_only_for_mails_that_support_it() {
+        let styled = MessageContent {
+            html: Some(
+                "<style>.box{color:#222;background:#eee}@media (prefers-color-scheme: dark){.box{color:#eee!important;background:#222!important}}</style><table class=\"box\" bgcolor=\"#eeeeee\"><tr><td>Hallo</td></tr></table>".into(),
+            ),
+            ..Default::default()
+        };
+        let r = render(&styled, false, true);
+        assert!(r.dark);
+        assert!(r.document.contains("color-scheme:dark"));
+        assert!(r.document.contains("prefers-color-scheme: dark"));
+
+        // In light mode the same mail's dark rules are switched off.
+        let r = render(&styled, false, false);
+        assert!(!r.dark);
+        assert!(!r.document.contains("prefers-color-scheme: dark"));
+
+        let declared = MessageContent {
+            html: Some("<style>:root{color-scheme: light dark}p{color:light-dark(#111,#eee)}</style><p>x</p>".into()),
+            ..Default::default()
+        };
+        let r = render(&declared, false, false);
+        assert!(
+            r.document.contains(":root{color-scheme: light}"),
+            "{}",
+            r.document
+        );
+
+        // A mail without dark design stays on a light page, also in dark mode.
+        let plain_html = MessageContent {
+            html: Some("<p style=\"color:#333\">Hallo</p>".into()),
+            ..Default::default()
+        };
+        let r = render(&plain_html, false, true);
+        assert!(!r.dark);
+        assert!(r.document.contains("color-scheme:light"));
+
+        // Plain text follows the app.
+        let text = MessageContent {
+            text: Some("Hallo".into()),
+            ..Default::default()
+        };
+        assert!(render(&text, false, true).dark);
+    }
+
+    #[test]
+    fn dark_page_drops_legacy_background_colors() {
+        let c = MessageContent {
+            html: Some("<style>@media (prefers-color-scheme: dark){body{background:#111}}</style><table bgcolor=\"#eaeded\"><tr><td>x</td></tr></table>".into()),
+            ..Default::default()
+        };
+        assert!(!render(&c, false, true).document.contains("bgcolor"));
+        assert!(render(&c, false, false).document.contains("bgcolor"));
     }
 }

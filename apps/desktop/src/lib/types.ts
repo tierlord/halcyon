@@ -112,7 +112,7 @@ export interface Attachment {
 }
 
 export interface MessageView {
-  rendered: { document: string; remote_blocked: number; is_html: boolean }
+  rendered: { document: string; remote_blocked: number; is_html: boolean; dark: boolean }
   attachments: Attachment[]
 }
 

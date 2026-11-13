@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte'
   import * as api from './api'
   import Icon from './Icon.svelte'
   import { initials, longDate } from './format'
@@ -27,6 +28,19 @@
   const isNewsletter = $derived(!!message && message.header.list_unsubscribe.length > 0)
   const files = $derived(view?.attachments.filter((a) => !a.inline) ?? [])
 
+  // The app's theme: an explicit choice on <html>, else the system setting.
+  const darkQuery = window.matchMedia('(prefers-color-scheme: dark)')
+  let systemDark = $state(darkQuery.matches)
+  $effect(() => {
+    const onChange = () => (systemDark = darkQuery.matches)
+    darkQuery.addEventListener('change', onChange)
+    return () => darkQuery.removeEventListener('change', onChange)
+  })
+  const appDark = $derived.by(() => {
+    const theme = document.documentElement.dataset.theme
+    return theme ? theme === 'dark' : systemDark
+  })
+
   // Requests can overlap while flipping through messages; only the newest
   // result is shown.
   let seq = 0
@@ -35,7 +49,7 @@
     loading = true
     error = ''
     try {
-      const result = await api.messageContent(id, remote)
+      const result = await api.messageContent(id, remote, appDark)
       if (mine === seq) view = result
     } catch (e) {
       if (mine === seq) {
@@ -46,6 +60,14 @@
       if (mine === seq) loading = false
     }
   }
+
+  // A theme change re-renders the open message (dark design or light page).
+  $effect(() => {
+    void appDark
+    untrack(() => {
+      if (message && view) load(message.id, allowRemote)
+    })
+  })
 
   $effect(() => {
     const id = message?.id
@@ -242,6 +264,7 @@
           sandbox="allow-same-origin"
           referrerpolicy="no-referrer"
           srcdoc={view.rendered.document}
+          class:dark={view.rendered.dark}
           onload={onFrameLoad}
         ></iframe>
       {/if}
@@ -480,8 +503,13 @@
     width: 100%;
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    /* Mails are designed for a light page, also in dark mode. */
+    /* Mails without their own dark design stay on a light page. */
     background: #ffffff;
+    color-scheme: light;
+  }
+  iframe.dark {
+    background: #1d1b1a;
+    color-scheme: dark;
   }
   .state {
     flex: 1;

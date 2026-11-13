@@ -66,10 +66,14 @@ export function deleteAccount(id: number): Promise<void> {
 }
 
 /** Message content as a sandbox-ready document. */
-export function messageContent(id: number, allowRemote: boolean): Promise<MessageView> {
+export function messageContent(
+  id: number,
+  allowRemote: boolean,
+  dark: boolean,
+): Promise<MessageView> {
   return native
-    ? invoke('message_content', { id, allowRemote })
-    : mock.messageContent(id, allowRemote)
+    ? invoke('message_content', { id, allowRemote, dark })
+    : mock.messageContent(id, allowRemote, dark)
 }
 
 /** Opens a web or mail link outside the app. */
