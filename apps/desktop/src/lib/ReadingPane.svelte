@@ -230,7 +230,7 @@
 
       <div class="sender">
         {#if senderLogo}
-          <div class="avatar brand" aria-hidden="true">
+          <div class="avatar brand" style:background={senderLogo.bg ?? undefined} aria-hidden="true">
             <img
               src={senderLogo.dataUrl}
               alt=""

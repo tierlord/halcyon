@@ -224,7 +224,7 @@
           <button class:has-brand={!!logo} onclick={() => onselect(m.id)}>
             <span class="dot" aria-label={unread ? 'ungelesen' : undefined}></span>
             {#if logo}
-              <span class="brand" aria-hidden="true">
+              <span class="brand" style:background={logo.bg ?? undefined} aria-hidden="true">
                 <img
                   src={logo.dataUrl}
                   alt=""
@@ -269,7 +269,7 @@
             <button class:has-brand={!!logo} onclick={() => onselect(m.id)}>
               <span class="dot" aria-label={unread ? 'ungelesen' : undefined}></span>
               {#if logo}
-                <span class="brand" aria-hidden="true">
+                <span class="brand" style:background={logo.bg ?? undefined} aria-hidden="true">
                   <img
                     src={logo.dataUrl}
                     alt=""
@@ -310,7 +310,7 @@
                 <Icon name="chevronRight" size={13} />
               </span>
               {#if logo}
-                <span class="brand" aria-hidden="true">
+                <span class="brand" style:background={logo.bg ?? undefined} aria-hidden="true">
                   <img
                     src={logo.dataUrl}
                     alt=""
