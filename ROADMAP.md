@@ -33,7 +33,7 @@
 
 ## Komfort-Features
 
-- [ ] Vorgänge: zusammengehörige Mails gruppieren (Threads, Kleinanzeigen,
+- [ ] **Vorgänge** (Plan: [docs/design/vorgaenge.md](docs/design/vorgaenge.md)): zusammengehörige Mails gruppieren (Threads, Kleinanzeigen,
       Bestellung → Versand → Rechnung)
 - [ ] Kontenübergreifende Kategorien: automatisch bei Eindeutigkeit, sonst
       Vorschläge mit Drag & Drop
