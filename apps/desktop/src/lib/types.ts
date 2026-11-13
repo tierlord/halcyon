@@ -34,11 +34,22 @@ export interface MessageSummary {
   header: MessageHeader
 }
 
+export interface FolderInfo {
+  id: number
+  path: string
+  name: string
+  depth: number
+  role: FolderRole | null
+  selectable: boolean
+  unread: number
+}
+
 export interface AccountInfo {
   id: number
   email: string
   display_name: string | null
   unread_inbox: number
+  folders: FolderInfo[]
 }
 
 export type Security = 'tls' | 'starttls' | 'plain'
@@ -94,6 +105,13 @@ export type FolderRole =
 export type View =
   | { kind: 'unified'; role: FolderRole }
   | { kind: 'account'; accountId: number; role: FolderRole }
+  | {
+      kind: 'folder'
+      accountId: number
+      folderId: number
+      folderName: string
+      folderRole: FolderRole | null
+    }
 
 export type SyncUpdate =
   | { kind: 'started' }

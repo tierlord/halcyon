@@ -78,7 +78,11 @@
     const v = view
     if (v.kind === 'unified') return 'Alle Posteingänge'
     const acc = overview?.accounts.find((a) => a.id === v.accountId)
-    return acc ? `Posteingang · ${accountLabel(acc.email)}` : 'Posteingang'
+    const label = acc ? accountLabel(acc.email) : null
+    if (v.kind === 'folder') {
+      return label ? `${v.folderName} · ${label}` : v.folderName
+    }
+    return label ? `Posteingang · ${label}` : 'Posteingang'
   })
 
   // Requests can overlap while typing; only the newest result is shown.
@@ -229,7 +233,9 @@
 
   function newMessage() {
     const accountId =
-      view.kind === 'account' ? view.accountId : (overview?.accounts[0]?.id ?? 0)
+      view.kind === 'account' || view.kind === 'folder'
+        ? view.accountId
+        : (overview?.accounts[0]?.id ?? 0)
     openComposer({
       account_id: accountId,
       to: [],

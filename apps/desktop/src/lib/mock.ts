@@ -8,16 +8,53 @@ import type {
   Account,
   AccountInfo,
   DiscoverResult,
+  FolderInfo,
+  FolderRole,
   MessageSummary,
   Overview,
   ServerConfig,
   SyncUpdate,
 } from './types'
 
+function defaultFolders(accountId: number): FolderInfo[] {
+  const base = accountId * 10
+  const list: FolderInfo[] = [
+    { id: base, path: 'INBOX', name: 'Posteingang', depth: 0, role: 'inbox', selectable: true, unread: 0 },
+    { id: base + 1, path: 'Sent', name: 'Gesendet', depth: 0, role: 'sent', selectable: true, unread: 0 },
+    { id: base + 2, path: 'Drafts', name: 'Entwürfe', depth: 0, role: 'drafts', selectable: true, unread: 0 },
+    { id: base + 3, path: 'Archive', name: 'Archiv', depth: 0, role: 'archive', selectable: true, unread: 0 },
+    { id: base + 4, path: 'Junk', name: 'Spam', depth: 0, role: 'junk', selectable: true, unread: 0 },
+    { id: base + 5, path: 'Trash', name: 'Papierkorb', depth: 0, role: 'trash', selectable: true, unread: 0 },
+  ]
+  if (accountId === 1) {
+    list.push({
+      id: base + 6,
+      path: 'INBOX.Rechnungen',
+      name: 'Rechnungen',
+      depth: 1,
+      role: null,
+      selectable: true,
+      unread: 0,
+    })
+  }
+  if (accountId === 2) {
+    list.push({
+      id: base + 6,
+      path: 'Postausgang',
+      name: 'Postausgang',
+      depth: 0,
+      role: null,
+      selectable: true,
+      unread: 0,
+    })
+  }
+  return list
+}
+
 const accounts: AccountInfo[] = [
-  { id: 1, email: 'max@mail.example.org', display_name: null, unread_inbox: 0 },
-  { id: 2, email: 'max@werkstatt.example.com', display_name: null, unread_inbox: 0 },
-  { id: 3, email: 'max.muster@example.net', display_name: null, unread_inbox: 0 },
+  { id: 1, email: 'max@mail.example.org', display_name: null, unread_inbox: 0, folders: defaultFolders(1) },
+  { id: 2, email: 'max@werkstatt.example.com', display_name: null, unread_inbox: 0, folders: defaultFolders(2) },
+  { id: 3, email: 'max.muster@example.net', display_name: null, unread_inbox: 0, folders: defaultFolders(3) },
 ]
 
 const fullAccounts: Account[] = [
@@ -78,18 +115,29 @@ function msg(
   from: [string | null, string],
   subject: string,
   ago: number,
-  opts: { seen?: boolean; list?: boolean; to?: string[] } = {},
+  opts: {
+    seen?: boolean
+    list?: boolean
+    to?: string[]
+    folder?: { id: number; path: string; name: string; role: FolderRole | null }
+  } = {},
 ): MessageSummary {
   const account = accounts.find((a) => a.id === accountId)!
   const id = nextId++
+  const folder = opts.folder ?? {
+    id: accountId * 10,
+    path: 'INBOX',
+    name: 'Posteingang',
+    role: 'inbox' as FolderRole,
+  }
   return {
     id,
     account_id: accountId,
     account_email: account.email,
-    folder_id: accountId * 10,
-    folder_path: 'INBOX',
-    folder_name: 'Posteingang',
-    folder_role: 'inbox',
+    folder_id: folder.id,
+    folder_path: folder.path,
+    folder_name: folder.name,
+    folder_role: folder.role,
     preview: previewFor(subject),
     has_attachments: /Rechnung|Vertrag/.test(subject),
     has_body: true,
@@ -134,23 +182,60 @@ const all: MessageSummary[] = [
   msg(2, ['Sabine Kranz', 'kranz@zulieferer.example'], 'Lieferung KW 44', 40 * day, { seen: true }),
   msg(1, ['Telekom', 'rechnung@telekom.example'], 'Ihre Rechnung für Oktober 2026', 31 * day, { seen: true }),
   msg(3, ['Fotobuch Studio', 'hallo@fotobuch.example'], 'Dein Fotobuch wurde versendet', 400 * day, { seen: true }),
+  msg(1, ['Max Mustermann', 'max@mail.example.org'], 'Re: Angebot vom Dienstag', 3 * hour, {
+    seen: true,
+    to: ['kranz@zulieferer.example'],
+    folder: { id: 11, path: 'Sent', name: 'Gesendet', role: 'sent' },
+  }),
+  msg(1, ['Stadtwerke', 'kundenservice@stadtwerke.example'], 'Jahresabrechnung 2025', 18 * day, {
+    seen: false,
+    folder: { id: 16, path: 'INBOX.Rechnungen', name: 'Rechnungen', role: null },
+  }),
+  msg(1, ['Max Mustermann', 'max@mail.example.org'], 'Entwurf: Rückfrage Vertrag', 1 * day, {
+    seen: true,
+    folder: { id: 12, path: 'Drafts', name: 'Entwürfe', role: 'drafts' },
+  }),
 ]
 
 const delay = <T>(value: T, ms = 120) => new Promise<T>((r) => setTimeout(() => r(value), ms))
 
-const unread = (accountId: number | null) =>
-  all.filter((m) => (accountId === null || m.account_id === accountId) && !m.header.flags.includes('\\Seen')).length
+const unreadInbox = (accountId: number | null) =>
+  all.filter(
+    (m) =>
+      m.folder_role === 'inbox' &&
+      (accountId === null || m.account_id === accountId) &&
+      !m.header.flags.includes('\\Seen'),
+  ).length
+
+const unreadFolder = (folderId: number) =>
+  all.filter((m) => m.folder_id === folderId && !m.header.flags.includes('\\Seen')).length
 
 export function overview(): Promise<Overview> {
   return delay({
-    accounts: accounts.map((a) => ({ ...a, unread_inbox: unread(a.id) })),
-    unread_inbox: unread(null),
+    accounts: accounts.map((a) => ({
+      ...a,
+      unread_inbox: unreadInbox(a.id),
+      folders: a.folders.map((f) => ({ ...f, unread: unreadFolder(f.id) })),
+    })),
+    unread_inbox: unreadInbox(null),
   })
 }
 
-export function messages(accountId: number | null, role: string): Promise<MessageSummary[]> {
-  if (role !== 'inbox') return delay([])
-  return delay(all.filter((m) => accountId === null || m.account_id === accountId))
+export function messages(
+  accountId: number | null,
+  role: string | null,
+  folderId: number | null = null,
+): Promise<MessageSummary[]> {
+  if (folderId !== null) {
+    return delay(all.filter((m) => m.folder_id === folderId))
+  }
+  return delay(
+    all.filter(
+      (m) =>
+        (accountId === null || m.account_id === accountId) &&
+        (role === null || m.folder_role === role),
+    ),
+  )
 }
 
 export function search(query: string): Promise<MessageSummary[]> {
@@ -242,6 +327,7 @@ export function saveAccount(account: Account): Promise<Account> {
       email: saved.email,
       display_name: saved.display_name,
       unread_inbox: 0,
+      folders: defaultFolders(id),
     })
     return delay(saved, 200)
   }
