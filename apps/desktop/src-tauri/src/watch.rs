@@ -207,6 +207,7 @@ async fn watch_connected(app: &AppHandle, account: &Account) -> Result<(), Strin
 
 fn changed(app: &AppHandle, account: &Account, new_messages: usize, other: usize) {
     if new_messages + other > 0 {
+        crate::schedule_link(app);
         let _ = app.emit(
             "mail-changed",
             MailChanged {

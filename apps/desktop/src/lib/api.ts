@@ -19,6 +19,7 @@ import type {
   View,
 } from './types'
 import * as mock from './mock'
+import { createMockCases, fromCaseView, type AsideCategory, type CaseItem, type CaseStatus, type CaseView } from './cases'
 
 const native = isTauri()
 
@@ -191,4 +192,30 @@ export function markFoldersRead(folderIds: number[]): Promise<number> {
 /** Empties a spam or trash folder for good. */
 export function emptyFolder(folderId: number): Promise<number> {
   return native ? invoke('empty_folder', { folderId }) : mock.emptyFolder(folderId)
+}
+
+/** Cases ("Vorgänge") and recurring notice groups. Mock mode serves sample cases. */
+export async function cases(): Promise<{ cases: CaseItem[]; categories: AsideCategory[] }> {
+  if (!native) return createMockCases(mock.allMockMessages())
+  const views = await invoke<CaseView[]>('cases')
+  return { cases: views.map(fromCaseView), categories: [] }
+}
+
+export function setCaseStatus(id: number, status: CaseStatus): Promise<void> {
+  return native ? invoke('set_case_status', { id, status }) : Promise.resolve()
+}
+
+/** Messages by id, wherever they are stored (the mail of a case). */
+export function messagesByIds(ids: number[]): Promise<MessageSummary[]> {
+  if (!native) {
+    const set = new Set(ids)
+    return Promise.resolve(mock.allMockMessages().filter((m) => set.has(m.id)))
+  }
+  return invoke('messages_by_ids', { ids })
+}
+
+/** The linker filed new mail into cases. */
+export async function onCasesChanged(handler: () => void): Promise<() => void> {
+  if (!native) return () => {}
+  return listen('cases-changed', () => handler())
 }

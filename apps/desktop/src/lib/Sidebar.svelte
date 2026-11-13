@@ -35,14 +35,14 @@
     /** Accounts being synced right now. */
     activeEmails?: string[]
     cases?: CaseItem[]
-    selectedCaseId?: string | null
+    selectedCaseId?: number | null
     onselect: (v: View) => void
     onmanageaccounts: () => void
     /** Right-click or context-menu key on an item; x/y in window coordinates. */
     oncontext: (target: SidebarTarget, x: number, y: number) => void
     onshowcases?: () => void
-    onselectcase?: (id: string) => void
-    onhovercase?: (id: string | null) => void
+    onselectcase?: (id: number) => void
+    onhovercase?: (id: number | null) => void
   } = $props()
 
   // First the list grows, then the folders fade in one after another.
@@ -155,7 +155,7 @@
       <Icon name="pencil" size={14} />
     </button>
   </div>
-  <ul class="section">
+  <ul class="section accounts-scroll">
     {#each overview?.accounts ?? [] as account (account.id)}
       {@const expanded = expandedAccountId === account.id}
       {@const hasFolders = account.folders.length > 0}
@@ -485,9 +485,16 @@
   .cases-title-btn:hover h2 {
     color: var(--accent-text);
   }
+  /* Folders and cases share the height; both scroll on their own. */
+  .accounts-scroll {
+    flex: 0 1 auto;
+    min-height: 80px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+  }
   .cases-scroll {
-    flex: 1;
-    min-height: 0;
+    flex: 1 1 0;
+    min-height: 120px;
     overflow-y: auto;
     padding-bottom: 28px;
     mask-image: linear-gradient(to bottom, #000 72%, transparent 100%);

@@ -4,7 +4,7 @@
   import * as mock from './lib/mock'
   import AccountDialog from './lib/AccountDialog.svelte'
   import CaseBoard from './lib/CaseBoard.svelte'
-  import { createMockCases, type AsideCategory, type CaseItem, type CaseStatus } from './lib/cases'
+  import type { AsideCategory, CaseItem, CaseStatus } from './lib/cases'
   import Composer from './lib/Composer.svelte'
   import ContextMenu, { type MenuItem } from './lib/ContextMenu.svelte'
   import type { SidebarTarget } from './lib/Sidebar.svelte'
@@ -34,8 +34,10 @@
   let selectedId: number | null = $state(null)
   let caseItems = $state<CaseItem[]>([])
   let asideCategories = $state<AsideCategory[]>([])
-  let selectedCaseId = $state<string | null>(null)
-  let hoveredCaseId = $state<string | null>(null)
+  let selectedCaseId = $state<number | null>(null)
+  let hoveredCaseId = $state<number | null>(null)
+  /** The mail of all cases, wherever it is stored (not only the visible list). */
+  let caseMessages = $state<MessageSummary[]>([])
   let query = $state('')
   let searchInput: HTMLInputElement | undefined = $state()
   let syncing = $state(false)
@@ -81,7 +83,12 @@
   const liveStates = $derived(Object.values(live))
   const liveOffline = $derived(liveStates.filter((s) => s.state === 'offline'))
 
-  const messagePool = $derived(api.isMock ? mock.allMockMessages() : messages)
+  const messagePool = $derived.by(() => {
+    if (api.isMock) return mock.allMockMessages()
+    const byId = new Map(messages.map((m) => [m.id, m]))
+    for (const m of caseMessages) if (!byId.has(m.id)) byId.set(m.id, m)
+    return [...byId.values()]
+  })
   const selected = $derived(messagePool.find((m) => m.id === selectedId) ?? null)
   const activeCase = $derived(caseItems.find((c) => c.id === selectedCaseId) ?? null)
   const hoveredCase = $derived(caseItems.find((c) => c.id === hoveredCaseId) ?? null)
@@ -501,16 +508,42 @@
     }
   }
 
+  async function loadCases() {
+    try {
+      const r = await api.cases()
+      caseItems = r.cases
+      asideCategories = r.categories
+      const ids = [...new Set(r.cases.flatMap((c) => c.messageIds))]
+      caseMessages = ids.length > 0 ? await api.messagesByIds(ids) : []
+      if (selectedCaseId != null && !caseItems.some((c) => c.id === selectedCaseId)) {
+        selectedCaseId = null
+      }
+    } catch (e) {
+      console.warn('Vorgänge konnten nicht geladen werden', e)
+    }
+  }
+
+  async function changeCaseStatus(caseId: number, status: CaseStatus) {
+    const before = caseItems
+    caseItems =
+      status === 'rejected'
+        ? caseItems.filter((c) => c.id !== caseId)
+        : caseItems.map((c) => (c.id === caseId ? { ...c, status } : c))
+    if (status !== 'needs_you' && status !== 'waiting') selectedCaseId = null
+    try {
+      await api.setCaseStatus(caseId, status)
+    } catch (e) {
+      caseItems = before
+      console.warn('Status nicht gespeichert', e)
+    }
+  }
+
   onMount(() => {
     refreshOverview()
-    load().then(() => {
-      if (caseItems.length === 0) {
-        const init = createMockCases(api.isMock ? mock.allMockMessages() : messages)
-        caseItems = init.cases
-        asideCategories = init.categories
-      }
-    })
+    load()
+    loadCases()
     const unlisteners = [
+      api.onCasesChanged(loadCases),
       api.onSync(handleSync),
       api.onLive((s) => (live = { ...live, [s.email]: s })),
       api.onOutbox(handleOutbox),
@@ -659,12 +692,7 @@
             onselectcase={(id) => (selectedCaseId = id)}
             onhovercase={(id) => (hoveredCaseId = id)}
             onopenmessage={(id) => (selectedId = id)}
-            onchangestatus={(caseId, status: CaseStatus) => {
-              caseItems = caseItems.map((c) => (c.id === caseId ? { ...c, status } : c))
-              if (status === 'done' || status === 'aside') {
-                selectedCaseId = null
-              }
-            }}
+            onchangestatus={changeCaseStatus}
           />
         {/if}
         {#if composing}

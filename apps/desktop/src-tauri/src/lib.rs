@@ -14,8 +14,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use halcyon_core::autoconfig::{self, Candidate};
 use halcyon_core::brand::{self, BrandLogo};
+use halcyon_core::cases::{CaseStatus, CaseView};
 use halcyon_core::content::{self, Attachment, Rendered};
 use halcyon_core::imap::{self, Credentials};
+use halcyon_core::linker;
 use halcyon_core::model::{Account, AuthMethod, FolderRole, MessageSummary, ServerConfig};
 use halcyon_core::secrets::{self, SecretKind};
 use halcyon_core::store::{CachedLogo, Store};
@@ -36,6 +38,10 @@ struct AppState {
     watchers: watch::Watchers,
     outbox: outbox::Outbox,
     logo_semaphore: tokio::sync::Semaphore,
+    /// The case linker is running …
+    linking: AtomicBool,
+    /// … and new mail arrived meanwhile.
+    link_again: AtomicBool,
     /// Servers a freshly typed password may go to, per lower-cased address.
     ///
     /// The account dialog asks for the password only after the server check
@@ -534,6 +540,7 @@ fn begin_sync(app: &AppHandle) -> bool {
     tauri::async_runtime::spawn(async move {
         let new_messages = run_sync(&app, &db_path).await;
         let _ = app.emit("sync", SyncUpdate::Finished { new_messages });
+        schedule_link(&app);
         let state = app.state::<AppState>();
         state.syncing.store(false, Ordering::SeqCst);
         // Changes made while the sync ran were not part of its first step.
@@ -1142,6 +1149,80 @@ fn clear_brand_logos(state: State<'_, AppState>) -> CmdResult<()> {
         .map_err(err)
 }
 
+// ----- cases ("Vorgänge") ---------------------------------------------------
+
+/// Files new mail into cases in the background and tells the UI when cases
+/// changed. Calls while a run is active lead to one more run afterwards.
+pub(crate) fn schedule_link(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if state.linking.swap(true, Ordering::SeqCst) {
+        state.link_again.store(true, Ordering::SeqCst);
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        loop {
+            state.link_again.store(false, Ordering::SeqCst);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let result = match state.store.lock() {
+                Ok(mut store) => linker::run(&mut store, now),
+                Err(_) => break,
+            };
+            match result {
+                Ok(report) if report.changed() => {
+                    tracing::info!(?report, "cases updated");
+                    let _ = app.emit("cases-changed", ());
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "case linking failed"),
+            }
+            if !state.link_again.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+        state.linking.store(false, Ordering::SeqCst);
+    });
+}
+
+#[tauri::command]
+fn cases(state: State<'_, AppState>) -> CmdResult<Vec<CaseView>> {
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .list_cases(false)
+        .map_err(err)
+}
+
+/// Sets a case's status from the card ("Erledigt", "Kein Vorgang").
+#[tauri::command]
+fn set_case_status(state: State<'_, AppState>, id: i64, status: String) -> CmdResult<()> {
+    let status: CaseStatus = status.parse().map_err(err)?;
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .set_case_status(id, status)
+        .map_err(err)
+}
+
+/// The mail of a case, wherever it is stored.
+#[tauri::command]
+fn messages_by_ids(state: State<'_, AppState>, ids: Vec<i64>) -> CmdResult<Vec<MessageSummary>> {
+    let store = state.store.lock().map_err(err)?;
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids.into_iter().take(2_000) {
+        if let Some(m) = store.message(id).map_err(err)? {
+            out.push(m);
+        }
+    }
+    Ok(out)
+}
+
 /// One-time data jobs after an update, in the background so the window
 /// opens at once. Currently: DMARC verdicts (for sender logos) from stored
 /// originals of mail synced before they were recorded.
@@ -1201,6 +1282,8 @@ pub fn run() {
             watchers: watch::Watchers::default(),
             outbox: outbox::Outbox::default(),
             logo_semaphore: tokio::sync::Semaphore::new(4),
+            linking: AtomicBool::new(false),
+            link_again: AtomicBool::new(false),
             verified_servers: Mutex::new(HashMap::new()),
         })
         .plugin(tauri_plugin_notification::init())
@@ -1210,6 +1293,7 @@ pub fn run() {
             watch::restart(app.handle());
             outbox::start(app.handle());
             backfill_once(app.handle());
+            schedule_link(app.handle());
             begin_sync(app.handle());
             Ok(())
         })
@@ -1237,7 +1321,10 @@ pub fn run() {
             outbox_list,
             brand_logo,
             save_brand_logo_appearance,
-            clear_brand_logos
+            clear_brand_logos,
+            cases,
+            set_case_status,
+            messages_by_ids
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Halcyon app");
