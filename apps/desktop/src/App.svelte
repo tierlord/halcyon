@@ -80,9 +80,17 @@
     load()
   }
 
+  let statusTimer: ReturnType<typeof setTimeout> | undefined
+  function flashStatus(text: string, after: string) {
+    clearTimeout(statusTimer)
+    syncStatus = text
+    statusTimer = setTimeout(() => (syncStatus = after), 8000)
+  }
+
   function handleSync(u: SyncUpdate) {
     switch (u.kind) {
       case 'started':
+        clearTimeout(statusTimer)
         syncing = true
         syncStatus = 'Synchronisiere …'
         errors = []
@@ -99,15 +107,21 @@
       case 'failed':
         errors = [...errors, `${u.email ? accountLabel(u.email) + ': ' : ''}${u.error}`]
         break
-      case 'finished':
+      case 'finished': {
         syncing = false
-        syncStatus =
+        const time = new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })
+        // The result of this run is shown briefly; afterwards only when it
+        // ran, so the toolbar never shows a stale count.
+        flashStatus(
           u.new_messages === 0
-            ? 'Alles aktuell'
-            : `${u.new_messages} neue Nachricht${u.new_messages === 1 ? '' : 'en'}`
+            ? 'Abgerufen – alles aktuell'
+            : `Abgerufen – ${u.new_messages} neue Nachricht${u.new_messages === 1 ? '' : 'en'}`,
+          `Zuletzt abgerufen um ${time}`,
+        )
         refreshOverview()
         load()
         break
+      }
     }
   }
 
