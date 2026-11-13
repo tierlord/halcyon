@@ -308,6 +308,7 @@
                 <span class="brand-wash" style:--brand-wash={logo.bg} aria-hidden="true"></span>
               {/if}
               <span class="dot" aria-label={group.hasUnread ? 'ungelesen' : undefined}></span>
+              <span class="thread-chevron" aria-hidden="true"><Icon name="chevronRight" size={13} /></span>
               {#if logo}
                 <span class="brand" aria-hidden="true">
                   <img
@@ -322,7 +323,6 @@
               <time>
                 {#if group.hasFlagged}<span class="flag" title="Markiert"><Icon name="star" size={12} filled /></span>{/if}
                 {listDate(m.header.date)}
-                <span class="thread-chevron" aria-hidden="true"><Icon name="chevronRight" size={13} /></span>
               </time>
               <span class="subject">
                 {#if group.hasAttachments}<Icon name="paperclip" size={13} />{/if}
@@ -427,10 +427,10 @@
     overflow: hidden;
     width: 100%;
     display: grid;
-    grid-template-columns: 10px 1fr auto;
+    grid-template-columns: 12px 1fr auto;
     grid-template-areas:
       'dot from date'
-      '.   subject account';
+      'sub-left subject account';
     column-gap: 10px;
     row-gap: 2px;
     align-items: center;
@@ -441,10 +441,10 @@
     text-align: left;
   }
   li > button.has-brand {
-    grid-template-columns: 10px 30px 1fr auto;
+    grid-template-columns: 12px 30px 1fr auto;
     grid-template-areas:
       'dot brand from date'
-      '.   brand subject account';
+      'sub-left brand subject account';
   }
   .brand-wash {
     --wash-edge: color-mix(in srgb, var(--brand-wash) var(--wash-mix), var(--bg));
@@ -504,6 +504,7 @@
   }
   .dot {
     grid-area: dot;
+    justify-self: center;
     width: 8px;
     height: 8px;
     border-radius: 50%;
@@ -602,6 +603,10 @@
     background: var(--surface-raised);
   }
   .thread-chevron {
+    grid-area: sub-left;
+    position: relative;
+    z-index: 1;
+    justify-self: center;
     display: inline-flex;
     color: var(--text-muted);
   }
