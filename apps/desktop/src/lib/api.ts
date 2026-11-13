@@ -6,6 +6,10 @@ import { listen } from '@tauri-apps/api/event'
 import type {
   Account,
   DiscoverResult,
+  Draft,
+  OutboxEvent,
+  Recipient,
+  ReplyKind,
   LiveState,
   MessageView,
   MessageSummary,
@@ -119,4 +123,38 @@ export function setFlag(ids: number[], flag: 'seen' | 'flagged', on: boolean): P
 /** Moves messages to the trash (or deletes them for good from the trash). */
 export function deleteMessages(ids: number[]): Promise<number> {
   return native ? invoke('delete_messages', { ids }) : mock.deleteMessages(ids)
+}
+
+/** Pre-filled reply, reply-all or forward for a message. */
+export function composeReply(
+  id: number,
+  kind: ReplyKind,
+): Promise<{
+  account_id: number
+  draft: { to: Recipient[]; cc: Recipient[]; subject: string; in_reply_to: string | null; references: string[]; body: string }
+}> {
+  const utcOffsetMinutes = -new Date().getTimezoneOffset()
+  return native
+    ? invoke('compose_reply', { id, kind, utcOffsetMinutes })
+    : mock.composeReply(id, kind)
+}
+
+/** Queues a message; it leaves after the undo window. */
+export function sendMessage(draft: Draft): Promise<{ id: number; send_after: number }> {
+  return native ? invoke('send_message', { draft }) : mock.sendMessage(draft)
+}
+
+/** Takes a waiting message back; null if it already left. */
+export function cancelSend(id: number): Promise<Draft | null> {
+  return native ? invoke('cancel_send', { id }) : mock.cancelSend(id)
+}
+
+/** A failed message back to the editor. */
+export function takeFailed(id: number): Promise<Draft | null> {
+  return native ? invoke('take_failed', { id }) : mock.takeFailed(id)
+}
+
+export async function onOutbox(handler: (e: OutboxEvent) => void): Promise<() => void> {
+  if (!native) return mock.onOutbox(handler)
+  return listen<OutboxEvent>('outbox', (e) => handler(e.payload))
 }

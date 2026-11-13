@@ -12,6 +12,7 @@ pub mod imap;
 pub mod model;
 pub mod reply;
 pub mod secrets;
+pub mod send;
 pub mod store;
 pub mod sync;
 pub mod utf7;

@@ -61,6 +61,7 @@ Die ausführliche Planung steht in [ROADMAP.md](ROADMAP.md).
 - [x] Anhänge speichern
 - [x] Desktop-Oberfläche mit hellem und dunklem Design, App-Starter
 - [ ] OAuth2 (Gmail, Microsoft)
-- [ ] SMTP-Versand
-- [ ] Sofortige Zustellung (IDLE)
+- [x] Sofortige Zustellung (IDLE), Desktop-Benachrichtigungen
+- [x] Versand: Neu, Antworten, Allen antworten, Weiterleiten; „Rückgängig" (10 s), Postausgang mit Wiederholung, Ablage unter „Gesendet"
+- [ ] Entwürfe, Anhänge senden, Signaturen
 - [ ] Kategorien, Vorgänge, Spam-Erkennung

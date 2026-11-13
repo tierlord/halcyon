@@ -9,7 +9,7 @@ use regex::Regex;
 use crate::model::{MessageHeader, split_address};
 
 /// A parsed mail recipient.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Recipient {
     pub name: Option<String>,
     /// Lowercased email address without angle brackets.
@@ -17,7 +17,8 @@ pub struct Recipient {
 }
 
 /// Which kind of draft to build from an existing message.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReplyKind {
     Reply,
     ReplyAll,
@@ -25,7 +26,7 @@ pub enum ReplyKind {
 }
 
 /// Pre-filled fields for a reply or forward draft.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DraftSeed {
     pub to: Vec<Recipient>,
     pub cc: Vec<Recipient>,

@@ -10,11 +10,13 @@
     ontoggleread,
     ontoggleflag,
     ondelete,
+    onreply,
   }: {
     message: MessageSummary | null
     ontoggleread: (m: MessageSummary) => void
     ontoggleflag: (m: MessageSummary) => void
     ondelete: (m: MessageSummary) => void
+    onreply: (m: MessageSummary, kind: 'reply' | 'reply_all' | 'forward') => void
   } = $props()
 
   let view = $state<MessageView | null>(null)
@@ -147,6 +149,19 @@
     {@const h = message.header}
     <header class="head">
       <div class="actions" role="toolbar" aria-label="Aktionen">
+        <button type="button" class="action" onclick={() => onreply(message, 'reply')} title="Antworten (R)">
+          <Icon name="reply" size={16} />
+          <span>Antworten</span>
+        </button>
+        <button type="button" class="action" onclick={() => onreply(message, 'reply_all')} title="Allen antworten (A)">
+          <Icon name="replyall" size={16} />
+          <span>Allen</span>
+        </button>
+        <button type="button" class="action" onclick={() => onreply(message, 'forward')} title="Weiterleiten (F)">
+          <Icon name="forward" size={16} />
+          <span>Weiterleiten</span>
+        </button>
+        <span class="sep" aria-hidden="true"></span>
         <button
           type="button"
           class="action"
@@ -323,8 +338,15 @@
     background: var(--surface-raised);
     position: relative;
   }
+  .sep {
+    width: 1px;
+    align-self: stretch;
+    margin: 2px 4px;
+    background: var(--border);
+  }
   .actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 6px;
     margin-bottom: 14px;
   }

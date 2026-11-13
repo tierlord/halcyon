@@ -12,6 +12,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 futures = "0.3.34"
 hickory-resolver = "0.26.3"
 keyring = "4.2.0"
+lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "rustls-native-certs", "hostname", "aws-lc-rs"] }
 mail-parser = "1.0.1"
 regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "charset", "http2", "query"] }

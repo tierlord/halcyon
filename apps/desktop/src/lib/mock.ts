@@ -1,6 +1,9 @@
 // Made-up sample data for developing the UI in a browser.
 
 import type {
+  Draft,
+  OutboxEvent,
+  ReplyKind,
   MessageView,
   Account,
   AccountInfo,
@@ -328,4 +331,54 @@ export function deleteMessages(ids: number[]): Promise<number> {
   const before = all.length
   for (let i = all.length - 1; i >= 0; i--) if (ids.includes(all[i].id)) all.splice(i, 1)
   return delay(before - all.length, 50)
+}
+
+export function composeReply(id: number, kind: ReplyKind) {
+  const m = all.find((x) => x.id === id)
+  const from = { name: m?.header.from_name ?? null, address: m?.header.from_addr ?? '' }
+  const base = (m?.header.subject ?? '').replace(/^((re|aw|fwd?|wg)\s*:\s*)+/i, '')
+  return delay({
+    account_id: m?.account_id ?? 1,
+    draft: {
+      to: kind === 'forward' ? [] : [from],
+      cc: [],
+      subject: (kind === 'forward' ? 'Fwd: ' : 'Re: ') + base,
+      in_reply_to: kind === 'forward' ? null : (m?.header.message_id ?? null),
+      references: [],
+      body: `\n\nAm ${new Date((m?.header.date ?? 0) * 1000).toLocaleString('de-DE')} schrieb ${from.name ?? from.address}:\n> ${m?.preview ?? ''}`,
+    },
+  })
+}
+
+const outboxHandlers = new Set<(e: OutboxEvent) => void>()
+const pendingSends = new Map<number, { draft: Draft; timer: ReturnType<typeof setTimeout> }>()
+let nextSendId = 1
+
+export function onOutbox(handler: (e: OutboxEvent) => void): () => void {
+  outboxHandlers.add(handler)
+  return () => outboxHandlers.delete(handler)
+}
+
+export function sendMessage(draft: Draft) {
+  const id = nextSendId++
+  const timer = setTimeout(() => {
+    pendingSends.delete(id)
+    const emit = (e: OutboxEvent) => outboxHandlers.forEach((h) => h(e))
+    emit({ state: 'sending', id, subject: draft.subject })
+    setTimeout(() => emit({ state: 'sent', id, subject: draft.subject }), 700)
+  }, 10_000)
+  pendingSends.set(id, { draft, timer })
+  return delay({ id, send_after: Math.floor(Date.now() / 1000) + 10 }, 50)
+}
+
+export function cancelSend(id: number): Promise<Draft | null> {
+  const p = pendingSends.get(id)
+  if (!p) return delay(null, 50)
+  clearTimeout(p.timer)
+  pendingSends.delete(id)
+  return delay(p.draft, 50)
+}
+
+export function takeFailed(_id: number): Promise<Draft | null> {
+  return delay(null, 50)
 }

@@ -2,6 +2,7 @@
   import { onMount, untrack } from 'svelte'
   import * as api from './lib/api'
   import AccountDialog from './lib/AccountDialog.svelte'
+  import Composer from './lib/Composer.svelte'
   import Icon from './lib/Icon.svelte'
   import MessageList from './lib/MessageList.svelte'
   import ReadingPane from './lib/ReadingPane.svelte'
@@ -10,7 +11,10 @@
   import {
     isFlagged,
     isSeen,
+    type Draft,
     type LiveState,
+    type OutboxEvent,
+    type ReplyKind,
     type MessageSummary,
     type Overview,
     type SyncUpdate,
@@ -212,6 +216,118 @@
     }
   }
 
+  // ----- writing -----------------------------------------------------------
+
+  let composing: Draft | null = $state(null)
+  // Bumped for every new composer, so a replaced one starts fresh.
+  let composerKey = $state(0)
+
+  function openComposer(d: Draft) {
+    composing = d
+    composerKey++
+  }
+
+  function newMessage() {
+    const accountId =
+      view.kind === 'account' ? view.accountId : (overview?.accounts[0]?.id ?? 0)
+    openComposer({
+      account_id: accountId,
+      to: [],
+      cc: [],
+      bcc: [],
+      subject: '',
+      body: '',
+      in_reply_to: null,
+      references: [],
+      reply_to_local_id: null,
+    })
+  }
+
+  async function reply(m: MessageSummary, kind: ReplyKind) {
+    try {
+      const seed = await api.composeReply(m.id, kind)
+      openComposer({
+        account_id: seed.account_id,
+        to: seed.draft.to,
+        cc: seed.draft.cc,
+        bcc: [],
+        subject: seed.draft.subject,
+        body: seed.draft.body,
+        in_reply_to: seed.draft.in_reply_to,
+        references: seed.draft.references,
+        reply_to_local_id: kind === 'forward' ? null : m.id,
+      })
+    } catch (e) {
+      errors = [...errors, String(e)]
+    }
+  }
+
+  // The toast at the bottom: undo window, sending, result.
+  type Toast =
+    | { kind: 'undo'; id: number; until: number; subject: string }
+    | { kind: 'busy' | 'done' | 'info'; text: string }
+    | { kind: 'failed'; id: number; text: string }
+  let toast: Toast | null = $state(null)
+  let now = $state(Date.now())
+  let toastTimer: ReturnType<typeof setTimeout> | undefined
+  $effect(() => {
+    if (toast?.kind !== 'undo') return
+    const tick = setInterval(() => (now = Date.now()), 250)
+    return () => clearInterval(tick)
+  })
+  function showToast(t: Toast, hideAfterMs?: number) {
+    clearTimeout(toastTimer)
+    // The countdown reads `now`; start it from the current time.
+    now = Date.now()
+    toast = t
+    if (hideAfterMs) toastTimer = setTimeout(() => (toast = null), hideAfterMs)
+  }
+
+  async function send(d: Draft) {
+    const ticket = await api.sendMessage(d)
+    composing = null
+    showToast({ kind: 'undo', id: ticket.id, until: ticket.send_after * 1000, subject: d.subject })
+  }
+
+  async function undoSend(id: number) {
+    const draft = await api.cancelSend(id)
+    if (draft) {
+      openComposer(draft)
+      showToast({ kind: 'info', text: 'Senden abgebrochen.' }, 3000)
+    } else {
+      showToast({ kind: 'info', text: 'Zu spät – die Nachricht ist schon unterwegs.' }, 4000)
+    }
+  }
+
+  async function editFailed(id: number) {
+    const draft = await api.takeFailed(id)
+    if (draft) openComposer(draft)
+    toast = null
+  }
+
+  function handleOutbox(e: OutboxEvent) {
+    switch (e.state) {
+      case 'sending':
+        showToast({ kind: 'busy', text: 'Wird gesendet …' })
+        break
+      case 'sent':
+        showToast({ kind: 'done', text: 'Gesendet.' }, 3000)
+        break
+      case 'retrying':
+        showToast(
+          { kind: 'info', text: `Senden fehlgeschlagen (${e.error}). Neuer Versuch in ${e.retry_in} s.` },
+          8000,
+        )
+        break
+      case 'failed':
+        showToast({ kind: 'failed', id: e.id, text: `„${e.subject}" wurde nicht gesendet: ${e.error}` })
+        break
+      case 'sent_copy_failed':
+        errors = [...errors, `Gesendet, aber nicht unter „Gesendet" abgelegt: ${e.error}`]
+        break
+    }
+  }
+
   // Opening a message marks it read – once per opening, so "mark unread"
   // on the open message sticks.
   let autoMarkedId: number | null = null
@@ -233,8 +349,11 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
-    if (accountDialogOpen) return
-    const typing = e.target instanceof HTMLInputElement
+    if (accountDialogOpen || composing) return
+    const typing =
+      e.target instanceof HTMLInputElement ||
+      e.target instanceof HTMLTextAreaElement ||
+      e.target instanceof HTMLSelectElement
     if (e.key === 'Escape' && typing) {
       query = ''
       searchInput?.blur()
@@ -257,6 +376,18 @@
     } else if (e.key === 'ArrowUp' || e.key === 'k') {
       e.preventDefault()
       moveSelection(-1)
+    } else if (e.key === 'c') {
+      e.preventDefault()
+      newMessage()
+    } else if (selected && e.key === 'r') {
+      e.preventDefault()
+      reply(selected, 'reply')
+    } else if (selected && e.key === 'a') {
+      e.preventDefault()
+      reply(selected, 'reply_all')
+    } else if (selected && e.key === 'f') {
+      e.preventDefault()
+      reply(selected, 'forward')
     } else if (selected && e.key === 'u') {
       toggleRead(selected)
     } else if (selected && e.key === 's') {
@@ -273,6 +404,7 @@
     const unlisteners = [
       api.onSync(handleSync),
       api.onLive((s) => (live = { ...live, [s.email]: s })),
+      api.onOutbox(handleOutbox),
       api.onActivity((a) => (watcherActive = { ...watcherActive, [a.email]: a.active })),
       // Background changes: refresh counts and the visible list, keeping the
       // selection (load() keeps it if the message still exists).
@@ -337,6 +469,10 @@
         <span>{syncStatus}</span>
       </div>
 
+      <button class="compose" onclick={newMessage} title="Neue Nachricht (C)">
+        <Icon name="compose" />
+        <span>Verfassen</span>
+      </button>
       <button
         class="sync"
         class:spinning={syncing}
@@ -369,15 +505,48 @@
         showAccount={searching || view.kind === 'unified'}
         onselect={(id) => (selectedId = id)}
       />
-      <ReadingPane
-        message={selected}
-        ontoggleread={toggleRead}
-        ontoggleflag={toggleFlag}
-        ondelete={(m) => deleteMessage(m)}
-      />
+      <div class="pane-slot">
+        <ReadingPane
+          message={selected}
+          ontoggleread={toggleRead}
+          ontoggleflag={toggleFlag}
+          ondelete={(m) => deleteMessage(m)}
+          onreply={reply}
+        />
+        {#if composing}
+          {#key composerKey}
+            <Composer
+              initial={composing}
+              accounts={overview?.accounts ?? []}
+              onsend={send}
+              onclose={() => (composing = null)}
+            />
+          {/key}
+        {/if}
+      </div>
     </div>
   </main>
 </div>
+
+{#if toast}
+  <div class="toast" class:failed={toast.kind === 'failed'} role="status" aria-live="polite">
+    {#if toast.kind === 'undo'}
+      {@const t = toast}
+      {@const left = Math.max(0, Math.ceil((t.until - now) / 1000))}
+      <span>„{t.subject || '(kein Betreff)'}" wird in {left} s gesendet.</span>
+      <button type="button" class="toast-btn" onclick={() => undoSend(t.id)}>Rückgängig</button>
+    {:else if toast.kind === 'failed'}
+      {@const t = toast}
+      <span>{t.text}</span>
+      <button type="button" class="toast-btn" onclick={() => editFailed(t.id)}>Bearbeiten</button>
+      <button type="button" class="toast-x" onclick={() => (toast = null)} aria-label="Schließen">
+        <Icon name="x" size={14} />
+      </button>
+    {:else}
+      <span>{toast.text}</span>
+    {/if}
+  </div>
+{/if}
 
 {#if confirmDelete}
   {@const m = confirmDelete}
@@ -411,6 +580,68 @@
 {/if}
 
 <style>
+  .pane-slot {
+    position: relative;
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+  }
+  .pane-slot > :global(.pane) {
+    flex: 1;
+  }
+  .compose {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    font-weight: 600;
+  }
+  .compose:hover {
+    background: var(--hover);
+  }
+  .compose :global(svg) {
+    color: var(--accent-text);
+  }
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 20px;
+    transform: translateX(-50%);
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: min(640px, calc(100vw - 32px));
+    padding: 10px 14px;
+    border-radius: 10px;
+    background: var(--pitch-black);
+    color: var(--snow);
+    box-shadow: 0 8px 30px color-mix(in srgb, var(--pitch-black) 35%, transparent);
+    font-size: 13px;
+  }
+  .toast.failed {
+    background: color-mix(in srgb, var(--danger) 85%, var(--pitch-black));
+  }
+  .toast-btn {
+    border: 0;
+    background: none;
+    color: var(--blue-green);
+    font-weight: 700;
+    padding: 2px 4px;
+  }
+  .toast.failed .toast-btn {
+    color: #ffffff;
+    text-decoration: underline;
+  }
+  .toast-x {
+    border: 0;
+    background: none;
+    color: inherit;
+    opacity: 0.8;
+  }
   .confirm-backdrop {
     position: fixed;
     inset: 0;

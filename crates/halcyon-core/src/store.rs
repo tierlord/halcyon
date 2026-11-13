@@ -13,6 +13,7 @@ use crate::model::{
     Account, AuthMethod, Folder, FolderRole, MessageHeader, MessageSummary, PendingChange,
     PendingOp, Security, ServerConfig,
 };
+use crate::send::{Built, Draft};
 
 /// Schema migrations, applied in order. The index + 1 is stored in
 /// `PRAGMA user_version`, so new migrations must only ever be appended.
@@ -152,6 +153,28 @@ CREATE TABLE pending_ops (
 );
 CREATE INDEX pending_ops_account ON pending_ops(account_id, id);
 CREATE INDEX pending_ops_message ON pending_ops(message_id);
+"#,
+    // 4: outbox. Messages are stored fully built, so what is sent (and filed
+    // as sent) is exactly what the user confirmed; `send_after` gives the
+    // "undo send" window.
+    r#"
+CREATE TABLE outbox (
+    id             INTEGER PRIMARY KEY,
+    account_id     INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    wire           BLOB NOT NULL,
+    record         BLOB NOT NULL,
+    envelope_from  TEXT NOT NULL,
+    envelope_to    TEXT NOT NULL,
+    message_id     TEXT NOT NULL,
+    subject        TEXT NOT NULL,
+    draft          TEXT NOT NULL,
+    send_after     INTEGER NOT NULL,
+    state          TEXT NOT NULL DEFAULT 'queued',
+    attempts       INTEGER NOT NULL DEFAULT 0,
+    last_error     TEXT,
+    created_at     INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX outbox_due ON outbox(state, send_after);
 "#,
 ];
 
@@ -796,6 +819,135 @@ impl Store {
         Ok(())
     }
 
+    // ----- outbox ---------------------------------------------------------
+
+    /// Queues a built message for sending at `send_after` (Unix seconds).
+    pub fn queue_outgoing(&self, draft: &Draft, built: &Built, send_after: i64) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO outbox (account_id, wire, record, envelope_from, envelope_to,
+                message_id, subject, draft, send_after)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                draft.account_id,
+                built.wire,
+                built.record,
+                built.envelope_from,
+                json(&built.envelope_to),
+                built.message_id,
+                draft.subject,
+                serde_json::to_string(draft).map_err(|e| crate::Error::Other(e.to_string()))?,
+                send_after,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Takes a queued message back ("undo send"). Returns its draft, or
+    /// `None` if it is already being sent or gone.
+    pub fn cancel_outgoing(&self, id: i64) -> Result<Option<Draft>> {
+        let draft: Option<String> = self
+            .conn
+            .query_row(
+                "DELETE FROM outbox WHERE id = ?1 AND state = 'queued' RETURNING draft",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(draft.and_then(|d| serde_json::from_str(&d).ok()))
+    }
+
+    /// The next message due for sending, claimed atomically so it is never
+    /// sent twice.
+    pub fn claim_due_outgoing(&self, now: i64) -> Result<Option<OutboxItem>> {
+        Ok(self
+            .conn
+            .query_row(
+                "UPDATE outbox SET state = 'sending', attempts = attempts + 1
+                 WHERE id = (SELECT id FROM outbox WHERE state = 'queued' AND send_after <= ?1
+                             ORDER BY send_after, id LIMIT 1)
+                 RETURNING id, account_id, wire, record, envelope_from, envelope_to,
+                           message_id, subject, draft, attempts",
+                [now],
+                outbox_from_row,
+            )
+            .optional()?)
+    }
+
+    /// When the next queued message is due, if any.
+    pub fn next_outgoing_due(&self) -> Result<Option<i64>> {
+        Ok(self.conn.query_row(
+            "SELECT MIN(send_after) FROM outbox WHERE state = 'queued'",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    pub fn finish_outgoing(&self, id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM outbox WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Records a failed attempt: retried at `retry_at`, or kept as failed
+    /// for the user to look at (`retry_at = None`).
+    pub fn fail_outgoing(&self, id: i64, error: &str, retry_at: Option<i64>) -> Result<()> {
+        match retry_at {
+            Some(t) => self.conn.execute(
+                "UPDATE outbox SET state = 'queued', send_after = ?3, last_error = ?2 WHERE id = ?1",
+                params![id, error, t],
+            )?,
+            None => self.conn.execute(
+                "UPDATE outbox SET state = 'failed', last_error = ?2 WHERE id = ?1",
+                params![id, error],
+            )?,
+        };
+        Ok(())
+    }
+
+    /// Messages interrupted while sending (e.g. the app was closed) go back to
+    /// the queue. The server may have received them already; a duplicate is
+    /// better than a lost mail.
+    pub fn requeue_interrupted_outgoing(&self) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE outbox SET state = 'queued' WHERE state = 'sending'",
+            [],
+        )?)
+    }
+
+    /// A failed message back to the editor (it leaves the outbox).
+    pub fn take_failed_outgoing(&self, id: i64) -> Result<Option<Draft>> {
+        let draft: Option<String> = self
+            .conn
+            .query_row(
+                "DELETE FROM outbox WHERE id = ?1 AND state = 'failed' RETURNING draft",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(draft.and_then(|d| serde_json::from_str(&d).ok()))
+    }
+
+    /// Everything in the outbox, for the UI.
+    pub fn outbox(&self) -> Result<Vec<OutboxEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, account_id, subject, envelope_to, send_after, state, attempts, last_error
+             FROM outbox ORDER BY send_after, id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(OutboxEntry {
+                id: r.get(0)?,
+                account_id: r.get(1)?,
+                subject: r.get(2)?,
+                recipients: json_list(r, "envelope_to")?,
+                send_after: r.get(4)?,
+                state: r.get(5)?,
+                attempts: r.get(6)?,
+                last_error: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     pub fn message_count(&self, folder_id: i64) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM messages WHERE folder_id = ?1",
@@ -826,6 +978,49 @@ fn fts_prefix_query(input: &str) -> Option<String> {
         .map(|w| format!("\"{}\"*", w.replace('"', "\"\"")))
         .collect();
     (!terms.is_empty()).then(|| terms.join(" "))
+}
+
+/// A message claimed for sending.
+#[derive(Debug)]
+pub struct OutboxItem {
+    pub id: i64,
+    pub account_id: i64,
+    pub built: Built,
+    pub subject: String,
+    pub draft: Draft,
+    pub attempts: u32,
+}
+
+/// Outbox state for the UI.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct OutboxEntry {
+    pub id: i64,
+    pub account_id: i64,
+    pub subject: String,
+    pub recipients: Vec<String>,
+    pub send_after: i64,
+    /// `queued`, `sending` or `failed`.
+    pub state: String,
+    pub attempts: u32,
+    pub last_error: Option<String>,
+}
+
+fn outbox_from_row(r: &Row<'_>) -> rusqlite::Result<OutboxItem> {
+    let draft: String = r.get("draft")?;
+    Ok(OutboxItem {
+        id: r.get("id")?,
+        account_id: r.get("account_id")?,
+        built: Built {
+            wire: r.get("wire")?,
+            record: r.get("record")?,
+            envelope_from: r.get("envelope_from")?,
+            envelope_to: json_list(r, "envelope_to")?,
+            message_id: r.get("message_id")?,
+        },
+        subject: r.get("subject")?,
+        draft: serde_json::from_str(&draft).unwrap_or_default(),
+        attempts: r.get("attempts")?,
+    })
 }
 
 /// First characters of the text with whitespace collapsed and quoted lines
@@ -1235,5 +1430,54 @@ mod tests {
         // UID 9 is above `up_to` and must survive.
         assert_eq!(store.delete_missing(f.id, &existing, 5).unwrap(), 1);
         assert_eq!(store.message_count(f.id).unwrap(), 2);
+    }
+
+    #[test]
+    fn outbox_supports_undo_and_never_sends_twice() {
+        let store = Store::open_in_memory().unwrap();
+        let a = store.add_account(&account("a@example.org")).unwrap();
+        let draft = Draft {
+            account_id: a.id,
+            to: vec![crate::reply::Recipient {
+                name: None,
+                address: "b@example.org".into(),
+            }],
+            subject: "Hallo".into(),
+            body: "x".into(),
+            ..Default::default()
+        };
+        let built = crate::send::build(&draft, &a, std::time::SystemTime::now()).unwrap();
+
+        // Undo within the window returns the draft.
+        let id = store.queue_outgoing(&draft, &built, 100).unwrap();
+        assert!(store.claim_due_outgoing(99).unwrap().is_none());
+        assert_eq!(store.cancel_outgoing(id).unwrap().unwrap().subject, "Hallo");
+        assert!(store.outbox().unwrap().is_empty());
+
+        // Once claimed, it cannot be cancelled or claimed again.
+        let id = store.queue_outgoing(&draft, &built, 100).unwrap();
+        assert_eq!(store.next_outgoing_due().unwrap(), Some(100));
+        let item = store.claim_due_outgoing(100).unwrap().unwrap();
+        assert_eq!(item.id, id);
+        assert_eq!(item.built.wire, built.wire);
+        assert!(store.cancel_outgoing(id).unwrap().is_none());
+        assert!(store.claim_due_outgoing(1000).unwrap().is_none());
+
+        // Temporary failure: back in the queue at the retry time.
+        store.fail_outgoing(id, "timeout", Some(200)).unwrap();
+        assert!(store.claim_due_outgoing(150).unwrap().is_none());
+        let item = store.claim_due_outgoing(200).unwrap().unwrap();
+        assert_eq!(item.attempts, 2);
+
+        // Interrupted sends are requeued at start-up.
+        assert_eq!(store.requeue_interrupted_outgoing().unwrap(), 1);
+        let item = store.claim_due_outgoing(200).unwrap().unwrap();
+
+        // Permanent failure stays visible until the user takes it back.
+        store.fail_outgoing(item.id, "550 rejected", None).unwrap();
+        assert_eq!(store.outbox().unwrap()[0].state, "failed");
+        assert!(store.claim_due_outgoing(10_000).unwrap().is_none());
+        assert!(store.take_failed_outgoing(item.id).unwrap().is_some());
+        assert!(store.outbox().unwrap().is_empty());
     }
 }

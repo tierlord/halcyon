@@ -121,5 +121,32 @@ export type LiveState =
   | { state: 'polling'; email: string }
   | { state: 'offline'; email: string; error: string }
 
+export interface Recipient {
+  name: string | null
+  address: string
+}
+
+export type ReplyKind = 'reply' | 'reply_all' | 'forward'
+
+/** What the composer edits and sends (mirrors halcyon_core::send::Draft). */
+export interface Draft {
+  account_id: number
+  to: Recipient[]
+  cc: Recipient[]
+  bcc: Recipient[]
+  subject: string
+  body: string
+  in_reply_to: string | null
+  references: string[]
+  reply_to_local_id: number | null
+}
+
+export type OutboxEvent =
+  | { state: 'sending'; id: number; subject: string }
+  | { state: 'sent'; id: number; subject: string }
+  | { state: 'retrying'; id: number; subject: string; error: string; retry_in: number }
+  | { state: 'failed'; id: number; subject: string; error: string }
+  | { state: 'sent_copy_failed'; id: number; error: string }
+
 export const isSeen = (m: MessageSummary) => m.header.flags.includes('\\Seen')
 export const isFlagged = (m: MessageSummary) => m.header.flags.includes('\\Flagged')

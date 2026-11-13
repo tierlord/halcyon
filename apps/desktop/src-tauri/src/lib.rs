@@ -4,6 +4,7 @@
 //! database connection; a sync opens its own, which SQLite's WAL mode lets
 //! run alongside the UI's reads.
 
+mod outbox;
 mod watch;
 
 use std::collections::HashMap;
@@ -32,6 +33,7 @@ struct AppState {
     /// … and more changes arrived while it ran.
     flush_again: AtomicBool,
     watchers: watch::Watchers,
+    outbox: outbox::Outbox,
     /// Servers a freshly typed password may go to, per lower-cased address.
     ///
     /// The account dialog asks for the password only after the server check
@@ -284,8 +286,16 @@ async fn save_account(
     // provider published, or the one the account already uses.
     let smtp_trusted = match &account.smtp {
         Some(smtp) => {
-            smtp.host.eq_ignore_ascii_case(&account.imap.host)
-                || may_receive_password(&state, &account.email, smtp)?
+            let known = smtp.host.eq_ignore_ascii_case(&account.imap.host)
+                || may_receive_password(&state, &account.email, smtp)?;
+            // Like the IMAP check: reachable with a valid certificate, no
+            // password sent. Only then the password is kept for it.
+            known
+                || (pw.is_some()
+                    && halcyon_core::send::check_smtp(smtp)
+                        .await
+                        .map_err(|e| format!("Postausgangsserver: {e}"))
+                        .is_ok())
         }
         None => false,
     };
@@ -592,6 +602,118 @@ async fn message_content(
     })
 }
 
+#[derive(Serialize)]
+struct ComposeSeed {
+    account_id: i64,
+    draft: halcyon_core::reply::DraftSeed,
+}
+
+/// Pre-fills a reply, reply-all or forward for a message.
+#[tauri::command]
+async fn compose_reply(
+    state: State<'_, AppState>,
+    id: i64,
+    kind: halcyon_core::reply::ReplyKind,
+    utc_offset_minutes: i32,
+) -> CmdResult<ComposeSeed> {
+    let raw = raw_message(&state, id).await?;
+    let text = content::parse(&raw).text.unwrap_or_default();
+    let (message, own) = {
+        let store = state.store.lock().map_err(err)?;
+        let message = store
+            .message(id)
+            .map_err(err)?
+            .ok_or("Nachricht nicht gefunden.")?;
+        let own: Vec<String> = store
+            .accounts()
+            .map_err(err)?
+            .into_iter()
+            .map(|a| a.email.to_lowercase())
+            .collect();
+        (message, own)
+    };
+    Ok(ComposeSeed {
+        account_id: message.account_id,
+        draft: halcyon_core::reply::prepare(kind, &message.header, &text, &own, utc_offset_minutes),
+    })
+}
+
+#[derive(Serialize)]
+struct SendTicket {
+    id: i64,
+    send_after: i64,
+}
+
+/// Builds the message and puts it into the outbox. It leaves after the undo
+/// window unless [`cancel_send`] takes it back.
+#[tauri::command]
+fn send_message(
+    state: State<'_, AppState>,
+    draft: halcyon_core::send::Draft,
+) -> CmdResult<SendTicket> {
+    let store = state.store.lock().map_err(err)?;
+    let account = store
+        .accounts()
+        .map_err(err)?
+        .into_iter()
+        .find(|a| a.id == draft.account_id)
+        .ok_or("Konto nicht gefunden.")?;
+    if account.smtp.is_none() {
+        return Err("Für dieses Konto ist kein Postausgangsserver eingerichtet.".into());
+    }
+    let built =
+        halcyon_core::send::build(&draft, &account, std::time::SystemTime::now()).map_err(|e| {
+            match e {
+                halcyon_core::Error::InvalidAddress(a) => format!("Ungültige Adresse: {a}"),
+                halcyon_core::Error::Other(m) if m == "no recipients" => {
+                    "Bitte mindestens einen Empfänger angeben.".into()
+                }
+                e => e.to_string(),
+            }
+        })?;
+    let send_after = outbox::now() + outbox::UNDO_SECONDS;
+    let id = store
+        .queue_outgoing(&draft, &built, send_after)
+        .map_err(err)?;
+    drop(store);
+    state.outbox.wake.notify_one();
+    Ok(SendTicket { id, send_after })
+}
+
+/// "Rückgängig": takes a message back while it is still waiting. Returns its
+/// draft for the editor, or `None` if it already left.
+#[tauri::command]
+fn cancel_send(
+    state: State<'_, AppState>,
+    id: i64,
+) -> CmdResult<Option<halcyon_core::send::Draft>> {
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .cancel_outgoing(id)
+        .map_err(err)
+}
+
+/// A message that failed for good, back to the editor.
+#[tauri::command]
+fn take_failed(
+    state: State<'_, AppState>,
+    id: i64,
+) -> CmdResult<Option<halcyon_core::send::Draft>> {
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .take_failed_outgoing(id)
+        .map_err(err)
+}
+
+#[tauri::command]
+fn outbox_list(state: State<'_, AppState>) -> CmdResult<Vec<halcyon_core::store::OutboxEntry>> {
+    state.store.lock().map_err(err)?.outbox().map_err(err)
+}
+
 /// Opens a link from a message in the system browser or mail handler.
 /// Only web and mail links: anything else (file:, custom app schemes) could
 /// start programs.
@@ -802,6 +924,7 @@ pub fn run() {
             flushing: AtomicBool::new(false),
             flush_again: AtomicBool::new(false),
             watchers: watch::Watchers::default(),
+            outbox: outbox::Outbox::default(),
             verified_servers: Mutex::new(HashMap::new()),
         })
         .plugin(tauri_plugin_notification::init())
@@ -809,6 +932,7 @@ pub fn run() {
             // Live mail from the start: watchers per account and one full
             // sync to catch up on what arrived while the app was closed.
             watch::restart(app.handle());
+            outbox::start(app.handle());
             begin_sync(app.handle());
             Ok(())
         })
@@ -826,7 +950,12 @@ pub fn run() {
             open_link,
             save_attachment,
             set_flag,
-            delete_messages
+            delete_messages,
+            compose_reply,
+            send_message,
+            cancel_send,
+            take_failed,
+            outbox_list
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Halcyon app");

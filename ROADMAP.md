@@ -19,8 +19,9 @@
 ## Kern
 
 - [ ] Mailtexte und Anhänge laden, Volltextsuche über Inhalte
-- [ ] IDLE für sofortige Zustellung
-- [ ] SMTP-Versand, Entwürfe
+- [x] IDLE für sofortige Zustellung
+- [x] SMTP-Versand mit „Senden rückgängig"
+- [ ] Entwürfe, Anhänge senden, Signaturen, Formatierung
 
 ## Komfort-Features
 
