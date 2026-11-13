@@ -146,4 +146,11 @@ Mailinglisten-Kennungen im Ergebnis begründet ist.
 
 ## Ergebnis
 
-_(von Gemini auszufüllen)_
+- `chrono` (`--no-default-features --features std`) zu `crates/halcyon-core/Cargo.toml` hinzugefügt und `pub mod reply;` in `crates/halcyon-core/src/lib.rs` eingetragen.
+- `crates/halcyon-core/src/reply.rs`: `Recipient`, `ReplyKind`, `DraftSeed`, `prepare` und `parse_recipient` umgesetzt.
+  - **Betreff**: Alle führenden Antwort-/Weiterleitungspräfixe (inkl. internationaler Kürzel, Zähler wie `Re[2]:`/`Re(3):`/`Re^2:` und vollbreitem Doppelpunkt) werden entfernt; bei Weiterleitungen bleiben Antwortpräfixe erhalten; leere Betreffs ergeben `"Re: "` bzw. `"Fwd: "`.
+  - **Mailinglisten-Kennungen**: Variante Thunderbird (`"Re: [team] Plan"`). Begründung: Standardkonformes `Re:` am Betreff-Anfang hält Sortierung/Filterung in Clients sauber, während die Listenkennung unverändert erhalten bleibt und doppelte `Re:` vor/nach `[tag]` entfernt werden.
+  - **Empfänger & Thread**: `Reply-To` vor `From`, eigene gesendete Mails antworten an `To`, `ReplyAll` dedupliziert `To`+`Cc` ohne eigene Adressen/`to`; `References` auf max. 20 Einträge (erster + letzte 19 nach RFC 5322 3.6.4) gekürzt.
+  - **Zitate & Weiterleitung**: `\r\n` → `\n`, deutsches Datum mit `utc_offset_minutes`, Signatur ab `"-- "` beim Zitieren abgeschnitten, bestehende `>`-Zitate als `>>` fortgeführt; Weiterleitung mit unverändertem Text inkl. Signatur.
+- 40 Unit-Tests in `reply::tests` geschrieben und geprüft.
+- Prüfungen: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings` und `cargo test --workspace` grün.
