@@ -32,5 +32,6 @@ parallel dazu laufen können.
 | 02 | [Testkorpus für Mail-Header](02-header-fixtures.md) | erledigt |
 | 03 | [Einmalcodes und Sendungsnummern erkennen](03-extractors.md) | erledigt (mit Review-Fixes) |
 | 04 | [Bösartige HTML-Mails als Testkorpus](04-hostile-html.md) | erledigt (5 Lücken gefunden und behoben) |
+| 05 | [Antworten, Allen antworten, Weiterleiten](05-reply-logic.md) | offen |
 
 Reihenfolge ist frei; jede Aufgabe ist für sich abgeschlossen.
