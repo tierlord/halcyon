@@ -201,6 +201,7 @@ async fn sync_folder(
                 .collect();
             result.flags_updated = store.apply_server_flags(folder_id, &flags)?;
         }
+        backfill_dmarc_status(store, session, folder_id).await?;
     }
     if mailbox.exists == 0 {
         on_event(SyncEvent::FolderStarted {
@@ -254,6 +255,28 @@ async fn sync_folder(
         result.bodies = prefetch_bodies(store, session, folder_id, path, on_event).await?;
     }
     Ok(result)
+}
+
+async fn backfill_dmarc_status(
+    store: &mut Store,
+    session: &mut ImapSession,
+    folder_id: i64,
+) -> Result<()> {
+    let uids = store.unchecked_dmarc_uids(folder_id, 500)?;
+    if uids.is_empty() {
+        return Ok(());
+    }
+    let query = "(UID BODY.PEEK[HEADER.FIELDS (FROM AUTHENTICATION-RESULTS)])";
+    for chunk in uids.chunks(FETCH_CHUNK) {
+        let fetches: Vec<_> = session
+            .uid_fetch(uid_set(chunk), query)
+            .await?
+            .try_collect()
+            .await?;
+        let updates: Vec<(u32, bool)> = fetches.iter().filter_map(imap::dmarc_from_fetch).collect();
+        store.update_dmarc_status(folder_id, &updates)?;
+    }
+    Ok(())
 }
 
 /// Sends queued local changes of one account. Changes that fail are kept
