@@ -673,6 +673,18 @@ impl Store {
         folder_id: i64,
         flags: &[(u32, Vec<String>)],
     ) -> Result<usize> {
+        // While "mark all read" for this folder waits for the server, the
+        // server still reports the old flags; do not take them over.
+        let folder_op_pending: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pending_ops p JOIN folders f
+               ON f.account_id = p.account_id AND f.path = p.folder_path
+             WHERE f.id = ?1 AND p.op = 'mark_all_seen' AND p.attempts < ?2)",
+            params![folder_id, MAX_OP_ATTEMPTS],
+            |r| r.get(0),
+        )?;
+        if folder_op_pending {
+            return Ok(0);
+        }
         let tx = self.conn.transaction()?;
         let mut changed = 0;
         {
@@ -797,6 +809,66 @@ impl Store {
         Ok(deleted)
     }
 
+    /// Marks every message of a folder read, locally at once and on the
+    /// server with a single command. Returns how many were unread.
+    pub fn queue_mark_folder_seen(&mut self, folder_id: i64) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let Some((account_id, path, max_uid)) = folder_target(&tx, folder_id)? else {
+            return Ok(0);
+        };
+        let changed = tx.execute(
+            "UPDATE messages SET flags = json_insert(flags, '$[#]', '\\Seen')
+             WHERE folder_id = ?1
+               AND NOT EXISTS (SELECT 1 FROM json_each(messages.flags) WHERE value = '\\Seen')",
+            [folder_id],
+        )?;
+        if changed > 0 {
+            tx.execute(
+                "INSERT INTO pending_ops (account_id, message_id, folder_path, uid, op)
+                 VALUES (?1, NULL, ?2, ?3, 'mark_all_seen')",
+                params![account_id, path, max_uid],
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    /// Empties a spam or trash folder for good: local copies go at once,
+    /// the server follows with one command. Other folders are refused, so a
+    /// slip of the mouse cannot wipe the inbox.
+    pub fn queue_empty_folder(&mut self, folder_id: i64) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let role: Option<String> = tx
+            .query_row("SELECT role FROM folders WHERE id = ?1", [folder_id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .flatten();
+        if !matches!(role.as_deref(), Some("junk" | "trash")) {
+            return Err(crate::Error::Other(
+                "only spam and trash folders can be emptied".into(),
+            ));
+        }
+        let Some((account_id, path, max_uid)) = folder_target(&tx, folder_id)? else {
+            return Ok(0);
+        };
+        // Pending changes for these messages are moot now.
+        tx.execute(
+            "DELETE FROM pending_ops WHERE message_id IN (SELECT id FROM messages WHERE folder_id = ?1)",
+            [folder_id],
+        )?;
+        let removed = tx.execute("DELETE FROM messages WHERE folder_id = ?1", [folder_id])?;
+        if removed > 0 {
+            tx.execute(
+                "INSERT INTO pending_ops (account_id, message_id, folder_path, uid, op)
+                 VALUES (?1, NULL, ?2, ?3, 'empty_up_to')",
+                params![account_id, path, max_uid],
+            )?;
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
     /// Queued changes of an account that have not failed too often, oldest
     /// first.
     pub fn pending_ops(&self, account_id: i64) -> Result<Vec<PendingOp>> {
@@ -811,6 +883,8 @@ impl Store {
                 ("add_flag", Some(f)) => PendingChange::AddFlag(f),
                 ("remove_flag", Some(f)) => PendingChange::RemoveFlag(f),
                 ("move", Some(t)) => PendingChange::MoveTo(t),
+                ("mark_all_seen", _) => PendingChange::MarkAllSeen,
+                ("empty_up_to", _) => PendingChange::EmptyUpTo,
                 _ => PendingChange::Expunge,
             };
             Ok(PendingOp {
@@ -1007,6 +1081,19 @@ fn fts_prefix_query(input: &str) -> Option<String> {
         .map(|w| format!("\"{}\"*", w.replace('"', "\"\"")))
         .collect();
     (!terms.is_empty()).then(|| terms.join(" "))
+}
+
+/// Account, server path and highest stored UID of a folder.
+fn folder_target(conn: &Connection, folder_id: i64) -> Result<Option<(i64, String, u32)>> {
+    Ok(conn
+        .query_row(
+            "SELECT f.account_id, f.path,
+                    MAX(f.last_seen_uid, COALESCE((SELECT MAX(uid) FROM messages WHERE folder_id = f.id), 0))
+             FROM folders f WHERE f.id = ?1",
+            [folder_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?)
 }
 
 /// A message claimed for sending.
@@ -1535,5 +1622,60 @@ mod tests {
         let counts = store.unread_counts_by_folder().unwrap();
         assert_eq!(counts.get(&inbox.id).copied().unwrap_or(0), 0);
         assert_eq!(counts.get(&custom.id).copied().unwrap_or(0), 2);
+    }
+
+    #[test]
+    fn whole_folder_mark_read_and_empty() {
+        let mut store = Store::open_in_memory().unwrap();
+        let a = store.add_account(&account("a@example.org")).unwrap();
+        let junk = store
+            .upsert_folder(a.id, "Spam", None, Some(FolderRole::Junk), true)
+            .unwrap();
+        let inbox = store
+            .upsert_folder(a.id, "INBOX", None, Some(FolderRole::Inbox), true)
+            .unwrap();
+        let mut seen = header(1, "a", "x@example.org", 1);
+        seen.flags = vec!["\\Seen".into()];
+        store
+            .insert_messages(
+                junk.id,
+                &[
+                    seen,
+                    header(2, "b", "x@example.org", 2),
+                    header(7, "c", "x@example.org", 3),
+                ],
+            )
+            .unwrap();
+        store
+            .insert_messages(inbox.id, &[header(3, "d", "x@example.org", 4)])
+            .unwrap();
+
+        assert_eq!(store.queue_mark_folder_seen(junk.id).unwrap(), 2);
+        assert_eq!(
+            store
+                .unread_count(Some(a.id), Some(FolderRole::Junk))
+                .unwrap(),
+            0
+        );
+        let ops = store.pending_ops(a.id).unwrap();
+        assert_eq!(ops.len(), 1, "one op for the whole folder");
+        assert_eq!(ops[0].change, PendingChange::MarkAllSeen);
+        assert_eq!(ops[0].uid, 7);
+        // The server still says "unread" until the op is sent: ignored.
+        assert_eq!(
+            store.apply_server_flags(junk.id, &[(2, vec![])]).unwrap(),
+            0
+        );
+        assert_eq!(store.queue_mark_folder_seen(junk.id).unwrap(), 0);
+
+        // The inbox can never be emptied this way.
+        assert!(store.queue_empty_folder(inbox.id).is_err());
+        assert_eq!(store.message_count(inbox.id).unwrap(), 1);
+
+        assert_eq!(store.queue_empty_folder(junk.id).unwrap(), 3);
+        assert_eq!(store.message_count(junk.id).unwrap(), 0);
+        let last = store.pending_ops(a.id).unwrap().pop().unwrap();
+        assert_eq!(last.change, PendingChange::EmptyUpTo);
+        assert_eq!(last.uid, 7);
     }
 }

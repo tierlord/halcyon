@@ -19,12 +19,12 @@ import type {
 function defaultFolders(accountId: number): FolderInfo[] {
   const base = accountId * 10
   const list: FolderInfo[] = [
-    { id: base, path: 'INBOX', name: 'Posteingang', depth: 0, role: 'inbox', selectable: true, unread: 0 },
-    { id: base + 1, path: 'Sent', name: 'Gesendet', depth: 0, role: 'sent', selectable: true, unread: 0 },
-    { id: base + 2, path: 'Drafts', name: 'Entwürfe', depth: 0, role: 'drafts', selectable: true, unread: 0 },
-    { id: base + 3, path: 'Archive', name: 'Archiv', depth: 0, role: 'archive', selectable: true, unread: 0 },
-    { id: base + 4, path: 'Junk', name: 'Spam', depth: 0, role: 'junk', selectable: true, unread: 0 },
-    { id: base + 5, path: 'Trash', name: 'Papierkorb', depth: 0, role: 'trash', selectable: true, unread: 0 },
+    { id: base, path: 'INBOX', name: 'Posteingang', depth: 0, role: 'inbox', selectable: true, unread: 0, total: 0 },
+    { id: base + 1, path: 'Sent', name: 'Gesendet', depth: 0, role: 'sent', selectable: true, unread: 0, total: 0 },
+    { id: base + 2, path: 'Drafts', name: 'Entwürfe', depth: 0, role: 'drafts', selectable: true, unread: 0, total: 0 },
+    { id: base + 3, path: 'Archive', name: 'Archiv', depth: 0, role: 'archive', selectable: true, unread: 0, total: 0 },
+    { id: base + 4, path: 'Junk', name: 'Spam', depth: 0, role: 'junk', selectable: true, unread: 0, total: 0 },
+    { id: base + 5, path: 'Trash', name: 'Papierkorb', depth: 0, role: 'trash', selectable: true, unread: 0, total: 0 },
   ]
   if (accountId === 1) {
     list.push({
@@ -35,6 +35,7 @@ function defaultFolders(accountId: number): FolderInfo[] {
       role: null,
       selectable: true,
       unread: 0,
+      total: 0,
     })
   }
   if (accountId === 2) {
@@ -46,6 +47,7 @@ function defaultFolders(accountId: number): FolderInfo[] {
       role: null,
       selectable: true,
       unread: 0,
+      total: 0,
     })
   }
   return list
@@ -195,6 +197,11 @@ const all: MessageSummary[] = [
     seen: true,
     folder: { id: 12, path: 'Drafts', name: 'Entwürfe', role: 'drafts' },
   }),
+  ...[1, 2, 3, 4, 5].map((n) =>
+    msg(3, ['Gewinnspiel', `gewinn${n}@lotto.example`], `Sie haben gewonnen! (${n})`, n * 5 * hour, {
+      folder: { id: 34, path: 'Junk', name: 'Spam', role: 'junk' },
+    }),
+  ),
 ]
 
 const delay = <T>(value: T, ms = 120) => new Promise<T>((r) => setTimeout(() => r(value), ms))
@@ -215,7 +222,11 @@ export function overview(): Promise<Overview> {
     accounts: accounts.map((a) => ({
       ...a,
       unread_inbox: unreadInbox(a.id),
-      folders: a.folders.map((f) => ({ ...f, unread: unreadFolder(f.id) })),
+      folders: a.folders.map((f) => ({
+        ...f,
+        unread: unreadFolder(f.id),
+        total: all.filter((m) => m.folder_id === f.id).length,
+      })),
     })),
     unread_inbox: unreadInbox(null),
   })
@@ -467,4 +478,21 @@ export function cancelSend(id: number): Promise<Draft | null> {
 
 export function takeFailed(_id: number): Promise<Draft | null> {
   return delay(null, 50)
+}
+
+export function markFoldersRead(folderIds: number[]): Promise<number> {
+  let changed = 0
+  for (const m of all) {
+    if (folderIds.includes(m.folder_id) && !m.header.flags.includes('\\Seen')) {
+      m.header.flags = [...m.header.flags, '\\Seen']
+      changed++
+    }
+  }
+  return delay(changed, 80)
+}
+
+export function emptyFolder(folderId: number): Promise<number> {
+  const before = all.length
+  for (let i = all.length - 1; i >= 0; i--) if (all[i].folder_id === folderId) all.splice(i, 1)
+  return delay(before - all.length, 80)
 }

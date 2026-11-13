@@ -61,6 +61,7 @@ struct FolderInfo {
     role: Option<FolderRole>,
     selectable: bool,
     unread: i64,
+    total: i64,
 }
 
 #[derive(Serialize)]
@@ -87,6 +88,25 @@ fn folder_display_and_depth(
     if role == Some(FolderRole::Inbox) && path.eq_ignore_ascii_case("INBOX") {
         return ("Posteingang".to_string(), 0);
     }
+    let depth = delimiter
+        .filter(|d| !d.is_empty())
+        .map(|d| decoded.split(d).count().saturating_sub(1))
+        .unwrap_or(0);
+    // Known folders get one German name, whatever the server calls them
+    // ("Sent Items", "Gesendete Objekte", …).
+    let german = match role {
+        Some(FolderRole::Sent) => Some("Gesendet"),
+        Some(FolderRole::Drafts) => Some("Entwürfe"),
+        Some(FolderRole::Archive) => Some("Archiv"),
+        Some(FolderRole::Junk) => Some("Spam"),
+        Some(FolderRole::Trash) => Some("Papierkorb"),
+        Some(FolderRole::All) => Some("Alle Nachrichten"),
+        Some(FolderRole::Flagged) => Some("Markiert"),
+        _ => None,
+    };
+    if let Some(name) = german {
+        return (name.to_string(), depth);
+    }
     if let Some(delim) = delimiter.filter(|d| !d.is_empty()) {
         let parts: Vec<&str> = decoded.split(delim).collect();
         if parts.len() > 1 {
@@ -100,6 +120,21 @@ fn folder_display_and_depth(
         }
     }
     (decoded, 0)
+}
+
+/// Two folders with the same German name (a server keeping "Sent" and
+/// "Sent Items") show the server's name too, so the user can tell them apart.
+fn disambiguate(folders: &mut [FolderInfo]) {
+    let names: Vec<String> = folders.iter().map(|f| f.name.clone()).collect();
+    for f in folders.iter_mut() {
+        if names.iter().filter(|n| **n == f.name).count() > 1 {
+            let leaf = halcyon_core::utf7::decode(&f.path);
+            let leaf = leaf.rsplit(['/', '.']).next().unwrap_or(&leaf).to_string();
+            if leaf != f.name {
+                f.name = format!("{} ({leaf})", f.name);
+            }
+        }
+    }
 }
 
 fn folder_sort_key(folder: &FolderInfo) -> (u8, String) {
@@ -133,6 +168,7 @@ fn overview(state: State<'_, AppState>) -> CmdResult<Overview> {
                     let (name, depth) =
                         folder_display_and_depth(&f.path, f.delimiter.as_deref(), f.role);
                     let unread = unread_by_folder.get(&f.id).copied().unwrap_or(0);
+                    let total = store.message_count(f.id).unwrap_or(0);
                     FolderInfo {
                         id: f.id,
                         path: f.path,
@@ -141,10 +177,12 @@ fn overview(state: State<'_, AppState>) -> CmdResult<Overview> {
                         role: f.role,
                         selectable: f.selectable,
                         unread,
+                        total,
                     }
                 })
                 .collect();
             folders.sort_by_key(folder_sort_key);
+            disambiguate(&mut folders);
             Ok(AccountInfo {
                 unread_inbox: store.unread_count(Some(a.id), Some(FolderRole::Inbox))?,
                 id: a.id,
@@ -871,6 +909,47 @@ fn set_flag(
     Ok(changed)
 }
 
+/// Marks every message of the given folders read (one server command per
+/// folder).
+#[tauri::command]
+fn mark_folders_read(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    folder_ids: Vec<i64>,
+) -> CmdResult<usize> {
+    let mut changed = 0;
+    {
+        let mut store = state.store.lock().map_err(err)?;
+        for id in folder_ids {
+            changed += store.queue_mark_folder_seen(id).map_err(err)?;
+        }
+    }
+    if changed > 0 {
+        schedule_flush(&app);
+    }
+    Ok(changed)
+}
+
+/// Empties a spam or trash folder for good.
+#[tauri::command]
+fn empty_folder(app: AppHandle, state: State<'_, AppState>, folder_id: i64) -> CmdResult<usize> {
+    let removed = state
+        .store
+        .lock()
+        .map_err(err)?
+        .queue_empty_folder(folder_id)
+        .map_err(|e| match e {
+            halcyon_core::Error::Other(m) if m.contains("only spam") => {
+                "Nur Spam und Papierkorb lassen sich leeren.".to_string()
+            }
+            e => e.to_string(),
+        })?;
+    if removed > 0 {
+        schedule_flush(&app);
+    }
+    Ok(removed)
+}
+
 /// Moves messages to the trash (or deletes them for good if they are in the
 /// trash already).
 #[tauri::command]
@@ -1024,6 +1103,8 @@ pub fn run() {
             set_flag,
             delete_messages,
             compose_reply,
+            mark_folders_read,
+            empty_folder,
             send_message,
             cancel_send,
             take_failed,

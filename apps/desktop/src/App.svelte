@@ -3,12 +3,15 @@
   import * as api from './lib/api'
   import AccountDialog from './lib/AccountDialog.svelte'
   import Composer from './lib/Composer.svelte'
+  import ContextMenu, { type MenuItem } from './lib/ContextMenu.svelte'
+  import type { SidebarTarget } from './lib/Sidebar.svelte'
   import Icon from './lib/Icon.svelte'
   import MessageList from './lib/MessageList.svelte'
   import ReadingPane from './lib/ReadingPane.svelte'
   import Sidebar from './lib/Sidebar.svelte'
   import { accountLabel } from './lib/format'
   import {
+    type AccountInfo,
     isFlagged,
     isSeen,
     type Draft,
@@ -220,6 +223,71 @@
     }
   }
 
+  // ----- sidebar context menu ------------------------------------------------
+
+  let menu: { x: number; y: number; items: MenuItem[] } | null = $state(null)
+  let confirmEmpty: { folderId: number; name: string; account: string; total: number } | null =
+    $state(null)
+
+  async function markRead(folderIds: number[]) {
+    try {
+      await api.markFoldersRead(folderIds)
+      refreshOverview()
+      load()
+    } catch (e) {
+      errors = [...errors, String(e)]
+    }
+  }
+
+  async function emptyNow(folderId: number) {
+    confirmEmpty = null
+    try {
+      const n = await api.emptyFolder(folderId)
+      showToast({ kind: 'done', text: `${n} Nachricht${n === 1 ? '' : 'en'} endgültig gelöscht.` }, 3000)
+      refreshOverview()
+      load()
+    } catch (e) {
+      errors = [...errors, String(e)]
+    }
+  }
+
+  function openContext(target: SidebarTarget, x: number, y: number) {
+    const inboxes = (accs: AccountInfo[]) =>
+      accs.flatMap((a) => a.folders.filter((f) => f.role === 'inbox' && f.unread > 0).map((f) => f.id))
+    const sync: MenuItem = { label: 'Jetzt abrufen', icon: 'sync', action: () => api.startSync() }
+    let items: MenuItem[]
+    if (target.kind === 'unified') {
+      const ids = inboxes(overview?.accounts ?? [])
+      items = [
+        { label: 'Alle als gelesen markieren', icon: 'mailopen', disabled: !ids.length, action: () => markRead(ids) },
+        sync,
+      ]
+    } else if (target.kind === 'account') {
+      const ids = inboxes([target.account])
+      items = [
+        { label: 'Posteingang als gelesen markieren', icon: 'mailopen', disabled: !ids.length, action: () => markRead(ids) },
+        sync,
+        { label: 'Konto bearbeiten …', icon: 'pencil', action: () => (accountDialogOpen = true) },
+      ]
+    } else {
+      const f = target.folder
+      items = [
+        { label: 'Alle als gelesen markieren', icon: 'mailopen', disabled: f.unread === 0, action: () => markRead([f.id]) },
+      ]
+      if (f.role === 'junk' || f.role === 'trash') {
+        items.push({
+          label: f.role === 'junk' ? 'Spam leeren …' : 'Papierkorb leeren …',
+          icon: 'trash',
+          danger: true,
+          disabled: f.total === 0,
+          action: () =>
+            (confirmEmpty = { folderId: f.id, name: f.name, account: accountLabel(target.account.email), total: f.total }),
+        })
+      }
+    }
+    menu = { x, y, items }
+  }
+
   // ----- writing -----------------------------------------------------------
 
   let composing: Draft | null = $state(null)
@@ -355,7 +423,7 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
-    if (accountDialogOpen || composing) return
+    if (accountDialogOpen || composing || menu || confirmEmpty) return
     const typing =
       e.target instanceof HTMLInputElement ||
       e.target instanceof HTMLTextAreaElement ||
@@ -434,6 +502,7 @@
     {activeEmails}
     onselect={selectView}
     onmanageaccounts={() => (accountDialogOpen = true)}
+    oncontext={openContext}
   />
 
   <main>
@@ -533,6 +602,34 @@
     </div>
   </main>
 </div>
+
+{#if menu}
+  <ContextMenu x={menu.x} y={menu.y} items={menu.items} onclose={() => (menu = null)} />
+{/if}
+
+{#if confirmEmpty}
+  {@const c = confirmEmpty}
+  <div class="confirm-backdrop" role="presentation" onclick={() => (confirmEmpty = null)}>
+    <div
+      class="confirm-box"
+      role="alertdialog"
+      aria-labelledby="empty-title"
+      tabindex="-1"
+      onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => e.key === 'Escape' && (confirmEmpty = null)}
+    >
+      <h2 id="empty-title">{c.name} leeren?</h2>
+      <p>
+        {c.total} Nachricht{c.total === 1 ? '' : 'en'} in „{c.name}" ({c.account}) werden endgültig gelöscht,
+        auch auf dem Server. Das lässt sich nicht rückgängig machen.
+      </p>
+      <div class="confirm-actions">
+        <button type="button" class="btn" onclick={() => (confirmEmpty = null)}>Abbrechen</button>
+        <button type="button" class="btn danger" onclick={() => emptyNow(c.folderId)}>Endgültig löschen</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if toast}
   <div class="toast" class:failed={toast.kind === 'failed'} role="status" aria-live="polite">

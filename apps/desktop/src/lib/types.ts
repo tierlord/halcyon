@@ -42,6 +42,7 @@ export interface FolderInfo {
   role: FolderRole | null
   selectable: boolean
   unread: number
+  total: number
 }
 
 export interface AccountInfo {

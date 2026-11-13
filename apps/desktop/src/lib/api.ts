@@ -160,3 +160,13 @@ export async function onOutbox(handler: (e: OutboxEvent) => void): Promise<() =>
   if (!native) return mock.onOutbox(handler)
   return listen<OutboxEvent>('outbox', (e) => handler(e.payload))
 }
+
+/** Marks all messages of these folders read (one server command each). */
+export function markFoldersRead(folderIds: number[]): Promise<number> {
+  return native ? invoke('mark_folders_read', { folderIds }) : mock.markFoldersRead(folderIds)
+}
+
+/** Empties a spam or trash folder for good. */
+export function emptyFolder(folderId: number): Promise<number> {
+  return native ? invoke('empty_folder', { folderId }) : mock.emptyFolder(folderId)
+}

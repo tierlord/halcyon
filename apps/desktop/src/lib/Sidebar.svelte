@@ -1,7 +1,20 @@
+<script lang="ts" module>
+  import type { AccountInfo, FolderInfo } from './types'
+
+  /** What was right-clicked, for the context menu. */
+  export type SidebarTarget =
+    | { kind: 'unified' }
+    | { kind: 'account'; account: AccountInfo }
+    | { kind: 'folder'; account: AccountInfo; folder: FolderInfo }
+</script>
+
 <script lang="ts">
+  import { cubicOut } from 'svelte/easing'
+  import { fade, slide } from 'svelte/transition'
   import Icon from './Icon.svelte'
   import { accountLabel } from './format'
-  import type { FolderInfo, FolderRole, Overview, View } from './types'
+  import type { FolderRole, Overview, View } from './types'
+
 
   let {
     overview,
@@ -9,6 +22,7 @@
     activeEmails = [],
     onselect,
     onmanageaccounts,
+    oncontext,
   }: {
     overview: Overview | null
     view: View
@@ -16,7 +30,32 @@
     activeEmails?: string[]
     onselect: (v: View) => void
     onmanageaccounts: () => void
+    /** Right-click or context-menu key on an item; x/y in window coordinates. */
+    oncontext: (target: SidebarTarget, x: number, y: number) => void
   } = $props()
+
+  // First the list grows, then the folders fade in one after another.
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const EXPAND_MS = reduceMotion ? 0 : 180
+  const STAGGER_MS = reduceMotion ? 0 : 28
+
+  function contextMenu(target: SidebarTarget) {
+    return (e: MouseEvent) => {
+      e.preventDefault()
+      oncontext(target, e.clientX, e.clientY)
+    }
+  }
+
+  // Keyboard users: context-menu key or Shift+F10 open the same menu.
+  function contextKey(target: SidebarTarget) {
+    return (e: KeyboardEvent) => {
+      if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+        e.preventDefault()
+        const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+        oncontext(target, r.left + 24, r.bottom)
+      }
+    }
+  }
 
   // Planned smart categories (see ROADMAP.md); shown so the direction is visible.
   const upcoming = ['Rechnungen', 'Bestellungen', 'Logindaten', 'Verträge', 'Newsletter']
@@ -86,6 +125,8 @@
         class="item"
         class:active={isUnified}
         onclick={selectUnified}
+        oncontextmenu={contextMenu({ kind: 'unified' })}
+        onkeydown={contextKey({ kind: 'unified' })}
       >
         <Icon name="inbox" />
         <span class="label">Alle Posteingänge</span>
@@ -122,6 +163,8 @@
             ? `${account.email} – wird abgerufen …`
             : account.email}
           onclick={() => selectAccount(account.id)}
+          oncontextmenu={contextMenu({ kind: 'account', account })}
+          onkeydown={contextKey({ kind: 'account', account })}
         >
           {#if hasFolders}
             <span class="chevron"><Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={14} /></span>
@@ -132,10 +175,14 @@
         </button>
 
         {#if expanded && hasFolders}
-          <ul class="folders" aria-label={`Ordner von ${account.display_name ?? accountLabel(account.email)}`}>
-            {#each account.folders as folder (folder.id)}
+          <ul
+            class="folders"
+            aria-label={`Ordner von ${account.display_name ?? accountLabel(account.email)}`}
+            transition:slide={{ duration: EXPAND_MS, easing: cubicOut }}
+          >
+            {#each account.folders as folder, i (folder.id)}
               {@const folderActive = view.kind === 'folder' && view.folderId === folder.id}
-              <li>
+              <li in:fade={{ duration: 160, delay: EXPAND_MS * 0.6 + i * STAGGER_MS }}>
                 {#if folder.selectable}
                   <button
                     class="item folder-item"
@@ -143,10 +190,12 @@
                     style:padding-left={`${8 + Math.min(folder.depth, 4) * 12}px`}
                     title={folder.path}
                     onclick={() => selectFolder(account.id, folder)}
+                    oncontextmenu={contextMenu({ kind: 'folder', account, folder })}
+                    onkeydown={contextKey({ kind: 'folder', account, folder })}
                   >
                     <Icon name={folderIcon(folder.role)} size={15} />
                     <span class="label">{folder.name}</span>
-                    {#if folder.unread}<span class="count">{folder.unread}</span>{/if}
+                    {#if folder.unread}<span class="folder-count">{folder.unread}</span>{/if}
                   </button>
                 {:else}
                   <div
@@ -348,6 +397,16 @@
     margin: 2px 0 6px 14px;
     padding: 0 0 0 6px;
     border-left: 1px solid var(--border);
+  }
+  /* Folder counts stay quiet: a number, no pill. */
+  .folder-count {
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+    opacity: 0.85;
+  }
+  .folder-item.active .folder-count {
+    color: var(--text);
   }
   .folder-item {
     gap: 8px;

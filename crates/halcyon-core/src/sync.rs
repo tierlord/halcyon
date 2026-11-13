@@ -323,6 +323,14 @@ async fn apply_change(
             store_flags(session, &uid, "+FLAGS.SILENT (\\Deleted)").await?;
             expunge(session, caps, &uid).await
         }
+        PendingChange::MarkAllSeen => {
+            store_flags(session, &format!("1:{uid}"), "+FLAGS.SILENT (\\Seen)").await
+        }
+        PendingChange::EmptyUpTo => {
+            let range = format!("1:{uid}");
+            store_flags(session, &range, "+FLAGS.SILENT (\\Deleted)").await?;
+            expunge(session, caps, &range).await
+        }
     }
 }
 

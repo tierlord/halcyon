@@ -241,6 +241,12 @@ pub enum PendingChange {
     MoveTo(String),
     /// Permanently delete (only used for messages already in the trash).
     Expunge,
+    /// Mark every message of the folder up to the op's UID as read – one
+    /// command for the whole folder instead of one per message.
+    MarkAllSeen,
+    /// Delete every message of the folder up to the op's UID for good
+    /// (emptying spam or trash). Mail that arrived later is kept.
+    EmptyUpTo,
 }
 
 #[derive(Clone, Debug)]
