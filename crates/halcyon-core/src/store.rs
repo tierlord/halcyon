@@ -9,6 +9,7 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::Result;
+use crate::brand::{BrandLogo, LOGO_HIT_TTL_SECS, LOGO_MISS_TTL_SECS};
 use crate::model::{
     Account, AuthMethod, Folder, FolderRole, MessageHeader, MessageSummary, PendingChange,
     PendingOp, Security, ServerConfig,
@@ -153,7 +154,25 @@ CREATE TABLE pending_ops (
 CREATE INDEX pending_ops_account ON pending_ops(account_id, id);
 CREATE INDEX pending_ops_message ON pending_ops(message_id);
 "#,
+    // 4: brand logo cache (hits and negative misses with TTL).
+    r#"
+CREATE TABLE brand_logos (
+    domain      TEXT PRIMARY KEY,
+    data_url    TEXT,
+    bg          TEXT,
+    padded      INTEGER NOT NULL DEFAULT 1,
+    scale       REAL NOT NULL DEFAULT 1.0,
+    fetched_at  INTEGER NOT NULL DEFAULT (unixepoch())
+);
+"#,
 ];
+
+/// Result of looking up a domain in the persistent brand logo cache.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CachedLogo {
+    Hit(BrandLogo),
+    Miss,
+}
 
 /// Failed changes are retried this many times, then kept for inspection.
 const MAX_OP_ATTEMPTS: u32 = 5;
@@ -803,6 +822,103 @@ impl Store {
             |r| r.get(0),
         )?)
     }
+
+    // ----- brand logos ----------------------------------------------------
+
+    /// Returns a cached brand logo (or negative miss) if it has not expired.
+    pub fn get_brand_logo(&self, domain: &str, now_secs: i64) -> Result<Option<CachedLogo>> {
+        struct Row {
+            data_url: Option<String>,
+            bg: Option<String>,
+            padded: i64,
+            scale: f64,
+            fetched_at: i64,
+        }
+        let row = self
+            .conn
+            .query_row(
+                "SELECT data_url, bg, padded, scale, fetched_at
+                 FROM brand_logos WHERE domain = ?1",
+                [domain],
+                |r| {
+                    Ok(Row {
+                        data_url: r.get(0)?,
+                        bg: r.get(1)?,
+                        padded: r.get(2)?,
+                        scale: r.get(3)?,
+                        fetched_at: r.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let age = now_secs.saturating_sub(row.fetched_at);
+        match row.data_url {
+            Some(url) if age <= LOGO_HIT_TTL_SECS => Ok(Some(CachedLogo::Hit(BrandLogo {
+                data_url: url,
+                bg: row.bg,
+                padded: row.padded != 0,
+                scale: row.scale as f32,
+            }))),
+            None if age <= LOGO_MISS_TTL_SECS => Ok(Some(CachedLogo::Miss)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Stores a resolved brand logo (or negative miss when `logo` is `None`).
+    pub fn save_brand_logo(
+        &self,
+        domain: &str,
+        logo: Option<&BrandLogo>,
+        now_secs: i64,
+    ) -> Result<()> {
+        match logo {
+            Some(l) => {
+                self.conn.execute(
+                    "INSERT INTO brand_logos (domain, data_url, bg, padded, scale, fetched_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(domain) DO UPDATE SET
+                       data_url = excluded.data_url,
+                       bg = excluded.bg,
+                       padded = excluded.padded,
+                       scale = excluded.scale,
+                       fetched_at = excluded.fetched_at",
+                    params![
+                        domain,
+                        l.data_url,
+                        l.bg,
+                        l.padded as i64,
+                        l.scale as f64,
+                        now_secs,
+                    ],
+                )?;
+            }
+            None => {
+                self.conn.execute(
+                    "INSERT INTO brand_logos (domain, data_url, bg, padded, scale, fetched_at)
+                     VALUES (?1, NULL, NULL, 1, 1.0, ?2)
+                     ON CONFLICT(domain) DO UPDATE SET
+                       data_url = NULL,
+                       bg = NULL,
+                       padded = 1,
+                       scale = 1.0,
+                       fetched_at = excluded.fetched_at",
+                    params![domain, now_secs],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Clears all cached brand logos.
+    pub fn clear_brand_logos(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM brand_logos", [])?;
+        Ok(())
+    }
 }
 
 // Lists the columns instead of `m.*` so lists never load the full body text.
@@ -1235,5 +1351,54 @@ mod tests {
         // UID 9 is above `up_to` and must survive.
         assert_eq!(store.delete_missing(f.id, &existing, 5).unwrap(), 1);
         assert_eq!(store.message_count(f.id).unwrap(), 2);
+    }
+
+    #[test]
+    fn brand_logo_cache_respects_ttl_and_clears() {
+        let store = Store::open_in_memory().unwrap();
+        let logo = BrandLogo {
+            data_url: "data:image/svg+xml;base64,PHN2Zz4=".into(),
+            bg: Some("rgb(42, 53, 24)".into()),
+            padded: true,
+            scale: 1.25,
+        };
+        store
+            .save_brand_logo("kleinanzeigen.example", Some(&logo), 1_000)
+            .unwrap();
+        assert_eq!(
+            store
+                .get_brand_logo("kleinanzeigen.example", 2_000)
+                .unwrap(),
+            Some(CachedLogo::Hit(logo))
+        );
+        // Expired after 30 days
+        assert_eq!(
+            store
+                .get_brand_logo("kleinanzeigen.example", 1_000 + LOGO_HIT_TTL_SECS + 1)
+                .unwrap(),
+            None
+        );
+
+        store
+            .save_brand_logo("missing.example", None, 1_000)
+            .unwrap();
+        assert_eq!(
+            store.get_brand_logo("missing.example", 2_000).unwrap(),
+            Some(CachedLogo::Miss)
+        );
+        assert_eq!(
+            store
+                .get_brand_logo("missing.example", 1_000 + LOGO_MISS_TTL_SECS + 1)
+                .unwrap(),
+            None
+        );
+
+        store.clear_brand_logos().unwrap();
+        assert_eq!(
+            store
+                .get_brand_logo("kleinanzeigen.example", 2_000)
+                .unwrap(),
+            None
+        );
     }
 }

@@ -116,6 +116,13 @@ export interface MessageView {
   attachments: Attachment[]
 }
 
+export interface BrandLogo {
+  data_url: string
+  bg: string | null
+  padded: boolean
+  scale: number
+}
+
 export type LiveState =
   | { state: 'push'; email: string }
   | { state: 'polling'; email: string }

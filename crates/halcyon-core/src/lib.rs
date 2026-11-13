@@ -5,6 +5,7 @@
 //! app, the development CLI and later mobile builds) only talk to this crate.
 
 pub mod autoconfig;
+pub mod brand;
 pub mod content;
 pub mod error;
 pub mod extract;

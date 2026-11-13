@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { onMount } from 'svelte'
   import Icon from './Icon.svelte'
+  import { getBrandLogo, subscribeLogos } from './brandLogos'
   import { accountLabel, listDate } from './format'
   import { isFlagged, isSeen, type MessageSummary } from './types'
 
@@ -20,6 +22,11 @@
   } = $props()
 
   let listEl: HTMLUListElement | undefined = $state()
+  let logoVersion = $state(0)
+
+  onMount(() => subscribeLogos(() => {
+    logoVersion += 1
+  }))
 
   // Keep the selected row visible during keyboard navigation.
   $effect(() => {
@@ -41,6 +48,7 @@
   <ul bind:this={listEl} role="listbox" aria-label={title}>
     {#each messages as m (m.id)}
       {@const unread = !isSeen(m)}
+      {@const logo = (void logoVersion, getBrandLogo(m.header.from_addr))}
       <li
         role="option"
         aria-selected={m.id === selectedId}
@@ -48,8 +56,21 @@
         class:selected={m.id === selectedId}
         class:unread
       >
-        <button onclick={() => onselect(m.id)}>
+        <button class:has-brand={!!logo} onclick={() => onselect(m.id)}>
+          {#if logo?.bg}
+            <span class="brand-wash" style:--brand-wash={logo.bg} aria-hidden="true"></span>
+          {/if}
           <span class="dot" aria-label={unread ? 'ungelesen' : undefined}></span>
+          {#if logo}
+            <span class="brand" aria-hidden="true">
+              <img
+                src={logo.dataUrl}
+                alt=""
+                class:opaque={!logo.padded}
+                style:transform={logo.scale !== 1 ? `scale(${logo.scale})` : undefined}
+              />
+            </span>
+          {/if}
           <span class="from">{m.header.from_name ?? m.header.from_addr ?? 'Unbekannt'}</span>
           <time>
             {#if isFlagged(m)}<span class="flag" title="Markiert"><Icon name="star" size={12} filled /></span>{/if}
@@ -107,6 +128,8 @@
     flex: 1;
   }
   li button {
+    position: relative;
+    overflow: hidden;
     width: 100%;
     display: grid;
     grid-template-columns: 10px 1fr auto;
@@ -121,6 +144,61 @@
     border-radius: var(--radius);
     background: none;
     text-align: left;
+  }
+  li button.has-brand {
+    grid-template-columns: 10px 30px 1fr auto;
+    grid-template-areas:
+      'dot brand from date'
+      '.   brand subject account';
+  }
+  .brand-wash {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--brand-wash) 92%, transparent) 0%,
+      color-mix(in srgb, var(--brand-wash) 88%, transparent) 46px,
+      color-mix(in srgb, var(--brand-wash) 34%, transparent) 88px,
+      color-mix(in srgb, var(--brand-wash) 10%, transparent) 132px,
+      transparent 180px
+    );
+  }
+  li.selected button .brand-wash {
+    left: 3px;
+  }
+  .brand {
+    grid-area: brand;
+    position: relative;
+    z-index: 1;
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .brand img {
+    width: 24px;
+    height: 24px;
+    object-fit: contain;
+    display: block;
+  }
+  .brand img.opaque {
+    width: 28px;
+    height: 28px;
+    object-fit: cover;
+    border-radius: 6px;
+  }
+  .dot,
+  .from,
+  time,
+  .subject,
+  .account {
+    position: relative;
+    z-index: 1;
   }
   li button:hover {
     background: var(--hover);

@@ -12,11 +12,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use halcyon_core::autoconfig::{self, Candidate};
+use halcyon_core::brand::{self, BrandLogo};
 use halcyon_core::content::{self, Attachment, Rendered};
 use halcyon_core::imap::{self, Credentials};
 use halcyon_core::model::{Account, AuthMethod, FolderRole, MessageSummary, ServerConfig};
 use halcyon_core::secrets::{self, SecretKind};
-use halcyon_core::store::Store;
+use halcyon_core::store::{CachedLogo, Store};
 use halcyon_core::sync::{self, SyncEvent};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -32,6 +33,7 @@ struct AppState {
     /// … and more changes arrived while it ran.
     flush_again: AtomicBool,
     watchers: watch::Watchers,
+    logo_semaphore: tokio::sync::Semaphore,
     /// Servers a freshly typed password may go to, per lower-cased address.
     ///
     /// The account dialog asks for the password only after the server check
@@ -773,6 +775,100 @@ async fn run_flush(app: &AppHandle) {
     }
 }
 
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+#[tauri::command]
+async fn brand_logo(state: State<'_, AppState>, domain: String) -> CmdResult<Option<BrandLogo>> {
+    let domain = domain.trim().to_ascii_lowercase();
+    if domain.is_empty() {
+        return Ok(None);
+    }
+
+    let now = now_unix_secs();
+    {
+        let store = state.store.lock().map_err(err)?;
+        if let Some(cached) = store.get_brand_logo(&domain, now).map_err(err)? {
+            return Ok(match cached {
+                CachedLogo::Hit(logo) => Some(logo),
+                CachedLogo::Miss => None,
+            });
+        }
+    }
+
+    let _permit = state.logo_semaphore.acquire().await.map_err(err)?;
+    // Re-check cache after acquiring semaphore in case another request resolved it.
+    {
+        let store = state.store.lock().map_err(err)?;
+        if let Some(cached) = store
+            .get_brand_logo(&domain, now_unix_secs())
+            .map_err(err)?
+        {
+            return Ok(match cached {
+                CachedLogo::Hit(logo) => Some(logo),
+                CachedLogo::Miss => None,
+            });
+        }
+    }
+
+    let resolved = brand::resolve_logo(&domain)
+        .await
+        .map(|data_url| BrandLogo {
+            data_url,
+            bg: None,
+            padded: true,
+            scale: 1.0,
+        });
+
+    {
+        let store = state.store.lock().map_err(err)?;
+        store
+            .save_brand_logo(&domain, resolved.as_ref(), now_unix_secs())
+            .map_err(err)?;
+    }
+
+    Ok(resolved)
+}
+
+#[tauri::command]
+fn save_brand_logo_appearance(
+    state: State<'_, AppState>,
+    domain: String,
+    bg: Option<String>,
+    padded: bool,
+    scale: f32,
+) -> CmdResult<()> {
+    let domain = domain.trim().to_ascii_lowercase();
+    if domain.is_empty() {
+        return Ok(());
+    }
+    let now = now_unix_secs();
+    let store = state.store.lock().map_err(err)?;
+    if let Some(CachedLogo::Hit(mut logo)) = store.get_brand_logo(&domain, now).map_err(err)? {
+        logo.bg = bg;
+        logo.padded = padded;
+        logo.scale = scale;
+        store
+            .save_brand_logo(&domain, Some(&logo), now)
+            .map_err(err)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn clear_brand_logos(state: State<'_, AppState>) -> CmdResult<()> {
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .clear_brand_logos()
+        .map_err(err)
+}
+
 fn default_db_path() -> PathBuf {
     if let Some(p) = std::env::var_os("HALCYON_DB") {
         return p.into();
@@ -802,6 +898,7 @@ pub fn run() {
             flushing: AtomicBool::new(false),
             flush_again: AtomicBool::new(false),
             watchers: watch::Watchers::default(),
+            logo_semaphore: tokio::sync::Semaphore::new(4),
             verified_servers: Mutex::new(HashMap::new()),
         })
         .plugin(tauri_plugin_notification::init())
@@ -826,7 +923,10 @@ pub fn run() {
             open_link,
             save_attachment,
             set_flag,
-            delete_messages
+            delete_messages,
+            brand_logo,
+            save_brand_logo_appearance,
+            clear_brand_logos
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Halcyon app");

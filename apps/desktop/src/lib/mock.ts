@@ -1,6 +1,7 @@
 // Made-up sample data for developing the UI in a browser.
 
 import type {
+  BrandLogo,
   MessageView,
   Account,
   AccountInfo,
@@ -328,4 +329,87 @@ export function deleteMessages(ids: number[]): Promise<number> {
   const before = all.length
   for (let i = all.length - 1; i >= 0; i--) if (ids.includes(all[i].id)) all.splice(i, 1)
   return delay(before - all.length, 50)
+}
+
+function svgDataUrl(svg: string): string {
+  return `data:image/svg+xml;base64,${btoa(svg)}`
+}
+
+const mockBrandStore = new Map<string, BrandLogo>([
+  [
+    'kleinanzeigen.example',
+    {
+      data_url: svgDataUrl(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="#B5E941" d="M32 10c12.15 0 22 9.85 22 22s-9.85 22-22 22-22-9.85-22-22 9.85-22 22-22zm-4 12v20h8v-7l7 7h9l-9.5-9.5L52 22h-9l-7 7v-7h-8z"/></svg>',
+      ),
+      bg: null,
+      padded: true,
+      scale: 1,
+    },
+  ],
+  [
+    'paypal.example',
+    {
+      data_url: svgDataUrl(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="#003087" d="M21 12h17c7.5 0 12 4.2 11 11.2C48 30.5 42.5 35 34.5 35H28l-2.5 15H16l5-38zm8 15h5.5c3.5 0 5.8-1.6 6.2-4.6.4-2.8-1.3-4.4-4.7-4.4H30.5L29 27z"/></svg>',
+      ),
+      bg: null,
+      padded: true,
+      scale: 1,
+    },
+  ],
+  [
+    'telekom.example',
+    {
+      data_url: svgDataUrl(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="#E20074" d="M14 12h36v11H44v-4H36v26h5v7H23v-7h5V19h-8v4h-6V12zm0 18h7v7h-7v-7zm29 0h7v7h-7v-7z"/></svg>',
+      ),
+      bg: null,
+      padded: true,
+      scale: 1,
+    },
+  ],
+  [
+    'dhl.example',
+    {
+      data_url: svgDataUrl(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect x="4" y="16" width="56" height="32" rx="6" fill="#FFCC00"/><path fill="#D40511" d="M12 24h18l-4 16H12l2-6h6l1-4h-6l-3 0 0-6zm19 0h7l-2 6h5l2-6h7l-4 16h-7l2-6h-5l-2 6h-7l4-16z"/></svg>',
+      ),
+      bg: null,
+      padded: true,
+      scale: 1,
+    },
+  ],
+  [
+    'github.example',
+    {
+      data_url: svgDataUrl(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="#181717" d="M32 8C18.7 8 8 18.7 8 32c0 10.6 6.9 19.6 16.4 22.8 1.2.2 1.6-.5 1.6-1.1v-4.2c-6.7 1.4-8.1-3.2-8.1-3.2-1.1-2.8-2.7-3.5-2.7-3.5-2.2-1.5.2-1.5.2-1.5 2.4.2 3.7 2.5 3.7 2.5 2.2 3.7 5.7 2.6 7.1 2 .2-1.6.9-2.6 1.5-3.2-5.3-.6-10.9-2.7-10.9-11.9 0-2.6.9-4.8 2.5-6.5-.2-.6-1.1-3.1.2-6.4 0 0 2-.6 6.6 2.5 1.9-.5 4-.8 6-.8s4.1.3 6 .8c4.6-3.1 6.6-2.5 6.6-2.5 1.3 3.3.5 5.8.2 6.4 1.6 1.7 2.5 3.9 2.5 6.5 0 9.2-5.6 11.3-11 11.9.9.7 1.6 2.2 1.6 4.4v6.6c0 .6.4 1.3 1.6 1.1C49.1 51.6 56 42.6 56 32 56 18.7 45.3 8 32 8z"/></svg>',
+      ),
+      bg: null,
+      padded: true,
+      scale: 1,
+    },
+  ],
+])
+
+export function brandLogo(domain: string): Promise<BrandLogo | null> {
+  return delay(mockBrandStore.get(domain) ?? null, 60)
+}
+
+export function saveBrandLogoAppearance(
+  domain: string,
+  bg: string | null,
+  padded: boolean,
+  scale: number,
+): Promise<void> {
+  const existing = mockBrandStore.get(domain)
+  if (existing) {
+    mockBrandStore.set(domain, { ...existing, bg, padded, scale })
+  }
+  return delay(undefined, 10)
+}
+
+export function clearBrandLogos(): Promise<void> {
+  return delay(undefined, 10)
 }
