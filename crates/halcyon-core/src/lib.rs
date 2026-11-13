@@ -6,6 +6,7 @@
 
 pub mod autoconfig;
 pub mod brand;
+pub mod cases;
 pub mod content;
 pub mod error;
 pub mod extract;
