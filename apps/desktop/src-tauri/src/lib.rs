@@ -704,8 +704,8 @@ async fn raw_message(state: &State<'_, AppState>, message_id: i64) -> CmdResult<
     Ok(raw)
 }
 
-/// Content of a message as a sandbox-ready document. Remote images load only
-/// with `allow_remote`, which the user sets per message.
+/// Content of a message as a sandbox-ready document. Remote images load when
+/// `allow_remote` is set or the sender was previously trusted by the user.
 #[tauri::command]
 async fn message_content(
     state: State<'_, AppState>,
@@ -713,12 +713,31 @@ async fn message_content(
     allow_remote: bool,
     dark: bool,
 ) -> CmdResult<MessageView> {
+    let trusted = if allow_remote {
+        true
+    } else {
+        let store = state.store.lock().map_err(err)?;
+        match store.message(id).map_err(err)? {
+            Some(msg) => match msg.header.from_addr.as_deref() {
+                Some(addr) => store.is_remote_sender_trusted(addr).map_err(err)?,
+                None => false,
+            },
+            None => false,
+        }
+    };
     let raw = raw_message(&state, id).await?;
     let parsed = content::parse(&raw);
     Ok(MessageView {
-        rendered: content::render(&parsed, allow_remote, dark),
+        rendered: content::render(&parsed, allow_remote || trusted, dark),
         attachments: parsed.attachments.clone(),
     })
+}
+
+/// Remembers a sender so remote images in future messages load automatically.
+#[tauri::command]
+async fn trust_remote_sender(state: State<'_, AppState>, sender: String) -> CmdResult<()> {
+    let store = state.store.lock().map_err(err)?;
+    store.trust_remote_sender(&sender).map_err(err)
 }
 
 #[derive(Serialize)]
@@ -1323,6 +1342,7 @@ pub fn run() {
             save_account,
             delete_account,
             message_content,
+            trust_remote_sender,
             open_link,
             save_attachment,
             set_flag,

@@ -278,6 +278,13 @@ CREATE TABLE case_scan (
     with_body  INTEGER NOT NULL
 );
 "#,
+    // 11: senders for whom remote images are always loaded automatically.
+    r#"
+CREATE TABLE trusted_remote_senders (
+    sender     TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+"#,
 ];
 
 /// Result of looking up a domain in the persistent brand logo cache.
@@ -1743,6 +1750,44 @@ impl Store {
             message_ids,
         })
     }
+
+    // ----- remote image trust ---------------------------------------------
+
+    /// Whether remote images should be loaded automatically for `sender`.
+    pub fn is_remote_sender_trusted(&self, sender: &str) -> Result<bool> {
+        let norm = sender.trim().to_ascii_lowercase();
+        if norm.is_empty() {
+            return Ok(false);
+        }
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM trusted_remote_senders WHERE sender = ?1)",
+            [norm],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Always loads remote images for `sender` in the future.
+    pub fn trust_remote_sender(&self, sender: &str) -> Result<()> {
+        let norm = sender.trim().to_ascii_lowercase();
+        if norm.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            "INSERT OR IGNORE INTO trusted_remote_senders (sender) VALUES (?1)",
+            [norm],
+        )?;
+        Ok(())
+    }
+
+    /// Revokes automatic remote image loading for `sender`.
+    pub fn untrust_remote_sender(&self, sender: &str) -> Result<()> {
+        let norm = sender.trim().to_ascii_lowercase();
+        self.conn.execute(
+            "DELETE FROM trusted_remote_senders WHERE sender = ?1",
+            [norm],
+        )?;
+        Ok(())
+    }
 }
 
 // Lists the columns instead of `m.*` so lists never load the full body text.
@@ -2661,5 +2706,15 @@ mod tests {
             store.get_case(c.case.id).unwrap().unwrap().message_ids,
             vec![m1, m2]
         );
+    }
+
+    #[test]
+    fn trusted_remote_senders_round_trip() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(!store.is_remote_sender_trusted("News@Shop.Example").unwrap());
+        store.trust_remote_sender("  News@Shop.Example ").unwrap();
+        assert!(store.is_remote_sender_trusted("news@shop.example").unwrap());
+        store.untrust_remote_sender("NEWS@shop.example").unwrap();
+        assert!(!store.is_remote_sender_trusted("news@shop.example").unwrap());
     }
 }

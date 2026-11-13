@@ -108,6 +108,11 @@ export function messageContent(
     : mock.messageContent(id, allowRemote, dark)
 }
 
+/** Remembers a sender so remote images load automatically in future emails. */
+export function trustRemoteSender(sender: string): Promise<void> {
+  return native ? invoke('trust_remote_sender', { sender }) : Promise.resolve()
+}
+
 /** Opens a web or mail link outside the app. */
 export function openLink(url: string): Promise<void> {
   return native ? invoke('open_link', { url }) : mock.openLink(url)

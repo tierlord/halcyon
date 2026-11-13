@@ -86,6 +86,15 @@
     load(message.id, true)
   }
 
+  async function alwaysLoadImages() {
+    if (!message) return
+    const addr = message.header.from_addr
+    if (addr) {
+      await api.trustRemoteSender(addr)
+    }
+    loadImages()
+  }
+
   function hostOf(url: string): string | null {
     try {
       return new URL(url).hostname.replace(/^www\./, '').toLowerCase()
@@ -227,7 +236,14 @@
             {view.rendered.remote_blocked === 1 ? 'Inhalt' : 'Inhalte'} blockiert – sie würden dem
             Absender verraten, wann du die Mail liest.
           </span>
-          <button type="button" class="small-btn" onclick={loadImages}>Bilder laden</button>
+          <div class="hint-actions">
+            <button type="button" class="small-btn" onclick={loadImages}>Bilder laden</button>
+            {#if h.from_addr}
+              <button type="button" class="small-btn" onclick={alwaysLoadImages}>
+                Immer für {h.from_addr}
+              </button>
+            {/if}
+          </div>
         </div>
       {/if}
 
@@ -441,6 +457,12 @@
   .hint.images {
     background: color-mix(in srgb, var(--blue-green) 12%, transparent);
     border-color: color-mix(in srgb, var(--blue-green) 45%, transparent);
+  }
+  .hint-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    flex-shrink: 0;
   }
   .small-btn {
     display: inline-flex;
