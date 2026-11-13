@@ -199,17 +199,10 @@ CREATE TABLE meta (
     value TEXT NOT NULL
 );
 "#,
-    // 8: track whether existing messages had their DMARC header checked and
-    // drop stale negative brand logo misses so HTML-icon discovery retries.
-    r#"
-ALTER TABLE messages ADD COLUMN dmarc_checked INTEGER NOT NULL DEFAULT 0;
-DELETE FROM brand_logos WHERE data_url IS NULL;
-"#,
-    // 9: re-run offline DMARC backfill from stored bodies in case a server
-    // returned incomplete partial headers during IMAP backfill.
-    r#"
-DELETE FROM meta WHERE key = 'backfill.dmarc.v1';
-"#,
+    // 8–9: reserved (previous temporary DMARC IMAP backfill removed; keep
+    // user_version alignment for databases that already ran 8–9).
+    "",
+    "",
 ];
 
 /// Result of looking up a domain in the persistent brand logo cache.
@@ -454,12 +447,9 @@ impl Store {
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO messages (folder_id, uid, message_id, in_reply_to, refs, subject,
                     from_name, from_addr, reply_to, to_addrs, cc_addrs, date, size, flags,
-                    list_id, list_unsubscribe, list_unsubscribe_post, dmarc_pass, dmarc_checked)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, 1)
-                 ON CONFLICT (folder_id, uid) DO UPDATE SET
-                    flags = excluded.flags,
-                    dmarc_pass = excluded.dmarc_pass,
-                    dmarc_checked = 1",
+                    list_id, list_unsubscribe, list_unsubscribe_post, dmarc_pass)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                 ON CONFLICT (folder_id, uid) DO UPDATE SET flags = excluded.flags, dmarc_pass = excluded.dmarc_pass",
             )?;
             for h in headers {
                 stmt.execute(params![
@@ -495,39 +485,6 @@ impl Store {
             params![folder_id, uid],
         )?;
         Ok(())
-    }
-
-    /// UIDs of messages in `folder_id` whose `Authentication-Results` header has not
-    /// been checked yet, newest first.
-    pub fn unchecked_dmarc_uids(&self, folder_id: i64, limit: usize) -> Result<Vec<u32>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT uid FROM messages
-             WHERE folder_id = ?1 AND dmarc_checked = 0 AND dmarc_pass = 0
-             ORDER BY uid DESC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![folder_id, limit as i64], |r| r.get::<_, u32>(0))?;
-        Ok(rows.collect::<Result<_, _>>()?)
-    }
-
-    /// Stores backfilled `dmarc_pass` results and marks those messages checked.
-    pub fn update_dmarc_status(
-        &mut self,
-        folder_id: i64,
-        updates: &[(u32, bool)],
-    ) -> Result<usize> {
-        let tx = self.conn.transaction()?;
-        let mut changed = 0;
-        {
-            let mut stmt = tx.prepare_cached(
-                "UPDATE messages SET dmarc_pass = MAX(dmarc_pass, ?3), dmarc_checked = 1
-                 WHERE folder_id = ?1 AND uid = ?2",
-            )?;
-            for &(uid, pass) in updates {
-                changed += stmt.execute(params![folder_id, uid, pass])?;
-            }
-        }
-        tx.commit()?;
-        Ok(changed)
     }
 
     /// Newest messages, optionally limited to one folder role (across all

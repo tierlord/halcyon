@@ -297,14 +297,6 @@ pub fn flag_names(fetch: &Fetch) -> Vec<String> {
     fetch.flags().filter_map(|f| flag_name(&f)).collect()
 }
 
-/// Extracts `(uid, dmarc_pass)` from a `FETCH` that requested
-/// `UID BODY.PEEK[HEADER.FIELDS (FROM AUTHENTICATION-RESULTS)]`.
-pub fn dmarc_from_fetch(fetch: &Fetch) -> Option<(u32, bool)> {
-    let uid = fetch.uid?;
-    let raw = fetch.header()?;
-    Some((uid, parse_header_block(raw).dmarc_pass))
-}
-
 fn flag_name(flag: &Flag<'_>) -> Option<String> {
     Some(match flag {
         Flag::Seen => "\\Seen".into(),
