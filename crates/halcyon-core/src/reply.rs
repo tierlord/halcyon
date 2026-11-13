@@ -253,8 +253,11 @@ fn build_recipients(
     let mut seen_to = HashSet::new();
 
     if from_is_own && reply_to_recipient.is_none() {
+        // Following up on one's own mail: to the people it went to, but not
+        // to oneself (a copy to oneself is common in To or Cc).
         for raw in &original.to {
             if let Some(rec) = parse_recipient(raw)
+                && !own_set.contains(&rec.address)
                 && seen_to.insert(rec.address.clone())
             {
                 to.push(rec);
@@ -1034,5 +1037,21 @@ mod tests {
                 address: "clara@team.example".into(),
             }]
         );
+    }
+
+    #[test]
+    fn reply_to_own_sent_mail_skips_own_addresses() {
+        let original = MessageHeader {
+            from_addr: Some("max@mail.example".into()),
+            to: vec![
+                "Max <MAX@mail.example>".into(),
+                "Jonas <jonas@werkstatt.example>".into(),
+            ],
+            ..Default::default()
+        };
+        let own = vec!["max@mail.example".to_string()];
+        let d = prepare(ReplyKind::Reply, &original, "", &own, 0);
+        let to: Vec<_> = d.to.iter().map(|r| r.address.as_str()).collect();
+        assert_eq!(to, ["jonas@werkstatt.example"]);
     }
 }
