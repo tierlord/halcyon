@@ -321,8 +321,9 @@
   .sidebar {
     display: flex;
     flex-direction: column;
-    background: var(--surface);
-    border-right: 1px solid var(--border);
+    background: var(--sidebar-bg);
+    color: var(--sidebar-text);
+    border-right: 1px solid var(--sidebar-border);
     padding: 14px 10px 0;
     overflow: hidden;
     user-select: none;
@@ -339,6 +340,11 @@
     font-size: 17px;
     letter-spacing: 0.01em;
   }
+  .brand img {
+    background: var(--sidebar-logo-bg);
+    border-radius: 7px;
+    padding: 2px;
+  }
   .settings-btn {
     margin-left: auto;
     display: inline-flex;
@@ -348,12 +354,12 @@
     border: 0;
     border-radius: var(--radius);
     background: none;
-    color: var(--text-muted);
+    color: var(--sidebar-text-muted);
   }
   .settings-btn:hover,
   .settings-btn.open {
-    background: var(--hover);
-    color: var(--text);
+    background: var(--sidebar-hover);
+    color: var(--sidebar-text);
   }
   .settings-menu {
     position: absolute;
@@ -365,6 +371,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--surface-raised);
+    color: var(--text);
     box-shadow: 0 8px 24px color-mix(in srgb, var(--pitch-black) 26%, transparent);
     display: flex;
     flex-direction: column;
@@ -421,7 +428,7 @@
     border: 0;
     border-radius: 5px;
     background: none;
-    color: var(--text-muted);
+    color: var(--sidebar-text-muted);
     transition: opacity 0.12s ease;
   }
   .section-header:hover .edit-btn,
@@ -429,8 +436,8 @@
     opacity: 1;
   }
   .edit-btn:hover {
-    background: var(--hover);
-    color: var(--text);
+    background: var(--sidebar-hover);
+    color: var(--sidebar-text);
   }
   .add-link {
     display: block;
@@ -438,7 +445,7 @@
     padding: 0;
     border: 0;
     background: none;
-    color: var(--accent-text);
+    color: var(--sidebar-accent-text);
     font-weight: 600;
     font-size: 13px;
   }
@@ -448,7 +455,7 @@
     font-weight: 650;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--text-muted);
+    color: var(--sidebar-text-muted);
     display: flex;
     align-items: center;
     gap: 6px;
@@ -468,10 +475,10 @@
     border-radius: var(--radius);
     background: none;
     text-align: left;
-    color: var(--text);
+    color: var(--sidebar-text);
   }
   button.item:hover {
-    background: var(--hover);
+    background: var(--sidebar-hover);
   }
   /* Sync in progress: a soft band of light runs through the row, in the
      logo's blue green. Short syncs (under ~0.4 s) stay invisible thanks to
@@ -524,7 +531,7 @@
     }
   }
   .item.active {
-    background: var(--selection);
+    background: var(--sidebar-selection);
     box-shadow: inset 3px 0 0 var(--highlight);
     font-weight: 600;
   }
@@ -535,26 +542,26 @@
     display: inline-flex;
     align-items: center;
     margin-right: -4px;
-    color: var(--text-muted);
+    color: var(--sidebar-text-muted);
   }
   .chevron :global(svg) {
-    color: var(--text-muted);
+    color: var(--sidebar-text-muted);
   }
   .folders {
     list-style: none;
     margin: 2px 0 6px 14px;
     padding: 0 0 0 6px;
-    border-left: 1px solid var(--border);
+    border-left: 1px solid var(--sidebar-border);
   }
   /* Folder counts stay quiet: a number, no pill. */
   .folder-count {
     font-size: 12px;
     font-variant-numeric: tabular-nums;
-    color: var(--text-muted);
+    color: var(--sidebar-text-muted);
     opacity: 0.85;
   }
   .folder-item.active .folder-count {
-    color: var(--text);
+    color: var(--sidebar-text);
   }
   .folder-item {
     gap: 8px;
@@ -564,7 +571,7 @@
   }
   .item :global(svg) {
     flex: none;
-    color: var(--accent-text);
+    color: var(--sidebar-accent-text);
   }
   .label {
     flex: 1;
@@ -580,19 +587,19 @@
     padding: 0 6px;
     border-radius: 99px;
     text-align: center;
-    background: var(--accent-fill);
-    color: var(--on-accent-fill);
+    background: var(--sidebar-accent-fill);
+    color: var(--sidebar-on-accent-fill);
   }
   .disabled {
-    color: var(--text-muted);
+    color: var(--sidebar-text-muted);
     cursor: default;
   }
   .disabled :global(svg) {
-    color: var(--text-muted);
+    color: var(--sidebar-text-muted);
   }
   .empty {
     padding: 6px 8px;
-    color: var(--text-muted);
+    color: var(--sidebar-text-muted);
     font-size: 13px;
   }
   .cases-header {
@@ -608,7 +615,7 @@
     margin: 0;
   }
   .cases-title-btn:hover h2 {
-    color: var(--accent-text);
+    color: var(--sidebar-accent-text);
   }
   /* Folders and cases share the height; both scroll on their own. */
   .accounts-scroll {
@@ -632,7 +639,7 @@
     font-size: 13px;
   }
   .case-nav-item.muted-case {
-    color: var(--text-muted);
+    color: var(--sidebar-text-muted);
     opacity: 0.65;
   }
   .case-dot {
@@ -640,7 +647,7 @@
     height: 6px;
     border-radius: 50%;
     flex: none;
-    background: var(--accent-fill);
+    background: var(--sidebar-accent-fill);
     opacity: 0.7;
   }
   .case-dot.urgent {
@@ -648,7 +655,7 @@
     opacity: 1;
   }
   .case-dot.done {
-    background: var(--text-muted);
+    background: var(--sidebar-text-muted);
     opacity: 0.5;
   }
 </style>

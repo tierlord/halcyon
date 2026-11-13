@@ -6,10 +6,10 @@
   --snow: #f7f0f0;
   --blue-slate: #3b5966;
 
-  --bg: var(--snow);
-  --surface: color-mix(in srgb, var(--blue-slate) 6%, var(--snow));
-  --surface-raised: color-mix(in srgb, var(--snow) 45%, #ffffff);
-  --border: color-mix(in srgb, var(--blue-slate) 16%, var(--snow));
+  --bg: color-mix(in srgb, var(--blue-slate) 4%, var(--snow));
+  --surface: color-mix(in srgb, var(--blue-slate) 9%, var(--snow));
+  --surface-raised: var(--snow);
+  --border: color-mix(in srgb, var(--blue-slate) 20%, var(--snow));
   --text: var(--pitch-black);
   --text-muted: color-mix(in srgb, var(--pitch-black) 62%, var(--snow));
   /* Text accent: Blue Slate is the only accent with enough contrast on Snow. */
@@ -17,12 +17,24 @@
   --accent-fill: var(--blue-slate);
   --on-accent-fill: var(--snow);
   --highlight: var(--blue-green);
-  --selection: color-mix(in srgb, var(--blue-green) 18%, var(--snow));
-  --hover: color-mix(in srgb, var(--blue-slate) 8%, var(--snow));
+  --selection: color-mix(in srgb, var(--blue-green) 20%, var(--snow));
+  --hover: color-mix(in srgb, var(--blue-slate) 11%, var(--snow));
   --unread: var(--ochre);
   --sync-glow: color-mix(in srgb, var(--blue-green) 32%, transparent);
   --danger: #b3261e;
   --wash-mix: 48%;
+
+  /* Kingfisher-blue navigation rail in light mode */
+  --sidebar-bg: color-mix(in srgb, var(--blue-slate) 72%, #0f4454);
+  --sidebar-border: color-mix(in srgb, var(--snow) 16%, transparent);
+  --sidebar-text: var(--snow);
+  --sidebar-text-muted: color-mix(in srgb, var(--snow) 74%, transparent);
+  --sidebar-hover: color-mix(in srgb, var(--blue-green) 22%, transparent);
+  --sidebar-selection: color-mix(in srgb, var(--blue-green) 40%, transparent);
+  --sidebar-accent-text: color-mix(in srgb, var(--blue-green) 60%, var(--snow));
+  --sidebar-accent-fill: var(--blue-green);
+  --sidebar-on-accent-fill: var(--pitch-black);
+  --sidebar-logo-bg: color-mix(in srgb, var(--snow) 92%, transparent);
 
   --radius: 8px;
   --font: system-ui, -apple-system, 'Segoe UI', Roboto, Ubuntu, Cantarell, sans-serif;
@@ -52,6 +64,17 @@
     --sync-glow: color-mix(in srgb, var(--blue-green) 55%, transparent);
     --danger: #ff8a80;
     --wash-mix: 26%;
+
+    --sidebar-bg: var(--surface);
+    --sidebar-border: var(--border);
+    --sidebar-text: var(--text);
+    --sidebar-text-muted: var(--text-muted);
+    --sidebar-hover: var(--hover);
+    --sidebar-selection: var(--selection);
+    --sidebar-accent-text: var(--accent-text);
+    --sidebar-accent-fill: var(--accent-fill);
+    --sidebar-on-accent-fill: var(--on-accent-fill);
+    --sidebar-logo-bg: transparent;
   }
 }
 
@@ -70,6 +93,17 @@
   --sync-glow: color-mix(in srgb, var(--blue-green) 55%, transparent);
   --danger: #ff8a80;
   --wash-mix: 26%;
+
+  --sidebar-bg: var(--surface);
+  --sidebar-border: var(--border);
+  --sidebar-text: var(--text);
+  --sidebar-text-muted: var(--text-muted);
+  --sidebar-hover: var(--hover);
+  --sidebar-selection: var(--selection);
+  --sidebar-accent-text: var(--accent-text);
+  --sidebar-accent-fill: var(--accent-fill);
+  --sidebar-on-accent-fill: var(--on-accent-fill);
+  --sidebar-logo-bg: transparent;
 }
 
 *,
