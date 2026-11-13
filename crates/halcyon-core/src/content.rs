@@ -196,10 +196,7 @@ pub fn render(content: &MessageContent, allow_remote: bool, dark: bool) -> Rende
 }
 
 static RE_DARK_SUPPORT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?i)prefers-color-scheme\s*:\s*dark|<meta[^>]+(?:supported-)?color-scheme[^>]+dark|(?:^|[^-\w])color-scheme\s*:[^;}]*dark"#,
-    )
-    .unwrap()
+    Regex::new(r#"(?i)prefers-color-scheme\s*:\s*dark|light-dark\s*\("#).unwrap()
 });
 // The `color-scheme` property (not the media feature): a mail declaring
 // `light dark` would otherwise switch `light-dark()` colours to dark.
@@ -503,14 +500,28 @@ fn filter_attribute<'u>(
         // Old `bgcolor` attributes ignore the mail's own dark-mode CSS and leave
         // light bands around dark content; on a dark page that CSS decides.
         (_, "bgcolor") if !force_light => None,
-        (_, "style") => Some(Cow::Owned(clean_css(
-            value,
-            allow_remote,
-            force_light,
-            blocked,
-        ))),
+        (_, "style") => {
+            let mut css = clean_css(value, allow_remote, force_light, blocked);
+            if !force_light && has_white_bg_without_color(&css) {
+                if !css.trim_end().ends_with(';') {
+                    css.push(';');
+                }
+                css.push_str("color:#15110e");
+            }
+            Some(Cow::Owned(css))
+        }
         _ => Some(Cow::Borrowed(value)),
     }
+}
+
+static RE_WHITE_BG: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:^|;)\s*background(?:-color)?\s*:\s*(?:#fff(?:fff)?|white|rgb\(\s*255\s*,\s*255\s*,\s*255\s*\))\s*(?:!important)?\s*(?:;|$)").unwrap()
+});
+static RE_TEXT_COLOR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(?:^|;)\s*color\s*:").unwrap());
+
+fn has_white_bg_without_color(css: &str) -> bool {
+    RE_WHITE_BG.is_match(css) && !RE_TEXT_COLOR.is_match(css)
 }
 
 static RE_LINK: LazyLock<Regex> = LazyLock::new(|| {
@@ -808,6 +819,31 @@ mod tests {
         let r = render(&plain_html, false, true);
         assert!(!r.dark);
         assert!(r.document.contains("color-scheme:light"));
+
+        // Boilerplate `<meta name="color-scheme" content="light dark">` alone
+        // does not mean the mail supports dark mode.
+        let meta_only = MessageContent {
+            html: Some(
+                "<meta name=\"color-scheme\" content=\"light dark\"><td style=\"background-color:#ffffff\">Hallo</td>"
+                    .into(),
+            ),
+            ..Default::default()
+        };
+        let r = render(&meta_only, false, true);
+        assert!(!r.dark);
+
+        // Dark-mode mail with an inline white container still gets dark text
+        // if no explicit color was set on that element.
+        let mixed = MessageContent {
+            html: Some(
+                "<style>@media (prefers-color-scheme: dark){.x{color:#eee}}</style><table><tr><td style=\"background-color:#ffffff\">Hallo</td></tr></table>"
+                    .into(),
+            ),
+            ..Default::default()
+        };
+        let r = render(&mixed, false, true);
+        assert!(r.dark);
+        assert!(r.document.contains("color:#15110e"), "{}", r.document);
 
         // Plain text follows the app.
         let text = MessageContent {
