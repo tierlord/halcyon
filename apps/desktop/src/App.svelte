@@ -33,10 +33,37 @@
   // a background watcher.
   let fullSyncEmail: string | null = $state(null)
   let watcherActive: Record<string, boolean> = $state({})
-  const activeEmails = $derived([
+  const busyEmails = $derived([
     ...(fullSyncEmail ? [fullSyncEmail] : []),
     ...Object.keys(watcherActive).filter((e) => watcherActive[e]),
   ])
+
+  // The sidebar animation lingers briefly after an account goes idle. A sync
+  // often ends and the next begins right away (watcher after full sync, or
+  // folder by folder); without this the animation would restart mid-sweep.
+  const LINGER_MS = 1200
+  let activeEmails: string[] = $state([])
+  const lingerTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  $effect(() => {
+    const busy = busyEmails
+    untrack(() => {
+      for (const email of busy) {
+        clearTimeout(lingerTimers.get(email))
+        lingerTimers.delete(email)
+        if (!activeEmails.includes(email)) activeEmails = [...activeEmails, email]
+      }
+      for (const email of activeEmails) {
+        if (busy.includes(email) || lingerTimers.has(email)) continue
+        lingerTimers.set(
+          email,
+          setTimeout(() => {
+            lingerTimers.delete(email)
+            activeEmails = activeEmails.filter((e) => e !== email)
+          }, LINGER_MS),
+        )
+      }
+    })
+  })
   const liveStates = $derived(Object.values(live))
   const liveOffline = $derived(liveStates.filter((s) => s.state === 'offline'))
 

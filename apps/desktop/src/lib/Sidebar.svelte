@@ -207,18 +207,23 @@
       var(--sync-glow) 50%,
       transparent 80%
     );
-    background-size: 250% 100%;
+    /* Three times the row width: at both ends of the cycle the band is
+       completely outside the row, so the restart is invisible. */
+    background-size: 300% 100%;
+    background-position: 150% 0;
     opacity: 0;
     animation:
-      sync-fade-in 0.3s ease-out 0.4s forwards,
-      sync-sweep 1.6s ease-in-out infinite;
+      sync-fade-in 0.4s ease-out 0.4s forwards,
+      sync-sweep 3.2s linear infinite;
   }
+  /* One calm pass, then a short pause before the next. */
   @keyframes sync-sweep {
-    from {
-      background-position: 100% 0;
+    0% {
+      background-position: 150% 0;
     }
-    to {
-      background-position: -150% 0;
+    75%,
+    100% {
+      background-position: -50% 0;
     }
   }
   @keyframes sync-fade-in {
