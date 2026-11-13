@@ -6,10 +6,12 @@
 
 pub mod autoconfig;
 pub mod brand;
+pub mod cases;
 pub mod content;
 pub mod error;
 pub mod extract;
 pub mod imap;
+pub mod linker;
 pub mod model;
 pub mod reply;
 pub mod secrets;

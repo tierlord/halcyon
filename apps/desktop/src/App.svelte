@@ -1,7 +1,10 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte'
   import * as api from './lib/api'
+  import * as mock from './lib/mock'
   import AccountDialog from './lib/AccountDialog.svelte'
+  import CaseBoard from './lib/CaseBoard.svelte'
+  import type { AsideCategory, CaseItem, CaseStatus } from './lib/cases'
   import Composer from './lib/Composer.svelte'
   import ContextMenu, { type MenuItem } from './lib/ContextMenu.svelte'
   import type { SidebarTarget } from './lib/Sidebar.svelte'
@@ -29,6 +32,12 @@
   let messages: MessageSummary[] = $state([])
   let loading = $state(true)
   let selectedId: number | null = $state(null)
+  let caseItems = $state<CaseItem[]>([])
+  let asideCategories = $state<AsideCategory[]>([])
+  let selectedCaseId = $state<number | null>(null)
+  let hoveredCaseId = $state<number | null>(null)
+  /** The mail of all cases, wherever it is stored (not only the visible list). */
+  let caseMessages = $state<MessageSummary[]>([])
   let query = $state('')
   let searchInput: HTMLInputElement | undefined = $state()
   let syncing = $state(false)
@@ -74,9 +83,36 @@
   const liveStates = $derived(Object.values(live))
   const liveOffline = $derived(liveStates.filter((s) => s.state === 'offline'))
 
-  const selected = $derived(messages.find((m) => m.id === selectedId) ?? null)
+  const messagePool = $derived.by(() => {
+    if (api.isMock) return mock.allMockMessages()
+    const byId = new Map(messages.map((m) => [m.id, m]))
+    for (const m of caseMessages) if (!byId.has(m.id)) byId.set(m.id, m)
+    return [...byId.values()]
+  })
+  const selected = $derived(messagePool.find((m) => m.id === selectedId) ?? null)
+  const activeCase = $derived(caseItems.find((c) => c.id === selectedCaseId) ?? null)
+  const hoveredCase = $derived(caseItems.find((c) => c.id === hoveredCaseId) ?? null)
+  const highlightedIds = $derived(hoveredCase ? hoveredCase.messageIds : [])
+  const sentReplies = $derived.by(() => {
+    const map = new Map<string, MessageSummary[]>()
+    for (const m of messagePool) {
+      if (m.folder_role !== 'sent' || !m.header.in_reply_to) continue
+      const list = map.get(m.header.in_reply_to) ?? []
+      list.push(m)
+      map.set(m.header.in_reply_to, list)
+    }
+    return map
+  })
+  const displayedMessages = $derived.by(() => {
+    if (!activeCase) return messages
+    const set = new Set(activeCase.messageIds)
+    return messagePool
+      .filter((m) => set.has(m.id))
+      .sort((a, b) => (a.header.date ?? 0) - (b.header.date ?? 0))
+  })
   const searching = $derived(query.trim().length > 0)
   const title = $derived.by(() => {
+    if (activeCase) return activeCase.title
     if (searching) return `Suche: ${query.trim()}`
     const v = view
     if (v.kind === 'unified') return 'Alle Posteingänge'
@@ -472,10 +508,42 @@
     }
   }
 
+  async function loadCases() {
+    try {
+      const r = await api.cases()
+      caseItems = r.cases
+      asideCategories = r.categories
+      const ids = [...new Set(r.cases.flatMap((c) => c.messageIds))]
+      caseMessages = ids.length > 0 ? await api.messagesByIds(ids) : []
+      if (selectedCaseId != null && !caseItems.some((c) => c.id === selectedCaseId)) {
+        selectedCaseId = null
+      }
+    } catch (e) {
+      console.warn('Vorgänge konnten nicht geladen werden', e)
+    }
+  }
+
+  async function changeCaseStatus(caseId: number, status: CaseStatus) {
+    const before = caseItems
+    caseItems =
+      status === 'rejected'
+        ? caseItems.filter((c) => c.id !== caseId)
+        : caseItems.map((c) => (c.id === caseId ? { ...c, status } : c))
+    if (status !== 'needs_you' && status !== 'waiting') selectedCaseId = null
+    try {
+      await api.setCaseStatus(caseId, status)
+    } catch (e) {
+      caseItems = before
+      console.warn('Status nicht gespeichert', e)
+    }
+  }
+
   onMount(() => {
     refreshOverview()
     load()
+    loadCases()
     const unlisteners = [
+      api.onCasesChanged(loadCases),
       api.onSync(handleSync),
       api.onLive((s) => (live = { ...live, [s.email]: s })),
       api.onOutbox(handleOutbox),
@@ -500,9 +568,23 @@
     {overview}
     {view}
     {activeEmails}
-    onselect={selectView}
+    cases={caseItems}
+    {selectedCaseId}
+    onselect={(v) => {
+      selectedCaseId = null
+      selectView(v)
+    }}
     onmanageaccounts={() => (accountDialogOpen = true)}
     oncontext={openContext}
+    onshowcases={() => {
+      selectedId = null
+      selectedCaseId = null
+    }}
+    onselectcase={(id) => {
+      selectedId = null
+      selectedCaseId = id
+    }}
+    onhovercase={(id) => (hoveredCaseId = id)}
   />
 
   <main>
@@ -574,20 +656,45 @@
     <div class="content">
       <MessageList
         {title}
-        {messages}
+        messages={displayedMessages}
         {selectedId}
         {loading}
         showAccount={searching || view.kind === 'unified'}
+        {highlightedIds}
+        chatMode={!!activeCase}
+        {sentReplies}
         onselect={(id) => (selectedId = id)}
+        onclosecase={() => {
+          selectedCaseId = null
+          selectedId = null
+        }}
       />
       <div class="pane-slot">
-        <ReadingPane
-          message={selected}
-          ontoggleread={toggleRead}
-          ontoggleflag={toggleFlag}
-          ondelete={(m) => deleteMessage(m)}
-          onreply={reply}
-        />
+        {#if selected}
+          <div class="pane-backbar">
+            <button type="button" class="pane-backbtn" onclick={() => (selectedId = null)}>
+              ← {activeCase ? `Zurück zu „${activeCase.title}“` : 'Zurück zu Vorgängen'}
+            </button>
+          </div>
+          <ReadingPane
+            message={selected}
+            ontoggleread={toggleRead}
+            ontoggleflag={toggleFlag}
+            ondelete={(m) => deleteMessage(m)}
+            onreply={reply}
+          />
+        {:else}
+          <CaseBoard
+            cases={caseItems}
+            categories={asideCategories}
+            {selectedCaseId}
+            {hoveredCaseId}
+            onselectcase={(id) => (selectedCaseId = id)}
+            onhovercase={(id) => (hoveredCaseId = id)}
+            onopenmessage={(id) => (selectedId = id)}
+            onchangestatus={changeCaseStatus}
+          />
+        {/if}
         {#if composing}
           {#key composerKey}
             <Composer
@@ -786,6 +893,22 @@
     background: var(--danger);
     border-color: transparent;
     color: #ffffff;
+  }
+  .pane-backbar {
+    padding: 6px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .pane-backbtn {
+    border: 0;
+    background: none;
+    padding: 2px 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent-text);
+  }
+  .pane-backbtn:hover {
+    text-decoration: underline;
   }
   .app {
     display: grid;

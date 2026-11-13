@@ -124,6 +124,8 @@ function msg(
     to?: string[]
     folder?: { id: number; path: string; name: string; role: FolderRole | null }
     dmarcPass?: boolean
+    inReplyTo?: string
+    preview?: string
   } = {},
 ): MessageSummary {
   const account = accounts.find((a) => a.id === accountId)!
@@ -142,14 +144,14 @@ function msg(
     folder_path: folder.path,
     folder_name: folder.name,
     folder_role: folder.role,
-    preview: previewFor(subject),
+    preview: opts.preview ?? previewFor(subject),
     has_attachments: /Rechnung|Vertrag/.test(subject),
     has_body: true,
     header: {
       uid: id,
       message_id: `${id}@example.invalid`,
-      in_reply_to: null,
-      references: [],
+      in_reply_to: opts.inReplyTo ?? null,
+      references: opts.inReplyTo ? [opts.inReplyTo] : [],
       subject,
       from_name: from[0],
       from_addr: from[1],
@@ -187,13 +189,23 @@ const all: MessageSummary[] = [
   msg(2, ['Sabine Kranz', 'kranz@zulieferer.example'], 'Lieferung KW 44', 40 * day, { seen: true }),
   msg(1, ['Telekom', 'rechnung@telekom.example'], 'Ihre Rechnung für Oktober 2026', 31 * day, { seen: true }),
   msg(3, ['Fotobuch Studio', 'hallo@fotobuch.example'], 'Dein Fotobuch wurde versendet', 400 * day, { seen: true, dmarcPass: true }),
-  msg(1, ['Max Mustermann', 'max@mail.example.org'], 'Re: Angebot vom Dienstag', 3 * hour, {
+  msg(1, ['Max Mustermann', 'max@mail.example.org'], 'Re: Angebot Ersatzteile', 3 * hour, {
     seen: true,
     to: ['kranz@zulieferer.example'],
-    folder: { id: 11, path: 'Sent', name: 'Gesendet', role: 'sent' },
+    inReplyTo: '4@example.invalid',
+    preview: 'Freigabe erteilt – bitte wie angeboten bis Montag liefern.',
+    folder: { id: 21, path: 'Sent', name: 'Gesendet', role: 'sent' },
+  }),
+  msg(3, ['Max Mustermann', 'max.muster@example.net'], 'Re: Nutzer-Anfrage zu deiner Anzeige "Rennrad 28 Zoll"', 2.5 * hour, {
+    seen: true,
+    to: ['noreply@kleinanzeigen.example'],
+    inReplyTo: '3@example.invalid',
+    preview: 'Ja, das Rennrad ist noch da. Samstag um 11 Uhr passt mir gut!',
+    folder: { id: 31, path: 'Sent', name: 'Gesendet', role: 'sent' },
   }),
   msg(1, ['Stadtwerke', 'kundenservice@stadtwerke.example'], 'Jahresabrechnung 2025', 18 * day, {
     seen: false,
+    dmarcPass: true,
     folder: { id: 16, path: 'INBOX.Rechnungen', name: 'Rechnungen', role: null },
   }),
   msg(1, ['Max Mustermann', 'max@mail.example.org'], 'Entwurf: Rückfrage Vertrag', 1 * day, {
@@ -603,4 +615,8 @@ export function saveBrandLogoAppearance(
 
 export function clearBrandLogos(): Promise<void> {
   return delay(undefined, 10)
+}
+
+export function allMockMessages(): MessageSummary[] {
+  return [...all]
 }
