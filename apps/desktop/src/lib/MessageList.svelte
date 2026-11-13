@@ -11,14 +11,22 @@
     selectedId,
     loading,
     showAccount,
+    highlightedIds = [],
+    chatMode = false,
+    sentReplies = new Map<string, MessageSummary[]>(),
     onselect,
+    onclosecase,
   }: {
     title: string
     messages: MessageSummary[]
     selectedId: number | null
     loading: boolean
     showAccount: boolean
+    highlightedIds?: number[]
+    chatMode?: boolean
+    sentReplies?: Map<string, MessageSummary[]>
     onselect: (id: number) => void
+    onclosecase?: () => void
   } = $props()
 
   let listEl: HTMLUListElement | undefined = $state()
@@ -37,7 +45,14 @@
 
 <section class="list" aria-label={title}>
   <header>
-    <h1>{title}</h1>
+    <div class="head-left">
+      {#if chatMode && onclosecase}
+        <button type="button" class="back-btn" onclick={onclosecase} title="Zurück zur normalen Liste">
+          ←
+        </button>
+      {/if}
+      <h1>{title}</h1>
+    </div>
     <span class="meta">{loading ? 'Lädt …' : `${messages.length} Nachrichten`}</span>
   </header>
 
@@ -45,16 +60,21 @@
     <p class="empty">Hier ist nichts. Herrlich ruhig.</p>
   {/if}
 
-  <ul bind:this={listEl} role="listbox" aria-label={title}>
+  <ul bind:this={listEl} class:chat-list={chatMode} role="listbox" aria-label={title}>
     {#each messages as m (m.id)}
       {@const unread = !isSeen(m)}
-      {@const logo = (void logoVersion, m.header.dmarc_pass ? getBrandLogo(m.header.from_addr) : null)}
+      {@const isOutgoing = m.folder_role === 'sent'}
+      {@const logo = (void logoVersion, !isOutgoing && m.header.dmarc_pass ? getBrandLogo(m.header.from_addr) : null)}
+      {@const replies = !chatMode && m.header.message_id ? (sentReplies.get(m.header.message_id) ?? []) : []}
       <li
         role="option"
         aria-selected={m.id === selectedId}
         data-id={m.id}
         class:selected={m.id === selectedId}
         class:unread
+        class:case-highlighted={highlightedIds.includes(m.id)}
+        class:chat-in={chatMode && !isOutgoing}
+        class:chat-out={chatMode && isOutgoing}
       >
         <button class:has-brand={!!logo} onclick={() => onselect(m.id)}>
           {#if logo?.bg}
@@ -71,7 +91,9 @@
               />
             </span>
           {/if}
-          <span class="from">{m.header.from_name ?? m.header.from_addr ?? 'Unbekannt'}</span>
+          <span class="from">
+            {#if chatMode && isOutgoing}Du · Gesendet{:else}{m.header.from_name ?? m.header.from_addr ?? 'Unbekannt'}{/if}
+          </span>
           <time>
             {#if isFlagged(m)}<span class="flag" title="Markiert"><Icon name="star" size={12} filled /></span>{/if}
             {listDate(m.header.date)}
@@ -80,8 +102,25 @@
             {#if m.has_attachments}<Icon name="paperclip" size={13} />{/if}
             {m.header.subject ?? '(kein Betreff)'}{#if m.preview}<span class="preview"> – {m.preview}</span>{/if}
           </span>
-          {#if showAccount}<span class="account">{accountLabel(m.account_email)}</span>{/if}
+          {#if showAccount && !chatMode}<span class="account">{accountLabel(m.account_email)}</span>{/if}
         </button>
+
+        {#if replies.length > 0}
+          <div class="inline-replies">
+            {#each replies as rep (rep.id)}
+              <button
+                type="button"
+                class="inline-reply"
+                class:selected={rep.id === selectedId}
+                onclick={() => onselect(rep.id)}
+                title="Eigene Antwort öffnen"
+              >
+                <span class="reply-tag">Du · {listDate(rep.header.date)}</span>
+                <span class="reply-text">{rep.preview ?? rep.header.subject ?? '(Antwort)'}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
       </li>
     {/each}
   </ul>
@@ -271,5 +310,84 @@
     border: 1px solid var(--border);
     color: var(--text-muted);
     white-space: nowrap;
+  }
+  .head-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .back-btn {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    border-radius: var(--radius);
+    padding: 2px 8px;
+    font-size: 13px;
+    color: var(--accent-text);
+  }
+  .back-btn:hover {
+    background: var(--hover);
+  }
+  li.case-highlighted > button {
+    background: color-mix(in srgb, var(--highlight) 12%, transparent);
+    box-shadow: inset 3px 0 0 var(--highlight);
+  }
+  ul.chat-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-top: 6px;
+  }
+  li.chat-in > button {
+    max-width: 92%;
+    margin-right: auto;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+  }
+  li.chat-out > button {
+    max-width: 86%;
+    margin-left: auto;
+    background: var(--selection);
+    border: 1px solid var(--border);
+  }
+  .inline-replies {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+    margin: 2px 6px 6px 34px;
+  }
+  .inline-reply {
+    width: auto !important;
+    max-width: 88%;
+    display: flex !important;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 1px;
+    padding: 5px 10px !important;
+    border-radius: var(--radius);
+    background: var(--surface) !important;
+    border: 1px solid var(--border) !important;
+    text-align: right !important;
+  }
+  .inline-reply:hover {
+    background: var(--hover) !important;
+  }
+  .inline-reply.selected {
+    background: var(--selection) !important;
+    border-color: var(--highlight) !important;
+  }
+  .reply-tag {
+    font-size: 10px;
+    font-weight: 650;
+    color: var(--accent-text);
+  }
+  .reply-text {
+    font-size: 12px;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
   }
 </style>
