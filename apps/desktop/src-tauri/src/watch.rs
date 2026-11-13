@@ -23,6 +23,8 @@ use crate::AppState;
 
 /// Check interval for servers without IDLE.
 const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// How often folders other than the inbox are checked.
+const OTHER_FOLDERS: Duration = Duration::from_secs(2 * 60);
 const BACKOFF_START: Duration = Duration::from_secs(20);
 const BACKOFF_MAX: Duration = Duration::from_secs(10 * 60);
 
@@ -127,8 +129,12 @@ async fn watch_connected(app: &AppHandle, account: &Account) -> Result<(), Strin
     };
     let _ = app.emit("live", live);
 
+    // IDLE covers the inbox; the other folders get a cheap STATUS check
+    // every OTHER_FOLDERS (server filters file new mail there too).
+    let mut inbox_due = true;
+    let mut last_inbox = std::time::Instant::now();
+    let mut last_scan: Option<std::time::Instant> = None;
     loop {
-        let before = newest_inbox_id(&store, account.id);
         let activity = |active| {
             let _ = app.emit(
                 "activity",
@@ -138,39 +144,76 @@ async fn watch_connected(app: &AppHandle, account: &Account) -> Result<(), Strin
                 },
             );
         };
-        activity(true);
-        let synced = sync::sync_inbox(&mut store, &mut session, &caps, account).await;
-        activity(false);
-        match synced.map_err(|e| e.to_string())? {
-            Some(report) => {
-                if report.new_messages + report.removed + report.flags_updated > 0 {
-                    let _ = app.emit(
-                        "mail-changed",
-                        MailChanged {
-                            account_id: account.id,
-                            new_messages: report.new_messages,
-                        },
+
+        if inbox_due || last_inbox.elapsed() >= sync::IDLE_RENEW {
+            let before = newest_inbox_id(&store, account.id);
+            activity(true);
+            let synced = sync::sync_inbox(&mut store, &mut session, &caps, account).await;
+            activity(false);
+            match synced.map_err(|e| e.to_string())? {
+                Some(report) => {
+                    changed(
+                        app,
+                        account,
+                        report.new_messages,
+                        report.removed + report.flags_updated,
                     );
+                    if report.new_messages > 0 {
+                        notify_new(app, &store, account, before);
+                    }
                 }
-                if report.new_messages > 0 {
-                    notify_new(app, &store, account, before);
+                // Never fully synced yet: the regular sync creates the folders.
+                None => {
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
                 }
             }
-            // Never fully synced yet: the regular sync creates the folders.
-            None => tokio::time::sleep(POLL_INTERVAL).await,
+            last_inbox = std::time::Instant::now();
+        }
+
+        if last_scan.is_none_or(|t| t.elapsed() >= OTHER_FOLDERS) {
+            activity(true);
+            let scanned =
+                sync::sync_changed_folders(&mut store, &mut session, &caps, account).await;
+            activity(false);
+            let report = scanned.map_err(|e| e.to_string())?;
+            changed(
+                app,
+                account,
+                report.new_messages,
+                report.removed + report.flags_updated,
+            );
+            last_scan = Some(std::time::Instant::now());
+            // Back to the inbox for IDLE.
+            if let Some(path) = sync::inbox_path(&store, account.id).map_err(|e| e.to_string())? {
+                session.examine(&path).await.map_err(|e| e.to_string())?;
+            }
         }
 
         if caps.idle {
-            // sync_inbox leaves the inbox selected.
-            let (s, _changed) = sync::idle_wait(session, sync::IDLE_RENEW)
+            let (s, has_news) = sync::idle_wait(session, OTHER_FOLDERS)
                 .await
                 .map_err(|e| e.to_string())?;
             session = s;
+            inbox_due = has_news;
         } else {
             tokio::time::sleep(POLL_INTERVAL).await;
             // Keeps the connection alive and notices a dead one early.
             session.noop().await.map_err(|e| e.to_string())?;
+            inbox_due = true;
         }
+    }
+}
+
+fn changed(app: &AppHandle, account: &Account, new_messages: usize, other: usize) {
+    if new_messages + other > 0 {
+        let _ = app.emit(
+            "mail-changed",
+            MailChanged {
+                account_id: account.id,
+                new_messages,
+            },
+        );
     }
 }
 

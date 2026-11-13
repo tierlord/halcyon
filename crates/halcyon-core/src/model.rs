@@ -195,7 +195,7 @@ impl FolderRole {
         let leaf = leaf.to_lowercase();
         Some(match leaf.as_str() {
             "sent" | "sent items" | "sent messages" | "gesendet" | "gesendete objekte"
-            | "gesendete elemente" | "postausgang" => FolderRole::Sent,
+            | "gesendete elemente" => FolderRole::Sent,
             "drafts" | "entwürfe" | "entwurf" => FolderRole::Drafts,
             "trash"
             | "deleted"
@@ -333,6 +333,8 @@ mod tests {
             Some(FolderRole::Trash)
         );
         assert_eq!(FolderRole::guess_from_name("Rechnungen", Some("/")), None);
+        // The outbox holds unsent mail; filing sent copies there would hide them.
+        assert_eq!(FolderRole::guess_from_name("Postausgang", Some("/")), None);
     }
 
     #[test]

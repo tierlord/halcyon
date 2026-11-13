@@ -472,6 +472,65 @@ pub async fn sync_inbox(
     }))
 }
 
+/// Checks every other folder with a cheap STATUS and syncs those that
+/// changed. IDLE watches only one mailbox, and providers file new mail
+/// elsewhere too (web.de's "Unbekannt", server-side filters into "Promo", …).
+///
+/// Leaves no mailbox selected; callers select the inbox again before IDLE.
+pub async fn sync_changed_folders(
+    store: &mut Store,
+    session: &mut ImapSession,
+    caps: &Capabilities,
+    account: &Account,
+) -> Result<InboxReport> {
+    let mut report = InboxReport::default();
+    for folder in store.folders(account.id)? {
+        if !folder.selectable
+            || matches!(
+                folder.role,
+                Some(FolderRole::Inbox | FolderRole::All | FolderRole::Flagged | FolderRole::Trash)
+            )
+        {
+            continue;
+        }
+        let status = match session
+            .status(&folder.path, "(UIDNEXT MESSAGES UIDVALIDITY)")
+            .await
+        {
+            Ok(s) => s,
+            // A folder deleted on the server meanwhile; the next full sync
+            // removes it locally.
+            Err(async_imap::error::Error::No(_)) => continue,
+            Err(e) => return Err(e.into()),
+        };
+        let local_count = store.message_count(folder.id)? as u32;
+        let has_new = status
+            .uid_next
+            .is_some_and(|next| next > folder.last_seen_uid + 1);
+        let changed = has_new
+            || status.exists != local_count
+            || status.uid_validity.is_some() && status.uid_validity != folder.uid_validity;
+        if !changed {
+            continue;
+        }
+        let skip_bodies = folder.role == Some(FolderRole::Trash);
+        let r = sync_folder(
+            store,
+            session,
+            caps,
+            folder.id,
+            &folder.path,
+            skip_bodies,
+            &mut |_| {},
+        )
+        .await?;
+        report.new_messages += r.new_messages;
+        report.removed += r.removed;
+        report.flags_updated += r.flags_updated;
+    }
+    Ok(report)
+}
+
 /// The inbox's server path for an account, if known.
 pub fn inbox_path(store: &Store, account_id: i64) -> Result<Option<String>> {
     Ok(store
