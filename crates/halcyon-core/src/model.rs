@@ -284,6 +284,8 @@ pub struct MessageHeader {
     pub list_unsubscribe: Vec<String>,
     /// RFC 8058 one-click unsubscribe is possible.
     pub list_unsubscribe_post: bool,
+    /// `Authentication-Results` reported `dmarc=pass`.
+    pub dmarc_pass: bool,
 }
 
 /// A stored message as returned from the database.

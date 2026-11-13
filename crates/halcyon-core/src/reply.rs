@@ -488,6 +488,7 @@ mod tests {
             list_id: None,
             list_unsubscribe: Vec::new(),
             list_unsubscribe_post: false,
+            dmarc_pass: false,
         }
     }
 

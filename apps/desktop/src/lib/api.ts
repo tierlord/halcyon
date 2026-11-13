@@ -122,6 +122,28 @@ export function setFlag(ids: number[], flag: 'seen' | 'flagged', on: boolean): P
   return native ? invoke('set_flag', { ids, flag, on }) : mock.setFlag(ids, flag, on)
 }
 
+/** Resolves a brand logo data URI (and cached appearance) for a registrable domain. */
+export function brandLogo(domain: string): Promise<import('./types').BrandLogo | null> {
+  return native ? invoke('brand_logo', { domain }) : mock.brandLogo(domain)
+}
+
+/** Persists canvas-analyzed background, padding, and scale for a cached brand logo. */
+export function saveBrandLogoAppearance(
+  domain: string,
+  bg: string | null,
+  padded: boolean,
+  scale: number,
+): Promise<void> {
+  return native
+    ? invoke('save_brand_logo_appearance', { domain, bg, padded, scale })
+    : mock.saveBrandLogoAppearance(domain, bg, padded, scale)
+}
+
+/** Clears all cached brand logos. */
+export function clearBrandLogos(): Promise<void> {
+  return native ? invoke('clear_brand_logos') : mock.clearBrandLogos()
+}
+
 /** Moves messages to the trash (or deletes them for good from the trash). */
 export function deleteMessages(ids: number[]): Promise<number> {
   return native ? invoke('delete_messages', { ids }) : mock.deleteMessages(ids)

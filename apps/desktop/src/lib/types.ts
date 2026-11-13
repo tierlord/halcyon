@@ -18,6 +18,7 @@ export interface MessageHeader {
   list_id: string | null
   list_unsubscribe: string[]
   list_unsubscribe_post: boolean
+  dmarc_pass: boolean
 }
 
 export interface MessageSummary {
@@ -133,6 +134,13 @@ export interface Attachment {
 export interface MessageView {
   rendered: { document: string; remote_blocked: number; is_html: boolean; dark: boolean }
   attachments: Attachment[]
+}
+
+export interface BrandLogo {
+  data_url: string
+  bg: string | null
+  padded: boolean
+  scale: number
 }
 
 export type LiveState =

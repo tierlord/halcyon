@@ -4,6 +4,7 @@ import type {
   Draft,
   OutboxEvent,
   ReplyKind,
+  BrandLogo,
   MessageView,
   Account,
   AccountInfo,
@@ -122,6 +123,7 @@ function msg(
     list?: boolean
     to?: string[]
     folder?: { id: number; path: string; name: string; role: FolderRole | null }
+    dmarcPass?: boolean
   } = {},
 ): MessageSummary {
   const account = accounts.find((a) => a.id === accountId)!
@@ -160,6 +162,7 @@ function msg(
       list_id: opts.list ? 'news.example.invalid' : null,
       list_unsubscribe: opts.list ? ['https://example.invalid/unsubscribe'] : [],
       list_unsubscribe_post: !!opts.list,
+      dmarc_pass: opts.dmarcPass ?? false,
     },
   }
 }
@@ -171,19 +174,19 @@ const all: MessageSummary[] = [
   msg(2, ['Sabine Kranz', 'kranz@zulieferer.example'], 'Angebot Ersatzteile – bitte bis Freitag bestätigen', 5 * hour),
   msg(1, ['PayPal', 'service@paypal.example'], 'Dein Bestätigungscode: 482913', 6 * hour, { seen: true }),
   msg(3, ['DHL Paket', 'noreply@dhl.example'], 'Ihre Sendung kommt heute zwischen 14:00 und 16:00', 8 * hour),
-  msg(1, ['Stadtwerke', 'kundenservice@stadtwerke.example'], 'Abschlagsrechnung Strom', 1 * day + 2 * hour, { seen: true }),
-  msg(3, ['Shop Wochenpost', 'news@shop.example'], 'Nur heute: 20 % auf alles ☀', 1 * day + 5 * hour, { list: true }),
+  msg(1, ['Stadtwerke', 'kundenservice@stadtwerke.example'], 'Abschlagsrechnung Strom', 1 * day + 2 * hour, { seen: true, dmarcPass: true }),
+  msg(3, ['Shop Wochenpost', 'news@shop.example'], 'Nur heute: 20 % auf alles ☀', 1 * day + 5 * hour, { list: true, dmarcPass: true }),
   msg(2, ['Jonas Becker', 'jonas@muster-werkstatt.example'], 'Re: Dienstplan Dezember', 2 * day, { seen: true }),
   msg(3, ['GitHub', 'noreply@github.example'], '[halcyon] New sign-in from Linux', 3 * day, { seen: true }),
-  msg(1, ['Versicherung Plus', 'vertrag@versicherung.example'], 'Ihr Vertrag Nr. 2026-1184 – Vertragsunterlagen', 4 * day, { seen: true }),
-  msg(3, ['Reiseportal', 'buchung@reise.example'], 'Buchungsbestätigung: Hamburg, 12.–14. Dezember', 6 * day, { seen: true }),
+  msg(1, ['Versicherung Plus', 'vertrag@versicherung.example'], 'Ihr Vertrag Nr. 2026-1184 – Vertragsunterlagen', 4 * day, { seen: true, dmarcPass: true }),
+  msg(3, ['Reiseportal', 'buchung@reise.example'], 'Buchungsbestätigung: Hamburg, 12.–14. Dezember', 6 * day, { seen: true, dmarcPass: true }),
   msg(2, [null, 'buchhaltung@muster-werkstatt.example'], 'Rechnung 2026-0417 Werkzeugbedarf', 9 * day, { seen: true }),
-  msg(3, ['Streamingdienst', 'info@stream.example'], 'Neu diesen Monat', 12 * day, { seen: true, list: true }),
-  msg(1, ['Online-Banking', 'hinweis@bank.example'], 'Neue Dokumente in Ihrem Postfach', 20 * day, { seen: true }),
+  msg(3, ['Streamingdienst', 'info@stream.example'], 'Neu diesen Monat', 12 * day, { seen: true, list: true, dmarcPass: true }),
+  msg(1, ['Online-Banking', 'hinweis@bank.example'], 'Neue Dokumente in Ihrem Postfach', 20 * day, { seen: true, dmarcPass: true }),
   msg(3, ['Kleinanzeigen', 'noreply@kleinanzeigen.example'], 'Deine Anzeige "Rennrad 28 Zoll" ist online', 26 * day, { seen: true }),
   msg(2, ['Sabine Kranz', 'kranz@zulieferer.example'], 'Lieferung KW 44', 40 * day, { seen: true }),
   msg(1, ['Telekom', 'rechnung@telekom.example'], 'Ihre Rechnung für Oktober 2026', 31 * day, { seen: true }),
-  msg(3, ['Fotobuch Studio', 'hallo@fotobuch.example'], 'Dein Fotobuch wurde versendet', 400 * day, { seen: true }),
+  msg(3, ['Fotobuch Studio', 'hallo@fotobuch.example'], 'Dein Fotobuch wurde versendet', 400 * day, { seen: true, dmarcPass: true }),
   msg(1, ['Max Mustermann', 'max@mail.example.org'], 'Re: Angebot vom Dienstag', 3 * hour, {
     seen: true,
     to: ['kranz@zulieferer.example'],
@@ -495,4 +498,109 @@ export function emptyFolder(folderId: number): Promise<number> {
   const before = all.length
   for (let i = all.length - 1; i >= 0; i--) if (all[i].folder_id === folderId) all.splice(i, 1)
   return delay(before - all.length, 80)
+}
+
+function svgDataUrl(svg: string): string {
+  return `data:image/svg+xml;base64,${btoa(svg)}`
+}
+
+const mockBrandStore = new Map<string, BrandLogo>([
+  [
+    'stadtwerke.example',
+    {
+      data_url: svgDataUrl(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><circle cx="32" cy="32" r="22" fill="#8CD748"/><path fill="#ffffff" d="M35 16L22 34h10l-3 14 13-18H32l3-14z"/></svg>',
+      ),
+      bg: null,
+      padded: true,
+      scale: 1,
+    },
+  ],
+  [
+    'shop.example',
+    {
+      data_url: svgDataUrl(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="#C23B2B" d="M14 22h36l-4 28H18L14 22z"/><path fill="none" stroke="#C23B2B" stroke-width="5" d="M24 22v-4a8 8 0 0 1 16 0v4"/></svg>',
+      ),
+      bg: null,
+      padded: true,
+      scale: 1,
+    },
+  ],
+  [
+    'bank.example',
+    {
+      data_url: svgDataUrl(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="#1E3A5F" d="M32 10L10 22v5h44v-5L32 10zM16 31v15h6V31h-6zm13 0v15h6V31h-6zm13 0v15h6V31h-6zM10 49v5h44v-5H10z"/></svg>',
+      ),
+      bg: null,
+      padded: true,
+      scale: 1,
+    },
+  ],
+  [
+    'reise.example',
+    {
+      data_url: svgDataUrl(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><circle cx="32" cy="32" r="22" fill="#2A9D8F"/><polygon fill="#ffffff" points="32,16 38,32 32,48 26,32"/></svg>',
+      ),
+      bg: null,
+      padded: true,
+      scale: 1,
+    },
+  ],
+  [
+    'versicherung.example',
+    {
+      data_url: svgDataUrl(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="#334155" d="M32 10l18 7v14c0 12-7.8 21.5-18 25-10.2-3.5-18-13-18-25V17l18-7z"/></svg>',
+      ),
+      bg: null,
+      padded: true,
+      scale: 1,
+    },
+  ],
+  [
+    'stream.example',
+    {
+      data_url: svgDataUrl(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect x="10" y="14" width="44" height="36" rx="10" fill="#6D28D9"/><polygon fill="#ffffff" points="26,23 44,32 26,41"/></svg>',
+      ),
+      bg: null,
+      padded: true,
+      scale: 1,
+    },
+  ],
+  [
+    'fotobuch.example',
+    {
+      data_url: svgDataUrl(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect x="12" y="14" width="40" height="36" rx="8" fill="#E9C46A"/><circle cx="32" cy="32" r="10" fill="#264653"/></svg>',
+      ),
+      bg: null,
+      padded: true,
+      scale: 1,
+    },
+  ],
+])
+
+export function brandLogo(domain: string): Promise<BrandLogo | null> {
+  return delay(mockBrandStore.get(domain) ?? null, 60)
+}
+
+export function saveBrandLogoAppearance(
+  domain: string,
+  bg: string | null,
+  padded: boolean,
+  scale: number,
+): Promise<void> {
+  const existing = mockBrandStore.get(domain)
+  if (existing) {
+    mockBrandStore.set(domain, { ...existing, bg, padded, scale })
+  }
+  return delay(undefined, 10)
+}
+
+export function clearBrandLogos(): Promise<void> {
+  return delay(undefined, 10)
 }
