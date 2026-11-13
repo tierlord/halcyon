@@ -23,6 +23,14 @@
 - [x] SMTP-Versand mit „Senden rückgängig"
 - [ ] Entwürfe, Anhänge senden, Signaturen, Formatierung
 
+## Einstellungen
+
+- [ ] Richtiges Einstellungsmenü, darin unter anderem:
+  - [ ] Absender-Logos abschaltbar (jede Abfrage verrät der Absender-Domain
+        die IP-Adresse)
+  - [ ] Ordner „Als Posteingang behandeln" (z. B. web.de „Unbekannt")
+  - [ ] Dauer für „Senden rückgängig"
+
 ## Komfort-Features
 
 - [ ] Vorgänge: zusammengehörige Mails gruppieren (Threads, Kleinanzeigen,
