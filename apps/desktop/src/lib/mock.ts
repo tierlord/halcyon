@@ -176,7 +176,7 @@ export async function startSync(): Promise<boolean> {
   emit({ kind: 'started' })
   for (const a of accounts) {
     emit({ kind: 'account', email: a.email })
-    await delay(null, 500)
+    await delay(null, 1800)
   }
   emit({ kind: 'finished', new_messages: 0 })
   return true

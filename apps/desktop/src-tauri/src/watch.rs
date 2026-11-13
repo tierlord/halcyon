@@ -42,6 +42,13 @@ pub enum LiveState {
     Offline { email: String, error: String },
 }
 
+/// A watcher is syncing an account right now (for the sidebar animation).
+#[derive(Clone, Serialize)]
+pub struct Activity {
+    pub email: String,
+    pub active: bool,
+}
+
 /// Something changed in an account's inbox.
 #[derive(Clone, Serialize)]
 pub struct MailChanged {
@@ -122,10 +129,19 @@ async fn watch_connected(app: &AppHandle, account: &Account) -> Result<(), Strin
 
     loop {
         let before = newest_inbox_id(&store, account.id);
-        match sync::sync_inbox(&mut store, &mut session, &caps, account)
-            .await
-            .map_err(|e| e.to_string())?
-        {
+        let activity = |active| {
+            let _ = app.emit(
+                "activity",
+                Activity {
+                    email: account.email.clone(),
+                    active,
+                },
+            );
+        };
+        activity(true);
+        let synced = sync::sync_inbox(&mut store, &mut session, &caps, account).await;
+        activity(false);
+        match synced.map_err(|e| e.to_string())? {
             Some(report) => {
                 if report.new_messages + report.removed + report.flags_updated > 0 {
                     let _ = app.emit(

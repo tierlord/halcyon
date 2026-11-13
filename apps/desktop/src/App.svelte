@@ -29,6 +29,14 @@
   let errors: string[] = $state([])
   let accountDialogOpen = $state(false)
   let live: Record<string, LiveState> = $state({})
+  // Accounts being synced right now: by the full sync (one at a time) or by
+  // a background watcher.
+  let fullSyncEmail: string | null = $state(null)
+  let watcherActive: Record<string, boolean> = $state({})
+  const activeEmails = $derived([
+    ...(fullSyncEmail ? [fullSyncEmail] : []),
+    ...Object.keys(watcherActive).filter((e) => watcherActive[e]),
+  ])
   const liveStates = $derived(Object.values(live))
   const liveOffline = $derived(liveStates.filter((s) => s.state === 'offline'))
 
@@ -97,6 +105,7 @@
         break
       case 'account':
         syncStatus = accountLabel(u.email)
+        fullSyncEmail = u.email
         break
       case 'folder':
         syncStatus = `${accountLabel(u.email)} · ${u.path} ${u.done}/${u.total}`
@@ -109,6 +118,7 @@
         break
       case 'finished': {
         syncing = false
+        fullSyncEmail = null
         const time = new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })
         // The result of this run is shown briefly; afterwards only when it
         // ran, so the toolbar never shows a stale count.
@@ -236,6 +246,7 @@
     const unlisteners = [
       api.onSync(handleSync),
       api.onLive((s) => (live = { ...live, [s.email]: s })),
+      api.onActivity((a) => (watcherActive = { ...watcherActive, [a.email]: a.active })),
       // Background changes: refresh counts and the visible list, keeping the
       // selection (load() keeps it if the message still exists).
       api.onMailChanged(() => {
@@ -255,6 +266,7 @@
   <Sidebar
     {overview}
     {view}
+    {activeEmails}
     onselect={selectView}
     onmanageaccounts={() => (accountDialogOpen = true)}
   />

@@ -20,6 +20,7 @@
   --selection: color-mix(in srgb, var(--blue-green) 18%, var(--snow));
   --hover: color-mix(in srgb, var(--blue-slate) 8%, var(--snow));
   --unread: var(--ochre);
+  --sync-glow: color-mix(in srgb, var(--blue-green) 32%, transparent);
   --danger: #b3261e;
 
   --radius: 8px;
@@ -47,6 +48,7 @@
     --on-accent-fill: var(--pitch-black);
     --selection: color-mix(in srgb, var(--blue-slate) 55%, var(--pitch-black));
     --hover: color-mix(in srgb, var(--blue-slate) 26%, var(--pitch-black));
+    --sync-glow: color-mix(in srgb, var(--blue-green) 55%, transparent);
     --danger: #ff8a80;
   }
 }
@@ -63,6 +65,7 @@
   --on-accent-fill: var(--pitch-black);
   --selection: color-mix(in srgb, var(--blue-slate) 55%, var(--pitch-black));
   --hover: color-mix(in srgb, var(--blue-slate) 26%, var(--pitch-black));
+  --sync-glow: color-mix(in srgb, var(--blue-green) 55%, transparent);
   --danger: #ff8a80;
 }
 

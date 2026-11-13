@@ -6,11 +6,14 @@
   let {
     overview,
     view,
+    activeEmails = [],
     onselect,
     onmanageaccounts,
   }: {
     overview: Overview | null
     view: View
+    /** Accounts being synced right now. */
+    activeEmails?: string[]
     onselect: (v: View) => void
     onmanageaccounts: () => void
   } = $props()
@@ -59,7 +62,11 @@
         <button
           class="item"
           class:active={view.kind === 'account' && view.accountId === account.id}
-          title={account.email}
+          class:syncing={activeEmails.includes(account.email)}
+          aria-busy={activeEmails.includes(account.email)}
+          title={activeEmails.includes(account.email)
+            ? `${account.email} – wird abgerufen …`
+            : account.email}
           onclick={() => onselect({ kind: 'account', accountId: account.id, role: 'inbox' })}
         >
           <Icon name="mail" />
@@ -179,6 +186,51 @@
   }
   button.item:hover {
     background: var(--hover);
+  }
+  /* Sync in progress: a soft band of light runs through the row, in the
+     logo's blue green. Short syncs (under ~0.4 s) stay invisible thanks to
+     the delayed fade-in, so quick background checks do not flicker. */
+  .item.syncing {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+  }
+  .item.syncing::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    background: linear-gradient(
+      100deg,
+      transparent 20%,
+      var(--sync-glow) 50%,
+      transparent 80%
+    );
+    background-size: 250% 100%;
+    opacity: 0;
+    animation:
+      sync-fade-in 0.3s ease-out 0.4s forwards,
+      sync-sweep 1.6s ease-in-out infinite;
+  }
+  @keyframes sync-sweep {
+    from {
+      background-position: 100% 0;
+    }
+    to {
+      background-position: -150% 0;
+    }
+  }
+  @keyframes sync-fade-in {
+    to {
+      opacity: 1;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .item.syncing::before {
+      animation: sync-fade-in 0.3s ease-out 0.4s forwards;
+      background: color-mix(in srgb, var(--blue-green) 18%, transparent);
+    }
   }
   .item.active {
     background: var(--selection);

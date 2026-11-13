@@ -51,6 +51,14 @@ export async function onLive(handler: (s: LiveState) => void): Promise<() => voi
   return listen<LiveState>('live', (e) => handler(e.payload))
 }
 
+/** A background watcher started or finished syncing an account. */
+export async function onActivity(
+  handler: (a: { email: string; active: boolean }) => void,
+): Promise<() => void> {
+  if (!native) return () => {}
+  return listen<{ email: string; active: boolean }>('activity', (e) => handler(e.payload))
+}
+
 /** An inbox changed in the background (new, removed or re-flagged mail). */
 export async function onMailChanged(
   handler: (c: { account_id: number; new_messages: number }) => void,
