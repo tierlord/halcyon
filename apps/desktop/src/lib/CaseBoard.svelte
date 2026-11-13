@@ -28,36 +28,156 @@
   let selectedDay = $state<string | null>(null)
   let showDone = $state(false)
   let openCategoryId = $state<string | null>(null)
+  let anchorOffset = $state(0)
+  let todayEdge = $state<'left' | 'right' | null>(null)
   let timelineEl: HTMLDivElement | undefined = $state()
+
+  const WINDOW_HALF = 30
+  const today = dayOffset(0)
+
+  function updateTodayEdge() {
+    if (!timelineEl) return
+    const minDay = dayOffset(anchorOffset - WINDOW_HALF)
+    const maxDay = dayOffset(anchorOffset + WINDOW_HALF)
+    if (today < minDay) {
+      todayEdge = 'left'
+      return
+    }
+    if (today > maxDay) {
+      todayEdge = 'right'
+      return
+    }
+    const todayBtn = timelineEl.querySelector<HTMLElement>('[data-today="true"]')
+    if (!todayBtn) {
+      todayEdge = null
+      return
+    }
+    const left = todayBtn.offsetLeft
+    const right = left + todayBtn.offsetWidth
+    const viewLeft = timelineEl.scrollLeft
+    const viewRight = viewLeft + timelineEl.clientWidth
+    if (right < viewLeft + 8) {
+      todayEdge = 'left'
+    } else if (left > viewRight - 8) {
+      todayEdge = 'right'
+    } else {
+      todayEdge = null
+    }
+  }
+
+  function jumpToToday() {
+    anchorOffset = 0
+    requestAnimationFrame(() => {
+      const todayBtn = timelineEl?.querySelector<HTMLElement>('[data-today="true"]')
+      if (timelineEl && todayBtn) {
+        timelineEl.scrollTo({
+          left: Math.max(0, todayBtn.offsetLeft - timelineEl.clientWidth * 0.55),
+          behavior: 'smooth',
+        })
+      }
+      updateTodayEdge()
+    })
+  }
 
   onMount(() => {
     const unsub = subscribeLogos(() => {
       logoVersion += 1
     })
-    // Scroll horizontal timeline slightly towards "Heute".
-    if (timelineEl) {
-      timelineEl.scrollLeft = Math.max(0, timelineEl.scrollWidth - timelineEl.clientWidth - 120)
-    }
+    requestAnimationFrame(() => {
+      const todayBtn = timelineEl?.querySelector<HTMLElement>('[data-today="true"]')
+      if (timelineEl && todayBtn) {
+        timelineEl.scrollLeft = Math.max(0, todayBtn.offsetLeft - timelineEl.clientWidth * 0.55)
+      }
+      updateTodayEdge()
+    })
     return unsub
   })
 
-  const today = dayOffset(0)
-  const calendarDays = Array.from({ length: 14 }, (_, idx) => {
-    const offset = idx - 9
-    const iso = dayOffset(offset)
-    const d = new Date(`${iso}T12:00:00`)
-    const weekday = d.toLocaleDateString('de-DE', { weekday: 'short' }).replace('.', '')
-    const dayNum = d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' })
-    return {
-      iso,
-      offset,
-      label: offset === 0 ? 'Heute' : offset === -1 ? 'Gestern' : offset === 1 ? 'Morgen' : `${weekday} ${dayNum}`,
-      isFuture: offset > 0,
+  interface TimelineDay {
+    iso: string
+    year: number
+    monthKey: string
+    monthLabel: string
+    dayText: string
+    isToday: boolean
+  }
+
+  const windowDays = $derived.by(() => {
+    const list: TimelineDay[] = []
+    for (let i = -WINDOW_HALF; i <= WINDOW_HALF; i++) {
+      const iso = dayOffset(anchorOffset + i)
+      const d = new Date(`${iso}T12:00:00`)
+      const year = d.getFullYear()
+      const month = d.getMonth()
+      const monthLabel = d.toLocaleDateString('de-DE', { month: 'short' }).replace('.', '')
+      const dayNum = String(d.getDate())
+      list.push({
+        iso,
+        year,
+        monthKey: `${year}-${month}`,
+        monthLabel,
+        dayText: iso === today ? 'Heute' : dayNum,
+        isToday: iso === today,
+      })
     }
+    return list
   })
+
+  const yearGroups = $derived.by(() => {
+    const years: {
+      year: number
+      count: number
+      months: { key: string; label: string; days: TimelineDay[] }[]
+    }[] = []
+    for (const day of windowDays) {
+      let y = years[years.length - 1]
+      if (!y || y.year !== day.year) {
+        y = { year: day.year, count: 0, months: [] }
+        years.push(y)
+      }
+      y.count++
+      let m = y.months[y.months.length - 1]
+      if (!m || m.key !== day.monthKey) {
+        m = { key: day.monthKey, label: day.monthLabel, days: [] }
+        y.months.push(m)
+      }
+      m.days.push(day)
+    }
+    return years
+  })
+
+  function onYearWheel(e: WheelEvent) {
+    if (Math.abs(e.deltaY) < 1 && Math.abs(e.deltaX) < 1) return
+    e.preventDefault()
+    const dir = (Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX) > 0 ? 1 : -1
+    anchorOffset += dir * 365
+    requestAnimationFrame(updateTodayEdge)
+  }
+
+  function onMonthWheel(e: WheelEvent) {
+    if (Math.abs(e.deltaY) < 1 && Math.abs(e.deltaX) < 1) return
+    e.preventDefault()
+    const dir = (Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX) > 0 ? 1 : -1
+    anchorOffset += dir * 30
+    requestAnimationFrame(updateTodayEdge)
+  }
+
+  function onDayWheel(e: WheelEvent) {
+    if (!timelineEl) return
+    const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
+    if (Math.abs(delta) < 1) return
+    e.preventDefault()
+    timelineEl.scrollLeft += delta
+    updateTodayEdge()
+  }
 
   const focusedCaseId = $derived(hoveredCaseId ?? selectedCaseId)
   const focusedCase = $derived(cases.find((c) => c.id === focusedCaseId) ?? null)
+  const focusedSummary = $derived(
+    focusedCase
+      ? `${focusedCase.title}: ${focusedCase.events.map((e) => `${e.day.slice(8)}.${e.day.slice(5, 7)}. ${e.label}`).join(' · ')}`
+      : '',
+  )
 
   const filteredCases = $derived(
     selectedDay
@@ -104,40 +224,72 @@
     {/if}
   </header>
 
-  <div class="timeline-wrap" aria-label="Chronologie-Kalender">
-    <div class="timeline" bind:this={timelineEl}>
-      {#each calendarDays as day (day.iso)}
-        {@const dayEvents = eventsForDay(day.iso)}
-        {@const focusedEvents = focusedCase
-          ? dayEvents.filter((e) => e.caseItem.id === focusedCase.id)
-          : []}
-        {@const isHighlighted = focusedEvents.length > 0}
-        <button
-          type="button"
-          class="day-cell"
-          class:today={day.iso === today}
-          class:future={day.isFuture}
-          class:selected={selectedDay === day.iso}
-          class:highlighted={isHighlighted}
-          onclick={() => (selectedDay = selectedDay === day.iso ? null : day.iso)}
-        >
-          <span class="day-label">{day.label}</span>
-          <span class="day-dots">
-            {#each dayEvents.slice(0, 4) as ev}
-              <span
-                class="ev-dot"
-                class:due={ev.phase === 'due'}
-                class:done={ev.phase === 'done'}
-                class:active-dot={focusedCase?.id === ev.caseItem.id}
-                title={`${ev.caseItem.title}: ${ev.label}`}
-              ></span>
-            {/each}
-          </span>
-          {#if focusedEvents.length > 0}
-            <span class="day-focus-label">{focusedEvents[0].label}</span>
-          {/if}
-        </button>
-      {/each}
+  <div class="timeline-wrap" aria-label="Chronologie-Zeitstrahl">
+    {#if todayEdge === 'left'}
+      <button type="button" class="today-pin left" onclick={jumpToToday} title="Zurück zu Heute">
+        ← Heute
+      </button>
+    {/if}
+
+    <div class="timeline" bind:this={timelineEl} onscroll={updateTodayEdge}>
+      <div class="timeline-track">
+        {#each yearGroups as yg (yg.year)}
+          <div class="year-band" style:--span={yg.count}>
+            <div class="year-row" onwheel={onYearWheel} title="Mausrad: Jahre durchscrollen">
+              <span class="year-label">{yg.year}</span>
+            </div>
+            <div class="months-row">
+              {#each yg.months as mg (mg.key)}
+                <div class="month-band" style:--mspan={mg.days.length}>
+                  <div class="month-line" onwheel={onMonthWheel} title="Mausrad: Monate durchscrollen">
+                    <span class="month-label">{mg.label}</span>
+                  </div>
+                  <div class="days-row" onwheel={onDayWheel}>
+                    {#each mg.days as day (day.iso)}
+                      {@const dayEvents = eventsForDay(day.iso)}
+                      {@const isHighlighted = focusedCase
+                        ? dayEvents.some((e) => e.caseItem.id === focusedCase.id)
+                        : false}
+                      <button
+                        type="button"
+                        class="day-tick"
+                        data-today={day.isToday ? 'true' : undefined}
+                        class:today={day.isToday}
+                        class:selected={selectedDay === day.iso}
+                        class:highlighted={isHighlighted}
+                        onclick={() => (selectedDay = selectedDay === day.iso ? null : day.iso)}
+                        title={dayEvents.map((e) => `${e.caseItem.title}: ${e.label}`).join('\n') || day.iso}
+                      >
+                        <span class="day-text">{day.dayText}</span>
+                        <span class="day-dots">
+                          {#each dayEvents.slice(0, 3) as ev}
+                            <span
+                              class="ev-dot"
+                              class:due={ev.phase === 'due'}
+                              class:done={ev.phase === 'done'}
+                              class:active-dot={focusedCase?.id === ev.caseItem.id}
+                            ></span>
+                          {/each}
+                        </span>
+                      </button>
+                    {/each}
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/each}
+      </div>
+    </div>
+
+    {#if todayEdge === 'right'}
+      <button type="button" class="today-pin right" onclick={jumpToToday} title="Zurück zu Heute">
+        Heute →
+      </button>
+    {/if}
+
+    <div class="timeline-focus-bar" aria-live="polite">
+      <span>{focusedSummary || ' '}</span>
     </div>
   </div>
 
@@ -434,61 +586,124 @@
     color: var(--accent-text);
   }
   .timeline-wrap {
-    padding: 0 20px 10px;
+    position: relative;
+    padding: 0 20px 6px;
     border-bottom: 1px solid var(--border);
   }
   .timeline {
-    display: flex;
-    gap: 6px;
     overflow-x: auto;
-    padding-bottom: 4px;
-    scrollbar-width: thin;
+    scrollbar-width: none;
   }
-  .day-cell {
-    flex: 0 0 auto;
-    min-width: 72px;
+  .timeline::-webkit-scrollbar {
+    display: none;
+  }
+  .timeline-track {
+    display: flex;
+    width: max-content;
+  }
+  .year-band {
+    display: flex;
+    flex-direction: column;
+  }
+  .year-row {
+    display: flex;
+    align-items: center;
+    height: 18px;
+    border-left: 1px solid var(--border);
+    padding-left: 4px;
+    cursor: ns-resize;
+  }
+  .year-label {
+    position: sticky;
+    left: 0;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--text-muted);
+    background: var(--bg);
+    padding: 0 4px;
+    letter-spacing: 0.04em;
+  }
+  .months-row {
+    display: flex;
+  }
+  .month-band {
+    display: flex;
+    flex-direction: column;
+  }
+  .month-line {
+    display: flex;
+    align-items: center;
+    height: 18px;
+    border-top: 1px solid var(--border);
+    border-left: 1px solid var(--border);
+    padding-left: 4px;
+    cursor: ns-resize;
+  }
+  .month-label {
+    position: sticky;
+    left: 0;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-muted);
+    background: var(--bg);
+    padding: 0 4px;
+  }
+  .days-row {
+    display: flex;
+    border-top: 1px solid var(--border);
+  }
+  .day-tick {
+    width: 34px;
+    height: 36px;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 4px;
-    padding: 6px 8px;
-    border-radius: var(--radius);
-    border: 1px solid var(--border);
-    background: var(--surface);
+    justify-content: center;
+    gap: 3px;
+    border: 0;
+    background: none;
+    padding: 2px 0;
     font-size: 11px;
     color: var(--text-muted);
-    transition: border-color 0.12s ease, background 0.12s ease;
+    border-radius: 6px;
   }
-  .day-cell.today {
-    border-color: var(--highlight);
+  .day-tick:hover {
+    color: var(--text);
+    background: var(--hover);
+  }
+  .day-tick.today {
+    width: auto;
+    min-width: 48px;
+    padding: 2px 8px;
+    color: var(--on-accent-fill);
+    background: var(--accent-fill);
+    font-weight: 650;
+  }
+  .day-tick.selected {
+    background: var(--selection);
     color: var(--text);
     font-weight: 650;
   }
-  .day-cell.future {
-    border-style: dashed;
-  }
-  .day-cell.selected {
-    background: var(--selection);
-    border-color: var(--highlight);
-    color: var(--text);
-  }
-  .day-cell.highlighted {
-    background: var(--selection);
-    border-color: var(--ochre);
-    color: var(--text);
+  .day-tick.highlighted:not(.today) {
+    color: var(--ochre);
+    font-weight: 700;
   }
   .day-dots {
     display: flex;
-    gap: 4px;
-    min-height: 7px;
+    gap: 2px;
+    min-height: 6px;
     align-items: center;
   }
   .ev-dot {
-    width: 6px;
-    height: 6px;
+    width: 5px;
+    height: 5px;
     border-radius: 50%;
     background: var(--accent-fill);
     opacity: 0.55;
+  }
+  .day-tick.today .ev-dot {
+    background: var(--on-accent-fill);
+    opacity: 0.9;
   }
   .ev-dot.due {
     background: var(--ochre);
@@ -498,13 +713,35 @@
   }
   .ev-dot.active-dot {
     opacity: 1;
-    transform: scale(1.25);
+    transform: scale(1.3);
   }
-  .day-focus-label {
-    font-size: 10px;
-    font-weight: 600;
+  .today-pin {
+    position: absolute;
+    top: 38px;
+    z-index: 3;
+    border: 1px solid var(--highlight);
+    background: var(--surface-raised);
+    color: var(--accent-text);
+    border-radius: 99px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 650;
+    box-shadow: 0 2px 8px color-mix(in srgb, var(--pitch-black) 18%, transparent);
+  }
+  .today-pin.left {
+    left: 22px;
+  }
+  .today-pin.right {
+    right: 22px;
+  }
+  .timeline-focus-bar {
+    height: 18px;
+    margin-top: 2px;
+    font-size: 11px;
     color: var(--accent-text);
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .board-scroll {
     flex: 1;
