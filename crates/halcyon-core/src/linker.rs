@@ -269,10 +269,6 @@ fn is_carrier(domain: Option<&str>) -> bool {
     domain.is_some_and(|d| CARRIER_DOMAINS.contains(&d))
 }
 
-fn thread_id(id: &str) -> String {
-    normalize_key(id.trim().trim_start_matches('<').trim_end_matches('>'))
-}
-
 /// Looks at new mail and files it into cases. Safe to call often: each
 /// mail is looked at once (and once more when its text arrives).
 pub fn run(store: &mut Store, now: i64) -> Result<LinkReport> {
@@ -282,6 +278,7 @@ pub fn run(store: &mut Store, now: i64) -> Result<LinkReport> {
         .map(|a| a.email.to_ascii_lowercase())
         .collect();
     store.in_transaction(|store| {
+        store.prune_auto_conversations()?;
         let mut report = LinkReport::default();
         loop {
             let batch = store.case_scan_batch(now - SCAN_WINDOW_SECS, BATCH)?;
@@ -338,9 +335,6 @@ fn link_message(
     }
 
     let dir = direction(m, own);
-    if link_conversation(store, m, own, dir, report)? {
-        return Ok(());
-    }
     if m.list_id.is_none() && dir == EventDirection::In {
         link_order(store, m, subject, body, report)?;
     }
@@ -487,163 +481,6 @@ fn refresh_order(store: &Store, case_id: i64) -> Result<()> {
         _ => (CaseStatus::Waiting, "Bestellt · wartet auf Versand"),
     };
     store.update_case_state(case_id, status, next)
-}
-
-/// Files a reply into its conversation. Returns whether the mail was
-/// handled as part of one.
-fn link_conversation(
-    store: &Store,
-    m: &ScanMessage,
-    own: &HashSet<String>,
-    dir: EventDirection,
-    report: &mut LinkReport,
-) -> Result<bool> {
-    let mut ids: Vec<String> = Vec::new();
-    if let Some(own) = m.message_id.as_deref() {
-        ids.push(thread_id(own));
-    }
-    // As stored (for lookups by Message-ID) and normalised (for keys).
-    let raw_refs: Vec<String> = m
-        .in_reply_to
-        .iter()
-        .chain(m.references.iter())
-        .map(|r| {
-            r.trim()
-                .trim_start_matches('<')
-                .trim_end_matches('>')
-                .to_string()
-        })
-        .filter(|r| !r.is_empty())
-        .collect();
-    ids.extend(raw_refs.iter().map(|r| thread_id(r)));
-    let mut seen = HashSet::new();
-    ids.retain(|i| seen.insert(i.clone()));
-
-    let mut case_id = store.case_for_keys(CaseKind::Conversation, &ids)?;
-    let mut parents = Vec::new();
-    if case_id.is_none() {
-        if raw_refs.is_empty() || m.list_id.is_some() {
-            return Ok(false);
-        }
-        // Only a real exchange is a conversation: you and someone else.
-        parents = store.scan_messages_by_rfc_ids(&raw_refs)?;
-        if parents.is_empty() {
-            return Ok(false);
-        }
-    }
-
-    let dir_of = |x: &ScanMessage| direction(x, own);
-    if case_id.is_none() {
-        if !parents.iter().any(|p| dir_of(p) != dir) {
-            return Ok(false);
-        }
-        let mut all: Vec<&ScanMessage> = parents.iter().chain(std::iter::once(m)).collect();
-        all.sort_by_key(|x| x.date);
-        let other = all
-            .iter()
-            .find(|x| dir_of(x) == EventDirection::In)
-            .map(|x| display_name(x.from_name.as_deref(), x.from_addr.as_deref()))
-            .or_else(|| {
-                all.iter()
-                    .find_map(|x| x.to.first().map(|t| display_name(None, Some(t))))
-            })
-            .unwrap_or_else(|| "Unbekannt".into());
-        let title = clean_subject(all[0].subject.as_deref().unwrap_or(""));
-        let created = store.create_case(&NewCase {
-            title: if title.is_empty() {
-                "(ohne Betreff)".into()
-            } else {
-                title
-            },
-            counterparty: other,
-            domain: None,
-            kind: CaseKind::Conversation,
-            status: CaseStatus::Waiting,
-            next_step: String::new(),
-            due_at: None,
-            due_label: None,
-            amount_cents: None,
-            currency: None,
-            reason: "Antworten im selben Mailverlauf (In-Reply-To / References)".into(),
-        })?;
-        report.created += 1;
-        let id = created.case.id;
-        for p in &parents {
-            if store
-                .case_of_rfc_message(p.message_id.as_deref().unwrap_or(""))?
-                .is_none()
-            {
-                add_conversation_event(store, id, p, dir_of(p))?;
-                if let Some(pid) = p.message_id.as_deref() {
-                    store.add_case_key(id, "Verlauf", &thread_id(pid))?;
-                }
-            }
-        }
-        case_id = Some(id);
-    }
-    let id = case_id.expect("set above");
-    for t in &ids {
-        store.add_case_key(id, "Verlauf", t)?;
-    }
-    add_conversation_event(store, id, m, dir)?;
-    report.linked += 1;
-    refresh_conversation(store, id)?;
-    Ok(true)
-}
-
-fn add_conversation_event(
-    store: &Store,
-    case_id: i64,
-    m: &ScanMessage,
-    dir: EventDirection,
-) -> Result<()> {
-    let label = match dir {
-        EventDirection::Out => "Deine Nachricht".to_string(),
-        EventDirection::In => format!(
-            "Nachricht von {}",
-            display_name(m.from_name.as_deref(), m.from_addr.as_deref())
-        ),
-    };
-    store.add_case_event(
-        case_id,
-        &event_for(
-            m,
-            "conversation.message",
-            label,
-            CaseEventPhase::Update,
-            dir,
-        ),
-    )?;
-    Ok(())
-}
-
-/// Whoever wrote last decides who is waiting.
-fn refresh_conversation(store: &Store, case_id: i64) -> Result<()> {
-    let Some(view) = store.get_case(case_id)? else {
-        return Ok(());
-    };
-    let Some(last) = view.events.iter().max_by_key(|e| (e.occurred_at, e.id)) else {
-        return Ok(());
-    };
-    let (status, next) = match last.direction {
-        Some(EventDirection::Out) => (
-            CaseStatus::Waiting,
-            format!("Wartet auf Antwort von {}", view.case.counterparty),
-        ),
-        _ => (
-            CaseStatus::NeedsYou,
-            format!("{} hat geschrieben · Antwort offen", view.case.counterparty),
-        ),
-    };
-    store.update_case_state(case_id, status, &next)
-}
-
-fn display_name(name: Option<&str>, addr: Option<&str>) -> String {
-    name.map(str::trim)
-        .filter(|n| !n.is_empty())
-        .or(addr)
-        .unwrap_or("Unbekannt")
-        .to_string()
 }
 
 #[cfg(test)]
@@ -893,43 +730,26 @@ mod tests {
     }
 
     #[test]
-    fn conversation_needs_both_sides() {
+    fn plain_conversations_do_not_create_cases() {
         let (mut store, inbox, sent) = store_with_inbox();
         let mut question = mail(
             1,
-            "Auslieferungstermin",
-            "dispo@firma.example",
+            "Tischreservierung Freitag",
+            "info@restaurant.example",
             NOW - 2 * DAY,
         );
-        question.from_name = Some("Dispo".into());
-        let mut answer = mail(2, "Re: Auslieferungstermin", "me@example.org", NOW - DAY);
+        question.from_name = Some("La Piazza".into());
+        let mut answer = mail(2, "Re: Tischreservierung Freitag", "me@example.org", NOW - DAY);
         answer.in_reply_to = Some("m1@example.org".into());
-        answer.to = vec!["dispo@firma.example".into()];
-        // A reply between two other people is not your conversation.
-        let mut other = mail(3, "Re: Newsletter", "x@firma.example", NOW - DAY);
-        other.in_reply_to = Some("nowhere@example.org".into());
-        store.insert_messages(inbox, &[question, other]).unwrap();
+        answer.to = vec!["info@restaurant.example".into()];
+        let mut back = mail(3, "Re: Re: Tischreservierung Freitag", "info@restaurant.example", NOW);
+        back.in_reply_to = Some("m2@example.org".into());
+        back.references = vec!["m1@example.org".into(), "m2@example.org".into()];
+        store.insert_messages(inbox, &[question, back]).unwrap();
         store.insert_messages(sent, &[answer]).unwrap();
 
         run(&mut store, NOW).unwrap();
-        let cases = store.list_cases(false).unwrap();
-        assert_eq!(cases.len(), 1, "{cases:#?}");
-        let c = &cases[0];
-        assert_eq!(c.case.kind, CaseKind::Conversation);
-        assert_eq!(c.case.title, "Auslieferungstermin");
-        assert_eq!(c.case.counterparty, "Dispo");
-        assert_eq!(c.case.status, CaseStatus::Waiting);
-        assert_eq!(c.events.len(), 2);
-
-        // Their reply makes it yours again.
-        let mut back = mail(4, "Re: Re: Auslieferungstermin", "dispo@firma.example", NOW);
-        back.in_reply_to = Some("m2@example.org".into());
-        back.references = vec!["m1@example.org".into(), "m2@example.org".into()];
-        store.insert_messages(inbox, &[back]).unwrap();
-        run(&mut store, NOW).unwrap();
-        let c = store.get_case(c.case.id).unwrap().unwrap();
-        assert_eq!(c.case.status, CaseStatus::NeedsYou);
-        assert_eq!(c.events.len(), 3);
+        assert!(store.list_cases(false).unwrap().is_empty());
     }
 
     #[test]

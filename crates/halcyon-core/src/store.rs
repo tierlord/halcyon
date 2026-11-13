@@ -1658,6 +1658,17 @@ impl Store {
         )?)
     }
 
+    /// Removes automatically created `conversation` cases (those with no manual
+    /// events), since plain mail exchanges are grouped as threads in the list.
+    pub fn prune_auto_conversations(&self) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM cases
+             WHERE kind = 'conversation'
+               AND id NOT IN (SELECT DISTINCT case_id FROM case_events WHERE manual = 1)",
+            [],
+        )?)
+    }
+
     fn touch_case(&self, case_id: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE cases SET updated_at = unixepoch() WHERE id = ?1",

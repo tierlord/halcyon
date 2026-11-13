@@ -31,16 +31,156 @@
 
   let listEl: HTMLUListElement | undefined = $state()
   let logoVersion = $state(0)
+  let expandedThreadKeys = $state<Set<string>>(new Set())
 
-  onMount(() => subscribeLogos(() => {
-    logoVersion += 1
-  }))
+  onMount(() =>
+    subscribeLogos(() => {
+      logoVersion += 1
+    }),
+  )
 
   // Keep the selected row visible during keyboard navigation.
   $effect(() => {
     if (selectedId == null || !listEl) return
     listEl.querySelector(`[data-id="${selectedId}"]`)?.scrollIntoView({ block: 'nearest' })
   })
+
+  interface ThreadGroup {
+    key: string
+    items: MessageSummary[]
+    latest: MessageSummary
+    isThread: boolean
+    hasUnread: boolean
+    hasFlagged: boolean
+    hasAttachments: boolean
+    participants: string
+  }
+
+  function normMsgId(raw: string | null | undefined): string | null {
+    if (!raw) return null
+    const cleaned = raw.trim().replace(/^<|>$/g, '').toLowerCase()
+    return cleaned || null
+  }
+
+  function cleanSubject(raw: string | null | undefined): string {
+    if (!raw) return '(kein Betreff)'
+    let s = raw.trim()
+    while (/^(re|aw|wg|fw|fwd)\s*:\s*/i.test(s)) {
+      s = s.replace(/^(re|aw|wg|fw|fwd)\s*:\s*/i, '').trim()
+    }
+    return s || '(kein Betreff)'
+  }
+
+  function senderLabel(m: MessageSummary): string {
+    if (m.folder_role === 'sent') return 'Du'
+    return m.header.from_name?.trim() || m.header.from_addr || 'Unbekannt'
+  }
+
+  const threadGroups = $derived.by((): ThreadGroup[] => {
+    if (chatMode) return []
+    const n = messages.length
+    if (n === 0) return []
+
+    // Union-Find to group messages connected by Message-ID / In-Reply-To / References.
+    const parent = Array.from({ length: n }, (_, i) => i)
+    const find = (x: number): number => {
+      while (parent[x] !== x) {
+        parent[x] = parent[parent[x]]
+        x = parent[x]
+      }
+      return x
+    }
+    const union = (a: number, b: number) => {
+      const ra = find(a)
+      const rb = find(b)
+      if (ra !== rb) parent[rb] = ra
+    }
+
+    const byRfcId = new Map<string, number>()
+    for (let i = 0; i < n; i++) {
+      const mid = normMsgId(messages[i].header.message_id)
+      if (mid && !byRfcId.has(mid)) {
+        byRfcId.set(mid, i)
+      }
+    }
+
+    const byRefToken = new Map<string, number>()
+    for (let i = 0; i < n; i++) {
+      const h = messages[i].header
+      const tokens = [h.in_reply_to, ...h.references]
+        .map(normMsgId)
+        .filter((t): t is string => t != null)
+      for (const tok of tokens) {
+        const direct = byRfcId.get(tok)
+        if (direct != null) union(i, direct)
+        const prev = byRefToken.get(tok)
+        if (prev != null) {
+          union(i, prev)
+        } else {
+          byRefToken.set(tok, i)
+        }
+      }
+    }
+
+    const buckets = new Map<number, MessageSummary[]>()
+    for (let i = 0; i < n; i++) {
+      const root = find(i)
+      const list = buckets.get(root) ?? []
+      list.push(messages[i])
+      buckets.set(root, list)
+    }
+
+    const groups: ThreadGroup[] = []
+    for (const baseItems of buckets.values()) {
+      const seenIds = new Set(baseItems.map((m) => m.id))
+      const combined = [...baseItems]
+
+      // Merge any sent replies whose In-Reply-To points into this thread.
+      for (const m of baseItems) {
+        const rawMid = m.header.message_id
+        if (!rawMid) continue
+        const reps = sentReplies.get(rawMid) ?? []
+        for (const rep of reps) {
+          if (!seenIds.has(rep.id)) {
+            seenIds.add(rep.id)
+            combined.push(rep)
+          }
+        }
+      }
+
+      combined.sort((a, b) => (a.header.date ?? 0) - (b.header.date ?? 0))
+      const latest = combined[combined.length - 1]
+      const names: string[] = []
+      for (const m of combined) {
+        const label = senderLabel(m)
+        if (!names.includes(label)) names.push(label)
+      }
+
+      groups.push({
+        key: `t-${combined[0].id}`,
+        items: combined,
+        latest,
+        isThread: combined.length >= 2,
+        hasUnread: combined.some((m) => !isSeen(m)),
+        hasFlagged: combined.some((m) => isFlagged(m)),
+        hasAttachments: combined.some((m) => m.has_attachments),
+        participants: names.join(', '),
+      })
+    }
+
+    groups.sort((a, b) => (b.latest.header.date ?? 0) - (a.latest.header.date ?? 0))
+    return groups
+  })
+
+  function toggleThread(key: string) {
+    const next = new Set(expandedThreadKeys)
+    if (next.has(key)) {
+      next.delete(key)
+    } else {
+      next.add(key)
+    }
+    expandedThreadKeys = next
+  }
 </script>
 
 <section class="list" aria-label={title}>
@@ -61,68 +201,184 @@
   {/if}
 
   <ul bind:this={listEl} class:chat-list={chatMode} role="listbox" aria-label={title}>
-    {#each messages as m (m.id)}
-      {@const unread = !isSeen(m)}
-      {@const isOutgoing = m.folder_role === 'sent'}
-      {@const logo = (void logoVersion, !isOutgoing && m.header.dmarc_pass ? getBrandLogo(m.header.from_addr) : null)}
-      {@const replies = !chatMode && m.header.message_id ? (sentReplies.get(m.header.message_id) ?? []) : []}
-      <li
-        role="option"
-        aria-selected={m.id === selectedId}
-        data-id={m.id}
-        class:selected={m.id === selectedId}
-        class:unread
-        class:case-highlighted={highlightedIds.includes(m.id)}
-        class:chat-in={chatMode && !isOutgoing}
-        class:chat-out={chatMode && isOutgoing}
-      >
-        <button class:has-brand={!!logo} onclick={() => onselect(m.id)}>
-          {#if logo?.bg}
-            <span class="brand-wash" style:--brand-wash={logo.bg} aria-hidden="true"></span>
-          {/if}
-          <span class="dot" aria-label={unread ? 'ungelesen' : undefined}></span>
-          {#if logo}
-            <span class="brand" aria-hidden="true">
-              <img
-                src={logo.dataUrl}
-                alt=""
-                class:opaque={!logo.padded}
-                style:transform={logo.scale !== 1 ? `scale(${logo.scale})` : undefined}
-              />
+    {#if chatMode}
+      {#each messages as m (m.id)}
+        {@const unread = !isSeen(m)}
+        {@const isOutgoing = m.folder_role === 'sent'}
+        {@const logo = (void logoVersion, !isOutgoing && m.header.dmarc_pass ? getBrandLogo(m.header.from_addr) : null)}
+        <li
+          role="option"
+          aria-selected={m.id === selectedId}
+          data-id={m.id}
+          class:selected={m.id === selectedId}
+          class:unread
+          class:case-highlighted={highlightedIds.includes(m.id)}
+          class:chat-in={!isOutgoing}
+          class:chat-out={isOutgoing}
+        >
+          <button class:has-brand={!!logo} onclick={() => onselect(m.id)}>
+            {#if logo?.bg}
+              <span class="brand-wash" style:--brand-wash={logo.bg} aria-hidden="true"></span>
+            {/if}
+            <span class="dot" aria-label={unread ? 'ungelesen' : undefined}></span>
+            {#if logo}
+              <span class="brand" aria-hidden="true">
+                <img
+                  src={logo.dataUrl}
+                  alt=""
+                  class:opaque={!logo.padded}
+                  style:transform={logo.scale !== 1 ? `scale(${logo.scale})` : undefined}
+                />
+              </span>
+            {/if}
+            <span class="from">
+              {#if isOutgoing}Du · Gesendet{:else}{m.header.from_name ?? m.header.from_addr ?? 'Unbekannt'}{/if}
             </span>
-          {/if}
-          <span class="from">
-            {#if chatMode && isOutgoing}Du · Gesendet{:else}{m.header.from_name ?? m.header.from_addr ?? 'Unbekannt'}{/if}
-          </span>
-          <time>
-            {#if isFlagged(m)}<span class="flag" title="Markiert"><Icon name="star" size={12} filled /></span>{/if}
-            {listDate(m.header.date)}
-          </time>
-          <span class="subject">
-            {#if m.has_attachments}<Icon name="paperclip" size={13} />{/if}
-            {m.header.subject ?? '(kein Betreff)'}{#if m.preview}<span class="preview"> – {m.preview}</span>{/if}
-          </span>
-          {#if showAccount && !chatMode}<span class="account">{accountLabel(m.account_email)}</span>{/if}
-        </button>
+            <time>
+              {#if isFlagged(m)}<span class="flag" title="Markiert"><Icon name="star" size={12} filled /></span>{/if}
+              {listDate(m.header.date)}
+            </time>
+            <span class="subject">
+              {#if m.has_attachments}<Icon name="paperclip" size={13} />{/if}
+              {m.header.subject ?? '(kein Betreff)'}{#if m.preview}<span class="preview"> – {m.preview}</span>{/if}
+            </span>
+          </button>
+        </li>
+      {/each}
+    {:else}
+      {#each threadGroups as group (group.key)}
+        {@const m = group.latest}
+        {@const containsSelected = group.items.some((item) => item.id === selectedId)}
+        {@const isExpanded = group.isThread && (expandedThreadKeys.has(group.key) || containsSelected)}
+        {@const isHighlighted = group.items.some((item) => highlightedIds.includes(item.id))}
+        {@const brandSource = group.items.find((item) => item.folder_role !== 'sent' && item.header.dmarc_pass) ?? m}
+        {@const logo = (void logoVersion, brandSource.folder_role !== 'sent' && brandSource.header.dmarc_pass ? getBrandLogo(brandSource.header.from_addr) : null)}
 
-        {#if replies.length > 0}
-          <div class="inline-replies">
-            {#each replies as rep (rep.id)}
-              <button
-                type="button"
-                class="inline-reply"
-                class:selected={rep.id === selectedId}
-                onclick={() => onselect(rep.id)}
-                title="Eigene Antwort öffnen"
-              >
-                <span class="reply-tag">Du · {listDate(rep.header.date)}</span>
-                <span class="reply-text">{rep.preview ?? rep.header.subject ?? '(Antwort)'}</span>
-              </button>
-            {/each}
-          </div>
+        {#if !group.isThread}
+          {@const unread = !isSeen(m)}
+          <li
+            role="option"
+            aria-selected={m.id === selectedId}
+            data-id={m.id}
+            class:selected={m.id === selectedId}
+            class:unread
+            class:case-highlighted={isHighlighted}
+          >
+            <button class:has-brand={!!logo} onclick={() => onselect(m.id)}>
+              {#if logo?.bg}
+                <span class="brand-wash" style:--brand-wash={logo.bg} aria-hidden="true"></span>
+              {/if}
+              <span class="dot" aria-label={unread ? 'ungelesen' : undefined}></span>
+              {#if logo}
+                <span class="brand" aria-hidden="true">
+                  <img
+                    src={logo.dataUrl}
+                    alt=""
+                    class:opaque={!logo.padded}
+                    style:transform={logo.scale !== 1 ? `scale(${logo.scale})` : undefined}
+                  />
+                </span>
+              {/if}
+              <span class="from">{m.header.from_name ?? m.header.from_addr ?? 'Unbekannt'}</span>
+              <time>
+                {#if isFlagged(m)}<span class="flag" title="Markiert"><Icon name="star" size={12} filled /></span>{/if}
+                {listDate(m.header.date)}
+              </time>
+              <span class="subject">
+                {#if m.has_attachments}<Icon name="paperclip" size={13} />{/if}
+                {m.header.subject ?? '(kein Betreff)'}{#if m.preview}<span class="preview"> – {m.preview}</span>{/if}
+              </span>
+              {#if showAccount}<span class="account">{accountLabel(m.account_email)}</span>{/if}
+            </button>
+          </li>
+        {:else if !isExpanded}
+          <li
+            class="thread-collapsed"
+            class:unread={group.hasUnread}
+            class:case-highlighted={isHighlighted}
+          >
+            <button
+              type="button"
+              class:has-brand={!!logo}
+              onclick={() => toggleThread(group.key)}
+              aria-expanded={false}
+              title="Unterhaltung aufklappen"
+            >
+              {#if logo?.bg}
+                <span class="brand-wash" style:--brand-wash={logo.bg} aria-hidden="true"></span>
+              {/if}
+              <span class="dot" aria-label={group.hasUnread ? 'ungelesen' : undefined}></span>
+              {#if logo}
+                <span class="brand" aria-hidden="true">
+                  <img
+                    src={logo.dataUrl}
+                    alt=""
+                    class:opaque={!logo.padded}
+                    style:transform={logo.scale !== 1 ? `scale(${logo.scale})` : undefined}
+                  />
+                </span>
+              {/if}
+              <span class="from">{group.participants}</span>
+              <time>
+                {#if group.hasFlagged}<span class="flag" title="Markiert"><Icon name="star" size={12} filled /></span>{/if}
+                {listDate(m.header.date)}
+                <span class="thread-chevron" aria-hidden="true"><Icon name="chevronRight" size={13} /></span>
+              </time>
+              <span class="subject">
+                {#if group.hasAttachments}<Icon name="paperclip" size={13} />{/if}
+                {cleanSubject(m.header.subject)}{#if m.preview}<span class="preview"> – {m.preview}</span>{/if}
+              </span>
+              {#if showAccount}<span class="account">{accountLabel(m.account_email)}</span>{/if}
+            </button>
+            <div class="thread-stack-lip" aria-hidden="true"></div>
+          </li>
+        {:else}
+          <li class="thread-frame" class:case-highlighted={isHighlighted}>
+            <button
+              type="button"
+              class="thread-head"
+              onclick={() => toggleThread(group.key)}
+              aria-expanded={true}
+              title="Unterhaltung zuklappen"
+            >
+              <Icon name="chevronDown" size={14} />
+              <span class="thread-title">{cleanSubject(m.header.subject)}</span>
+              <span class="thread-participants">{group.participants}</span>
+            </button>
+            <div class="thread-messages">
+              {#each group.items as item (item.id)}
+                {@const itemUnread = !isSeen(item)}
+                {@const isOutgoing = item.folder_role === 'sent'}
+                <button
+                  type="button"
+                  data-id={item.id}
+                  class="thread-msg"
+                  class:in={!isOutgoing}
+                  class:out={isOutgoing}
+                  class:selected={item.id === selectedId}
+                  class:unread={itemUnread}
+                  onclick={() => onselect(item.id)}
+                >
+                  <div class="thread-msg-top">
+                    <span class="thread-msg-sender">
+                      {#if itemUnread}<span class="inline-dot" aria-label="ungelesen"></span>{/if}
+                      {isOutgoing ? 'Du · Gesendet' : (item.header.from_name ?? item.header.from_addr ?? 'Unbekannt')}
+                    </span>
+                    <time>
+                      {#if item.has_attachments}<Icon name="paperclip" size={11} />{/if}
+                      {listDate(item.header.date)}
+                    </time>
+                  </div>
+                  <div class="thread-msg-preview">
+                    {item.preview ?? item.header.subject ?? '(kein Text)'}
+                  </div>
+                </button>
+              {/each}
+            </div>
+          </li>
         {/if}
-      </li>
-    {/each}
+      {/each}
+    {/if}
   </ul>
 </section>
 
@@ -166,7 +422,7 @@
     overflow-y: auto;
     flex: 1;
   }
-  li button {
+  li > button:not(.thread-head) {
     position: relative;
     overflow: hidden;
     width: 100%;
@@ -184,7 +440,7 @@
     background: none;
     text-align: left;
   }
-  li button.has-brand {
+  li > button.has-brand {
     grid-template-columns: 10px 30px 1fr auto;
     grid-template-areas:
       'dot brand from date'
@@ -204,7 +460,7 @@
       transparent 180px
     );
   }
-  li.selected button .brand-wash {
+  li.selected > button .brand-wash {
     left: 3px;
   }
   .brand {
@@ -239,10 +495,10 @@
     position: relative;
     z-index: 1;
   }
-  li button:hover {
+  li > button:not(.thread-head):hover {
     background: var(--hover);
   }
-  li.selected button {
+  li.selected > button {
     background: var(--selection);
     box-shadow: inset 3px 0 0 var(--highlight);
   }
@@ -269,13 +525,16 @@
   time {
     grid-area: date;
     justify-self: end;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
     font-size: 12px;
     color: var(--text-muted);
     white-space: nowrap;
   }
   .flag {
     color: var(--ochre);
-    margin-right: 4px;
+    margin-right: 2px;
     vertical-align: -1px;
   }
   .unread time {
@@ -328,10 +587,147 @@
   .back-btn:hover {
     background: var(--hover);
   }
-  li.case-highlighted > button {
+  li.case-highlighted > button:not(.thread-head),
+  li.thread-frame.case-highlighted {
     background: color-mix(in srgb, var(--highlight) 12%, transparent);
     box-shadow: inset 3px 0 0 var(--highlight);
   }
+
+  /* Collapsed thread: subtle stacked-card lip below the row, no counter */
+  .thread-collapsed {
+    margin-bottom: 4px;
+  }
+  .thread-collapsed > button {
+    border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+    background: var(--surface-raised);
+  }
+  .thread-chevron {
+    display: inline-flex;
+    color: var(--text-muted);
+  }
+  .thread-stack-lip {
+    height: 3px;
+    margin: 0 8px;
+    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    border-bottom-left-radius: 6px;
+    border-bottom-right-radius: 6px;
+    background: var(--surface);
+  }
+
+  /* Expanded thread: enclosing frame with chat-aligned messages */
+  .thread-frame {
+    margin: 6px 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    overflow: hidden;
+  }
+  .thread-head {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    border: 0;
+    border-bottom: 1px solid var(--border);
+    background: none;
+    text-align: left;
+    color: var(--text-muted);
+  }
+  .thread-head:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
+  .thread-title {
+    font-size: 12px;
+    font-weight: 650;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .thread-participants {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 40%;
+  }
+  .thread-messages {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+  }
+  .thread-msg {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    text-align: left;
+  }
+  .thread-msg.in {
+    max-width: 92%;
+    margin-right: auto;
+    background: var(--surface-raised);
+  }
+  .thread-msg.out {
+    max-width: 86%;
+    margin-left: auto;
+    background: var(--selection);
+  }
+  .thread-msg:hover {
+    border-color: var(--highlight);
+  }
+  .thread-msg.selected {
+    border-color: var(--highlight);
+    box-shadow: inset 3px 0 0 var(--highlight);
+  }
+  .thread-msg-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 11px;
+  }
+  .thread-msg-sender {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-weight: 600;
+    color: var(--text);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .thread-msg.unread .thread-msg-sender {
+    font-weight: 700;
+  }
+  .inline-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--unread);
+    flex-shrink: 0;
+  }
+  .thread-msg-preview {
+    font-size: 12px;
+    color: var(--text-muted);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  /* Case chat mode */
   ul.chat-list {
     display: flex;
     flex-direction: column;
@@ -349,45 +745,5 @@
     margin-left: auto;
     background: var(--selection);
     border: 1px solid var(--border);
-  }
-  .inline-replies {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 4px;
-    margin: 2px 6px 6px 34px;
-  }
-  .inline-reply {
-    width: auto !important;
-    max-width: 88%;
-    display: flex !important;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 1px;
-    padding: 5px 10px !important;
-    border-radius: var(--radius);
-    background: var(--surface) !important;
-    border: 1px solid var(--border) !important;
-    text-align: right !important;
-  }
-  .inline-reply:hover {
-    background: var(--hover) !important;
-  }
-  .inline-reply.selected {
-    background: var(--selection) !important;
-    border-color: var(--highlight) !important;
-  }
-  .reply-tag {
-    font-size: 10px;
-    font-weight: 650;
-    color: var(--accent-text);
-  }
-  .reply-text {
-    font-size: 12px;
-    color: var(--text-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 100%;
   }
 </style>
