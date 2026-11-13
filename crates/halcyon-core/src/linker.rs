@@ -278,8 +278,10 @@ pub fn run(store: &mut Store, now: i64) -> Result<LinkReport> {
         .map(|a| a.email.to_ascii_lowercase())
         .collect();
     store.in_transaction(|store| {
-        store.prune_auto_conversations()?;
-        let mut report = LinkReport::default();
+        let mut report = LinkReport {
+            closed: store.prune_auto_conversations()?,
+            ..LinkReport::default()
+        };
         loop {
             let batch = store.case_scan_batch(now - SCAN_WINDOW_SECS, BATCH)?;
             if batch.is_empty() {
@@ -294,7 +296,7 @@ pub fn run(store: &mut Store, now: i64) -> Result<LinkReport> {
                 break;
             }
         }
-        report.closed = store.close_stale_cases(now - STALE_AFTER_SECS)?;
+        report.closed += store.close_stale_cases(now - STALE_AFTER_SECS)?;
         Ok(report)
     })
 }
@@ -739,10 +741,20 @@ mod tests {
             NOW - 2 * DAY,
         );
         question.from_name = Some("La Piazza".into());
-        let mut answer = mail(2, "Re: Tischreservierung Freitag", "me@example.org", NOW - DAY);
+        let mut answer = mail(
+            2,
+            "Re: Tischreservierung Freitag",
+            "me@example.org",
+            NOW - DAY,
+        );
         answer.in_reply_to = Some("m1@example.org".into());
         answer.to = vec!["info@restaurant.example".into()];
-        let mut back = mail(3, "Re: Re: Tischreservierung Freitag", "info@restaurant.example", NOW);
+        let mut back = mail(
+            3,
+            "Re: Re: Tischreservierung Freitag",
+            "info@restaurant.example",
+            NOW,
+        );
         back.in_reply_to = Some("m2@example.org".into());
         back.references = vec!["m1@example.org".into(), "m2@example.org".into()];
         store.insert_messages(inbox, &[question, back]).unwrap();
@@ -781,5 +793,42 @@ mod tests {
             store.list_cases(false).unwrap()[0].case.status,
             CaseStatus::Done
         );
+    }
+
+    #[test]
+    fn sent_replies_and_one_time_prune() {
+        let (mut store, inbox, sent) = store_with_inbox();
+        let question = mail(1, "Tischreservierung", "info@restaurant.example", NOW - DAY);
+        let mut answer = mail(2, "Re: Tischreservierung", "me@example.org", NOW);
+        answer.in_reply_to = Some("m1@example.org".into());
+        store.insert_messages(inbox, &[question]).unwrap();
+        store.insert_messages(sent, &[answer]).unwrap();
+        let replies = store.sent_replies_to(&["m1@example.org".into()]).unwrap();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(
+            replies[0].header.subject.as_deref(),
+            Some("Re: Tischreservierung")
+        );
+
+        // A conversation case left from the earlier linker is removed once.
+        let c = store
+            .create_case(&NewCase {
+                title: "Alt".into(),
+                counterparty: "X".into(),
+                domain: None,
+                kind: CaseKind::Conversation,
+                status: CaseStatus::NeedsYou,
+                next_step: String::new(),
+                due_at: None,
+                due_label: None,
+                amount_cents: None,
+                currency: None,
+                reason: String::new(),
+            })
+            .unwrap();
+        assert_eq!(store.prune_auto_conversations().unwrap(), 1);
+        assert!(store.get_case(c.case.id).unwrap().is_none());
+        assert_eq!(store.prune_auto_conversations().unwrap(), 0);
+        let _ = run(&mut store, NOW).unwrap();
     }
 }

@@ -219,3 +219,16 @@ export async function onCasesChanged(handler: () => void): Promise<() => void> {
   if (!native) return () => {}
   return listen('cases-changed', () => handler())
 }
+
+/** Your own sent replies to these Message-IDs (to show whole threads). */
+export function sentReplies(messageIds: string[]): Promise<MessageSummary[]> {
+  if (!native) {
+    const set = new Set(messageIds)
+    return Promise.resolve(
+      mock
+        .allMockMessages()
+        .filter((m) => m.folder_role === 'sent' && m.header.in_reply_to != null && set.has(m.header.in_reply_to)),
+    )
+  }
+  return invoke('sent_replies', { messageIds })
+}
