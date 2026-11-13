@@ -593,12 +593,12 @@
     box-shadow: inset 3px 0 0 var(--highlight);
   }
 
-  /* Collapsed thread: subtle stacked-card lip below the row, no counter */
+  /* Collapsed thread: stacked-card edge below the row, no counter */
   .thread-collapsed {
-    margin-bottom: 4px;
+    margin: 3px 0 6px;
   }
   .thread-collapsed > button {
-    border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+    border: 1px solid var(--border);
     background: var(--surface-raised);
   }
   .thread-chevron {
@@ -606,8 +606,8 @@
     color: var(--text-muted);
   }
   .thread-stack-lip {
-    height: 3px;
-    margin: 0 8px;
+    height: 5px;
+    margin: 2px 10px 0;
     border-left: 1px solid var(--border);
     border-right: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
