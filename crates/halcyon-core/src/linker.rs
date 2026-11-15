@@ -31,8 +31,8 @@ use crate::sources::{derive_source_key, normalize_subject_pattern};
 use crate::store::{ScanMessage, Store};
 
 /// Only mail from this period is looked at, so a first run does not fill
-/// the board with years-old orders.
-pub const SCAN_WINDOW_SECS: i64 = 120 * 86_400;
+/// the board with years-old orders (1 year covers a full tax/expense cycle).
+pub const SCAN_WINDOW_SECS: i64 = 365 * 86_400;
 
 /// Open cases without news for this long are considered finished.
 pub const STALE_AFTER_SECS: i64 = 21 * 86_400;
@@ -61,6 +61,7 @@ pub enum OrderStep {
     Placed,
     Shipped,
     Delivered,
+    Cancelled,
 }
 
 impl OrderStep {
@@ -70,6 +71,7 @@ impl OrderStep {
             OrderStep::Placed => "order.placed",
             OrderStep::Shipped => "order.shipped",
             OrderStep::Delivered => "order.delivered",
+            OrderStep::Cancelled => "order.cancelled",
         }
     }
 
@@ -79,6 +81,7 @@ impl OrderStep {
             OrderStep::Placed => "Bestellt",
             OrderStep::Shipped => "Versandt",
             OrderStep::Delivered => "Zugestellt",
+            OrderStep::Cancelled => "Storniert",
         }
     }
 
@@ -86,7 +89,7 @@ impl OrderStep {
         match self {
             OrderStep::Placed => CaseEventPhase::Start,
             OrderStep::Invoice | OrderStep::Shipped => CaseEventPhase::Update,
-            OrderStep::Delivered => CaseEventPhase::Done,
+            OrderStep::Delivered | OrderStep::Cancelled => CaseEventPhase::Done,
         }
     }
 
@@ -96,20 +99,27 @@ impl OrderStep {
             "order.placed" => OrderStep::Placed,
             "order.shipped" => OrderStep::Shipped,
             "order.delivered" => OrderStep::Delivered,
+            "order.cancelled" => OrderStep::Cancelled,
             _ => return None,
         })
     }
 }
 
+static RE_CANCELLED_ORDER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\bartikel erfolgreich storniert\b|\bbestellung(?:\s+wurde)?\s+storniert\b|\bstornierungsbestätigung\b|\border\s+cancell?ed\b",
+    )
+    .unwrap()
+});
 static RE_DELIVERED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)\bzugestellt\b|\bdelivered\b|ablageort|wurde geliefert|ist angekommen|has arrived|abholbereit|ready for pickup",
+        r"(?i)\bzugestellt\b|\bgeliefert\b|\bdelivered\b|ablageort|wurde geliefert|ist angekommen|has arrived|abholbereit|ready for pickup",
     )
     .unwrap()
 });
 static RE_SHIPPED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)\bversendet\b|\bversandt\b|verschickt|versandbestätigung|ist unterwegs|auf dem weg zu|\bshipped\b|dispatched|out for delivery|kommt heute|kommt morgen|paketupdate|lieferstatus|sendungsstatus|aktualisierung der lieferung|(?:ihre|deine|amazon)\s+sendung|ihr (?:dhl |dpd |gls |hermes |ups )?paket|bald ist ihr",
+        r"(?i)\bversendet\b|\bversandt\b|verschickt|versandbestätigung|\bin zustellung\b|ist unterwegs|auf dem weg zu|\bshipped\b|dispatched|out for delivery|kommt heute|kommt morgen|paketupdate|lieferstatus|sendungsstatus|aktualisierung der lieferung|(?:ihre|deine|amazon)\s+sendung|ihr (?:dhl |dpd |gls |hermes |ups )?paket|bald ist ihr",
     )
     .unwrap()
 });
@@ -178,7 +188,9 @@ pub struct OrderSignal {
 /// Classifies a mail as an order step, from the subject only. Bodies are
 /// full of words like "Versand" and "Rechnung" in footers and adverts.
 pub fn order_step(subject: &str) -> Option<OrderStep> {
-    if RE_DELIVERED.is_match(subject) {
+    if RE_CANCELLED_ORDER.is_match(subject) {
+        Some(OrderStep::Cancelled)
+    } else if RE_DELIVERED.is_match(subject) {
         Some(OrderStep::Delivered)
     } else if RE_SHIPPED.is_match(subject) {
         Some(OrderStep::Shipped)
@@ -281,6 +293,7 @@ pub fn run(store: &mut Store, now: i64) -> Result<LinkReport> {
         .into_iter()
         .map(|a| a.email.to_ascii_lowercase())
         .collect();
+    let correspondents = store.sent_recipient_addresses()?;
     let mut report = LinkReport::default();
     loop {
         let batch = store.case_scan_batch(now - SCAN_WINDOW_SECS, BATCH)?;
@@ -289,7 +302,7 @@ pub fn run(store: &mut Store, now: i64) -> Result<LinkReport> {
         }
         store.in_transaction(|store| {
             for m in &batch {
-                link_message(store, m, &own, &mut report)?;
+                link_message(store, m, &own, &correspondents, &mut report)?;
                 store.mark_case_scanned(m.id, m.body_text.is_some())?;
                 report.scanned += 1;
             }
@@ -319,6 +332,7 @@ fn link_message(
     store: &Store,
     m: &ScanMessage,
     own: &HashSet<String>,
+    correspondents: &HashSet<String>,
     report: &mut LinkReport,
 ) -> Result<()> {
     let subject = m.subject.as_deref().unwrap_or("");
@@ -327,37 +341,7 @@ fn link_message(
     let top_amount = amounts.first();
     let due_info = find_due_info(subject, body, m.date);
     let bkeys = find_business_keys(subject, body);
-
     let dir = direction(m, own);
-    if dir == EventDirection::In
-        && m.in_reply_to.is_none()
-        && let Some(source_key) = derive_source_key(m.from_addr.as_deref(), m.list_id.as_deref())
-    {
-        let domain = m.from_addr.as_deref().and_then(base_domain);
-        let display_name = m
-            .from_name
-            .as_deref()
-            .filter(|n| !n.trim().is_empty())
-            .or(domain.as_deref())
-            .or(m.from_addr.as_deref())
-            .unwrap_or("Unbekannt");
-        let pattern = normalize_subject_pattern(subject);
-        let is_status = is_carrier(domain.as_deref()) || order_step(subject).is_some();
-        store.record_source_message(
-            m,
-            &source_key,
-            display_name,
-            if m.dmarc_pass {
-                domain.as_deref()
-            } else {
-                None
-            },
-            &pattern,
-            top_amount.map(|a| a.amount_cents),
-            top_amount.map(|a| a.currency.as_str()),
-            is_status,
-        )?;
-    }
 
     // The same mail can sit in several folders (Gmail labels, copies).
     if let Some(rfc) = m.message_id.as_deref()
@@ -385,11 +369,69 @@ fn link_message(
         return Ok(());
     }
 
-    if m.list_id.is_none() && dir == EventDirection::In {
-        let before_linked = report.linked;
+    let before_linked = report.linked;
+    if m.list_id.is_none() && dir == EventDirection::In && m.dmarc_pass {
         link_order(store, m, subject, body, report)?;
         if report.linked == before_linked {
             link_invoice_or_contract(store, m, subject, body, report)?;
+        }
+    }
+
+    // Record recurring informational sources only when the message passed DMARC,
+    // is not part of a case (order/contract/open invoice), not an order/shipment
+    // status mail, and not a personal conversation/reply.
+    let step = order_step(subject);
+    let is_order_or_parcel_mail = matches!(
+        step,
+        Some(
+            OrderStep::Placed
+                | OrderStep::Shipped
+                | OrderStep::Delivered
+                | OrderStep::Cancelled
+        )
+    );
+    let from_lower = m
+        .from_addr
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    let is_conversation_mail = m.in_reply_to.is_some()
+        || !m.references.is_empty()
+        || RE_REPLY_PREFIX.is_match(subject)
+        || correspondents.contains(&from_lower)
+        || from_lower.ends_with("@mail.kleinanzeigen.de");
+
+    if dir == EventDirection::In
+        && m.dmarc_pass
+        && report.linked == before_linked
+        && !is_order_or_parcel_mail
+        && !is_conversation_mail
+        && let Some(source_key) = derive_source_key(m.from_addr.as_deref(), m.list_id.as_deref())
+    {
+        let domain = m.from_addr.as_deref().and_then(base_domain);
+        if !is_carrier(domain.as_deref()) {
+            let display_name = m
+                .from_name
+                .as_deref()
+                .filter(|n| !n.trim().is_empty())
+                .or(domain.as_deref())
+                .or(m.from_addr.as_deref())
+                .unwrap_or("Unbekannt");
+            let pattern = normalize_subject_pattern(subject);
+            store.record_source_message(
+                m,
+                &source_key,
+                display_name,
+                if m.dmarc_pass {
+                    domain.as_deref()
+                } else {
+                    None
+                },
+                &pattern,
+                top_amount.map(|a| a.amount_cents),
+                top_amount.map(|a| a.currency.as_str()),
+                false,
+            )?;
         }
     }
     Ok(())
@@ -451,7 +493,7 @@ fn link_order(
                     !is_carrier(domain.as_deref())
                         && (!keys.numbers.is_empty() || item_key.is_some())
                 }
-                OrderStep::Delivered | OrderStep::Invoice => false,
+                OrderStep::Delivered | OrderStep::Cancelled | OrderStep::Invoice => false,
             };
             if !starts {
                 return Ok(());
@@ -726,6 +768,7 @@ fn refresh_order(store: &Store, case_id: i64) -> Result<()> {
         .filter(|s| *s != OrderStep::Invoice)
         .max();
     let (status, next) = match furthest {
+        Some(OrderStep::Cancelled) => (CaseStatus::Done, "Storniert"),
         Some(OrderStep::Delivered) => (CaseStatus::Done, "Zugestellt"),
         Some(OrderStep::Shipped) => (CaseStatus::Waiting, "Unterwegs · wartet auf Zustellung"),
         _ => (CaseStatus::Waiting, "Bestellt · wartet auf Versand"),
@@ -760,6 +803,18 @@ mod tests {
             (
                 "Zugestellt: 2 „innomaker 1080P USB2.0...“",
                 Some(OrderStep::Delivered),
+            ),
+            (
+                "Geliefert: \"CR-10S Pro Hotend CR-10S...“",
+                Some(OrderStep::Delivered),
+            ),
+            (
+                "In Zustellung: „CR-10S Pro Hotend CR-10S...“",
+                Some(OrderStep::Shipped),
+            ),
+            (
+                "Artikel erfolgreich storniert: „Raspberry 4596 Pi -...“",
+                Some(OrderStep::Cancelled),
             ),
             (
                 "Ihre Amazon Sendung liegt am gewünschten Ablageort",
@@ -1161,5 +1216,64 @@ mod tests {
         let report = run(&mut store, NOW).unwrap();
         assert_eq!(report.created, 0);
         assert!(store.list_cases(false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn orders_and_cancellations_do_not_appear_as_recurring_sources() {
+        let (mut store, inbox, _) = store_with_inbox();
+        store
+            .insert_messages(
+                inbox,
+                &[
+                    mail(
+                        1,
+                        "Bestellt: „CR-10S Pro Hotend CR-10S...“",
+                        "bestellbestaetigung@amazon.de",
+                        NOW - 5 * DAY,
+                    ),
+                    mail(
+                        2,
+                        "Versendet: „CR-10S Pro Hotend CR-10S...“",
+                        "versandbestaetigung@amazon.de",
+                        NOW - 4 * DAY,
+                    ),
+                    mail(
+                        3,
+                        "Geliefert: \"CR-10S Pro Hotend CR-10S...“",
+                        "order-update@amazon.de",
+                        NOW - 3 * DAY,
+                    ),
+                    mail(
+                        4,
+                        "Bestellt: „Raspberry 4596 Pi -...“",
+                        "bestellbestaetigung@amazon.de",
+                        NOW - 2 * DAY,
+                    ),
+                    mail(
+                        5,
+                        "Artikel erfolgreich storniert: „Raspberry 4596 Pi -...“",
+                        "order-update@amazon.de",
+                        NOW - DAY,
+                    ),
+                ],
+            )
+            .unwrap();
+
+        run(&mut store, NOW).unwrap();
+        assert!(store.list_sources(10).unwrap().is_empty());
+        let cases = store.list_cases(false).unwrap();
+        assert_eq!(cases.len(), 2);
+        let cancelled = cases
+            .iter()
+            .find(|c| c.case.title.contains("Raspberry"))
+            .unwrap();
+        assert_eq!(cancelled.case.status, CaseStatus::Done);
+        assert_eq!(cancelled.case.next_step, "Storniert");
+        let delivered = cases
+            .iter()
+            .find(|c| c.case.title.contains("CR-10S"))
+            .unwrap();
+        assert_eq!(delivered.case.status, CaseStatus::Done);
+        assert_eq!(delivered.case.next_step, "Zugestellt");
     }
 }

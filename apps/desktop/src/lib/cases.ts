@@ -45,6 +45,9 @@ export interface CaseItem {
   nextStep: string
   dueLabel?: string
   amount?: string
+  amountCents?: number
+  currency?: string
+  orderDate?: string
   reason: string
   keys: CaseKey[]
   events: CaseEvent[]
@@ -282,6 +285,14 @@ function formatAmount(cents: number, currency: string | null): string {
 }
 
 export function fromCaseView(v: CaseView): CaseItem {
+  const events = v.events.map((e) => ({
+    id: e.id,
+    day: localDay(e.occurred_at),
+    label: e.label,
+    phase: e.phase,
+    messageId: e.message_id ?? undefined,
+    direction: e.direction ?? undefined,
+  }))
   return {
     id: v.id,
     title: v.title,
@@ -292,18 +303,14 @@ export function fromCaseView(v: CaseView): CaseItem {
     nextStep: v.next_step,
     dueLabel: v.due_label ?? undefined,
     amount: v.amount_cents != null ? formatAmount(v.amount_cents, v.currency) : undefined,
+    amountCents: v.amount_cents ?? undefined,
+    currency: v.currency ?? undefined,
+    orderDate: events[0]?.day ?? localDay(v.created_at),
     reason: v.reason,
     keys: v.keys
       .filter((k) => !HIDDEN_KEYS.has(k.label))
       .map((k) => ({ label: k.label, value: k.value })),
-    events: v.events.map((e) => ({
-      id: e.id,
-      day: localDay(e.occurred_at),
-      label: e.label,
-      phase: e.phase,
-      messageId: e.message_id ?? undefined,
-      direction: e.direction ?? undefined,
-    })),
+    events,
     messageIds: v.message_ids,
   }
 }

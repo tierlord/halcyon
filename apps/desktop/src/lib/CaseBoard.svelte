@@ -32,8 +32,10 @@
   } = $props()
 
   let logoVersion = $state(0)
+  let activeTab = $state<'tasks' | 'orders' | 'sources'>('tasks')
   let showDone = $state(false)
-  let showSources = $state(false)
+  let orderSearch = $state('')
+  let orderYear = $state<string>('all')
   let openCategoryId = $state<string | null>(null)
 
   const today = dayOffset(0)
@@ -45,23 +47,115 @@
     })
   })
 
-  const needsYou = $derived(cases.filter((c) => c.status === 'needs_you'))
-  const waiting = $derived(cases.filter((c) => c.status === 'waiting'))
-  const doneCases = $derived(cases.filter((c) => c.status === 'done'))
+  const nonOrderCases = $derived(cases.filter((c) => c.kind !== 'order'))
+  const orderCases = $derived(cases.filter((c) => c.kind === 'order'))
+
+  const needsYou = $derived(nonOrderCases.filter((c) => c.status === 'needs_you'))
+  const waiting = $derived(nonOrderCases.filter((c) => c.status === 'waiting'))
+  const doneCases = $derived(nonOrderCases.filter((c) => c.status === 'done'))
   const anomalies = $derived(sources.filter((s) => s.anomaly != null))
   const recurringSources = $derived(sources.filter((s) => s.total_messages >= 2))
+
+  const activeOrders = $derived(
+    orderCases
+      .filter((c) => c.status !== 'done')
+      .sort((a, b) => (b.orderDate ?? '').localeCompare(a.orderDate ?? '')),
+  )
+  const archivedOrdersAll = $derived(
+    orderCases
+      .filter((c) => c.status === 'done')
+      .sort((a, b) => (b.orderDate ?? '').localeCompare(a.orderDate ?? '')),
+  )
+  const availableOrderYears = $derived.by(() => {
+    const years = new Set<string>()
+    for (const c of archivedOrdersAll) {
+      if (c.orderDate && c.orderDate.length >= 4) {
+        years.add(c.orderDate.slice(0, 4))
+      }
+    }
+    return Array.from(years).sort((a, b) => b.localeCompare(a))
+  })
+  const filteredArchivedOrders = $derived.by(() => {
+    const q = orderSearch.trim().toLowerCase()
+    return archivedOrdersAll.filter((c) => {
+      if (orderYear !== 'all' && (!c.orderDate || !c.orderDate.startsWith(orderYear))) {
+        return false
+      }
+      if (!q) return true
+      if (c.title.toLowerCase().includes(q) || c.counterparty.toLowerCase().includes(q)) {
+        return true
+      }
+      return c.keys.some((k) => k.value.toLowerCase().includes(q))
+    })
+  })
+  const archivedOrdersTotalEur = $derived.by(() => {
+    let cents = 0
+    let countWithAmount = 0
+    for (const c of filteredArchivedOrders) {
+      if (c.nextStep === 'Storniert') continue
+      if (c.amountCents != null && (c.currency ?? 'EUR') === 'EUR') {
+        cents += c.amountCents
+        countWithAmount += 1
+      }
+    }
+    if (countWithAmount === 0) return null
+    return new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(
+      cents / 100,
+    )
+  })
+
+  const tasksBadge = $derived(needsYou.length + anomalies.length + waiting.length)
+  const ordersBadge = $derived(
+    activeOrders.length > 0
+      ? `${activeOrders.length} offen · ${archivedOrdersAll.length}`
+      : `${archivedOrdersAll.length}`,
+  )
+  const sourcesBadge = $derived(recurringSources.length + categories.length)
+
   const summary = $derived.by(() => {
-    const open = waiting.length === 1 ? '1 Vorgang läuft' : `${waiting.length} Vorgänge laufen`
-    if (needsYou.length === 0) return open
-    const urgent =
-      needsYou.length === 1 ? '1 Vorgang braucht dich' : `${needsYou.length} Vorgänge brauchen dich`
-    return `${urgent} · ${open}`
+    const urgentCount = needsYou.length + anomalies.length
+    const openCount = waiting.length
+    const openOrders = activeOrders.length
+    const parts: string[] = []
+    if (urgentCount > 0) {
+      parts.push(
+        urgentCount === 1 ? '1 Aufgabe braucht dich' : `${urgentCount} Aufgaben brauchen dich`,
+      )
+    }
+    if (openCount > 0) {
+      parts.push(openCount === 1 ? '1 Vorgang wartet' : `${openCount} Vorgänge warten`)
+    }
+    if (openOrders > 0) {
+      parts.push(
+        openOrders === 1 ? '1 Bestellung unterwegs' : `${openOrders} Bestellungen unterwegs`,
+      )
+    }
+    return parts.length > 0 ? parts.join(' · ') : 'Alles auf dem Laufenden'
   })
 
   function formatEventDay(dayIso: string): string {
     if (dayIso === today) return 'Heute'
     if (dayIso === yesterday) return 'Gestern'
     return `${dayIso.slice(8, 10)}.${dayIso.slice(5, 7)}.`
+  }
+
+  function formatArchiveDate(dayIso?: string): string {
+    if (!dayIso || dayIso.length < 10) return '—'
+    return `${dayIso.slice(8, 10)}.${dayIso.slice(5, 7)}.${dayIso.slice(0, 4)}`
+  }
+
+  function primaryOrderNumber(c: CaseItem): string | null {
+    const found = c.keys.find(
+      (k) => k.label === 'Bestellnr.' || k.label === 'Nummer' || k.label === 'Rechnungsnr.',
+    )
+    return found ? found.value : null
+  }
+
+  function primaryOrderMessageId(c: CaseItem): number | null {
+    for (const ev of c.events) {
+      if (ev.messageId != null) return ev.messageId
+    }
+    return c.messageIds[0] ?? null
   }
 
   function logoFor(domain: string | null) {
@@ -106,7 +200,7 @@
         {#if c.amount && c.dueLabel}
           <span class="due-badge" class:urgent>{c.amount} · {c.dueLabel}</span>
         {:else if c.amount || c.dueLabel}
-          <span class="due-badge" class:urgent>{urgent ? (c.amount ?? c.dueLabel) : c.dueLabel}</span>
+          <span class="due-badge" class:urgent>{c.amount ?? c.dueLabel}</span>
         {/if}
       </div>
       <p class="next-step">{c.nextStep}</p>
@@ -193,114 +287,337 @@
 
 <section class="board" aria-label="Vorgänge">
   <header class="board-head">
-    <div>
-      <h1>Vorgänge</h1>
-      <p class="subtitle">
-        {summary}
-      </p>
+    <div class="board-head-top">
+      <div>
+        <h1>Vorgänge</h1>
+        <p class="subtitle">
+          {summary}
+        </p>
+      </div>
+      <nav class="board-tabs" aria-label="Bereiche in Vorgänge">
+        <button
+          type="button"
+          class="board-tab"
+          class:active={activeTab === 'tasks'}
+          onclick={() => (activeTab = 'tasks')}
+        >
+          <span>Aufgaben & Verträge</span>
+          <span class="tab-badge" class:urgent={needsYou.length + anomalies.length > 0}>
+            {tasksBadge}
+          </span>
+        </button>
+        <button
+          type="button"
+          class="board-tab"
+          class:active={activeTab === 'orders'}
+          onclick={() => (activeTab = 'orders')}
+        >
+          <span>Bestellungen & Einkäufe</span>
+          <span class="tab-badge">{ordersBadge}</span>
+        </button>
+        <button
+          type="button"
+          class="board-tab"
+          class:active={activeTab === 'sources'}
+          onclick={() => (activeTab = 'sources')}
+        >
+          <span>Wiederkehrende Infos</span>
+          <span class="tab-badge">{sourcesBadge}</span>
+        </button>
+      </nav>
     </div>
   </header>
 
   <div class="board-scroll">
-    {#if cases.length === 0 && categories.length === 0 && sources.length === 0}
-      <div class="empty">
-        <p class="empty-title">Noch keine Vorgänge</p>
-        <p class="empty-text">
-          Halcyon erkennt Bestellungen, Sendungen und Gespräche, in denen du geantwortet hast,
-          aus Mails der letzten vier Monate. Neue Mails werden laufend einsortiert.
-        </p>
-      </div>
-    {/if}
+    {#if activeTab === 'tasks'}
+      {#if needsYou.length === 0 && anomalies.length === 0 && waiting.length === 0 && doneCases.length === 0}
+        <div class="empty">
+          <p class="empty-title">Keine offenen Aufgaben oder Verträge</p>
+          <p class="empty-text">
+            Offene Rechnungen zum Überweisen, Vertragsänderungen, Kündigungen und ungewöhnliche
+            Abweichungen erscheinen hier.
+          </p>
+        </div>
+      {/if}
 
-    {#if needsYou.length > 0 || anomalies.length > 0}
-      <section class="group">
-        <h2 class="group-title urgent">Braucht dich</h2>
-        <div class="cards">
-          {#each anomalies as s (`anom-${s.id}`)}
-            <article class="card anomaly-card" class:needs-you={s.anomaly?.needs_you}>
-              <div class="card-main">
-                <div class="card-top">
-                  <Icon name="warning" size={16} />
-                  <span class="card-title">{s.display_name}</span>
-                  <span class="kind-chip">Anders als sonst</span>
-                  <span class="due-badge" class:urgent={s.anomaly?.needs_you}>
-                    {s.anomaly?.needs_you ? 'Prüfen' : 'Hinweis'}
-                  </span>
+      {#if needsYou.length > 0 || anomalies.length > 0}
+        <section class="group">
+          <h2 class="group-title urgent">Braucht dich</h2>
+          <div class="cards">
+            {#each anomalies as s (`anom-${s.id}`)}
+              <article class="card anomaly-card" class:needs-you={s.anomaly?.needs_you}>
+                <div class="card-main">
+                  <div class="card-top">
+                    <Icon name="warning" size={16} />
+                    <span class="card-title">{s.display_name}</span>
+                    <span class="kind-chip">Anders als sonst</span>
+                    <span class="due-badge" class:urgent={s.anomaly?.needs_you}>
+                      {s.anomaly?.needs_you ? 'Prüfen' : 'Hinweis'}
+                    </span>
+                  </div>
+                  <p class="next-step">{s.anomaly?.reason}</p>
+                  <p class="reason">
+                    <strong>Warum?</strong> Quelle <code>{s.source_key}</code> ({s.total_messages} Mails{s.median_interval_secs
+                      ? `, üblicher Abstand ~${Math.max(1, Math.round(s.median_interval_secs / 86400))} Tage`
+                      : ''})
+                  </p>
+                  <div class="card-actions">
+                    {#if s.latest_message_id != null}
+                      <button type="button" class="act-btn" onclick={() => onopenmessage(s.latest_message_id!)}>Mail öffnen</button>
+                    {/if}
+                    {#if ondismissanomaly}
+                      <button type="button" class="act-btn" onclick={() => ondismissanomaly(s.id)}>Verstanden</button>
+                    {/if}
+                  </div>
                 </div>
-                <p class="next-step">{s.anomaly?.reason}</p>
-                <p class="reason">
-                  <strong>Warum?</strong> Quelle <code>{s.source_key}</code> ({s.total_messages} Mails{s.median_interval_secs
-                    ? `, üblicher Abstand ~${Math.max(1, Math.round(s.median_interval_secs / 86400))} Tage`
-                    : ''})
-                </p>
-                <div class="card-actions">
-                  {#if s.latest_message_id != null}
-                    <button type="button" class="act-btn" onclick={() => onopenmessage(s.latest_message_id!)}>Mail öffnen</button>
-                  {/if}
-                  {#if ondismissanomaly}
-                    <button type="button" class="act-btn" onclick={() => ondismissanomaly(s.id)}>Verstanden</button>
-                  {/if}
-                </div>
+              </article>
+            {/each}
+            {#each needsYou as c (c.id)}
+              {@render caseCard(c, true)}
+            {/each}
+          </div>
+        </section>
+      {/if}
+
+      {#if waiting.length > 0}
+        <section class="group">
+          <h2 class="group-title">Wartet auf Rückmeldung</h2>
+          <div class="cards">
+            {#each waiting as c (c.id)}
+              {@render caseCard(c, false)}
+            {/each}
+          </div>
+        </section>
+      {/if}
+
+      {#if doneCases.length > 0}
+        <section class="group done-group">
+          <button type="button" class="collapse-btn" onclick={() => (showDone = !showDone)}>
+            <Icon name={showDone ? 'chevronDown' : 'chevronRight'} size={14} />
+            <span>Erledigte Vorgänge ({doneCases.length})</span>
+          </button>
+          {#if showDone}
+            <div class="cards muted-cards">
+              {#each doneCases as c (c.id)}
+                {@render caseCard(c, false)}
+              {/each}
+            </div>
+          {/if}
+        </section>
+      {/if}
+    {:else if activeTab === 'orders'}
+      {#if activeOrders.length === 0 && archivedOrdersAll.length === 0}
+        <div class="empty">
+          <p class="empty-title">Noch keine Bestellungen erkannt</p>
+          <p class="empty-text">
+            Bestell-, Versand- und Lieferbestätigungen werden hier automatisch mit Betrag und
+            Bestellnummer gebündelt.
+          </p>
+        </div>
+      {/if}
+
+      {#if activeOrders.length > 0}
+        <section class="group">
+          <h2 class="group-title">Unterwegs ({activeOrders.length})</h2>
+          <div class="cards">
+            {#each activeOrders as c (c.id)}
+              {@render caseCard(c, c.status === 'needs_you')}
+            {/each}
+          </div>
+        </section>
+      {/if}
+
+      {#if archivedOrdersAll.length > 0}
+        <section class="group">
+          <div class="archive-header">
+            <h2 class="group-title archive-title">
+              Bestell-Archiv ({filteredArchivedOrders.length}{filteredArchivedOrders.length !== archivedOrdersAll.length ? ` von ${archivedOrdersAll.length}` : ''})
+            </h2>
+            {#if archivedOrdersTotalEur}
+              <span class="archive-sum" title="Summe der angezeigten Bestellungen (ohne Stornierungen)">
+                Summe: <strong>{archivedOrdersTotalEur}</strong>
+              </span>
+            {/if}
+          </div>
+
+          <div class="archive-toolbar">
+            <input
+              type="search"
+              class="archive-search"
+              placeholder="Artikel, Shop oder Bestellnr. suchen…"
+              bind:value={orderSearch}
+            />
+            {#if availableOrderYears.length > 1}
+              <div class="mode-switch">
+                <button
+                  type="button"
+                  class="mode-btn"
+                  class:active={orderYear === 'all'}
+                  onclick={() => (orderYear = 'all')}
+                >
+                  Alle
+                </button>
+                {#each availableOrderYears as yr (yr)}
+                  <button
+                    type="button"
+                    class="mode-btn"
+                    class:active={orderYear === yr}
+                    onclick={() => (orderYear = yr)}
+                  >
+                    {yr}
+                  </button>
+                {/each}
               </div>
-            </article>
-          {/each}
-          {#each needsYou as c (c.id)}
-            {@render caseCard(c, true)}
-          {/each}
-        </div>
-      </section>
-    {/if}
+            {/if}
+          </div>
 
-    {#if waiting.length > 0}
-      <section class="group">
-        <h2 class="group-title">Wartet</h2>
-        <div class="cards">
-          {#each waiting as c (c.id)}
-            {@render caseCard(c, false)}
-          {/each}
-        </div>
-      </section>
-    {/if}
-
-    {#if categories.length > 0}
-      <section class="group aside-group">
-        <h2 class="group-title muted">Wiederkehrende Hinweise</h2>
-        <div class="aside-chips">
-          {#each categories as cat (cat.id)}
-            <div class="aside-chip-wrap">
-              <button
-                type="button"
-                class="aside-chip"
-                class:open={openCategoryId === cat.id}
-                onclick={() => (openCategoryId = openCategoryId === cat.id ? null : cat.id)}
+          <div class="order-archive-list" role="list">
+            {#each filteredArchivedOrders as c (c.id)}
+              {@const expanded = selectedCaseId === c.id}
+              {@const logo = logoFor(c.domain)}
+              {@const orderNo = primaryOrderNumber(c)}
+              {@const msgId = primaryOrderMessageId(c)}
+              {@const isCancelled = c.nextStep === 'Storniert'}
+              <article
+                class="order-row"
+                class:expanded
+                class:cancelled={isCancelled}
+                onmouseenter={() => onhovercase(c.id)}
+                onmouseleave={() => onhovercase(null)}
               >
-                <Icon name={cat.icon} size={14} />
-                <span>{cat.label}</span>
-                <span class="aside-count">{cat.count}</span>
-              </button>
-              {#if openCategoryId === cat.id}
-                <div class="aside-detail">
-                  <span>{cat.summary}</span>
-                  {#if cat.messageIds[0] != null}
-                    <button type="button" class="ev-open" onclick={() => onopenmessage(cat.messageIds[0])}>
-                      Neueste öffnen
+                <div class="order-row-line">
+                  <button
+                    type="button"
+                    class="order-row-main"
+                    onclick={() => onselectcase(expanded ? null : c.id)}
+                    aria-expanded={expanded}
+                  >
+                    <span class="order-date">{formatArchiveDate(c.orderDate)}</span>
+                    <span class="order-shop">
+                      {#if logo}
+                        <img src={logo.dataUrl} alt="" class="order-shop-logo" />
+                      {/if}
+                      <span class="order-shop-name">{c.counterparty}</span>
+                    </span>
+                    <span class="order-title-col">
+                      <span class="order-title" title={c.title}>{c.title}</span>
+                      {#if orderNo}
+                        <span class="order-no-chip">{orderNo}</span>
+                      {/if}
+                    </span>
+                    <span class="order-status-chip" class:cancelled={isCancelled}>
+                      {c.nextStep === 'Ohne Neuigkeiten abgeschlossen' ? 'Abgeschlossen' : c.nextStep}
+                    </span>
+                    <span class="order-amount" class:cancelled={isCancelled}>
+                      {c.amount ?? '—'}
+                    </span>
+                  </button>
+                  {#if msgId != null}
+                    <button
+                      type="button"
+                      class="ev-open order-open-btn"
+                      onclick={() => onopenmessage(msgId)}
+                      title="Bestell- oder Rechnungs-Mail öffnen"
+                    >
+                      Beleg / Mail
                     </button>
                   {/if}
                 </div>
-              {/if}
-            </div>
-          {/each}
-        </div>
-      </section>
-    {/if}
 
-    {#if recurringSources.length > 0}
-      <section class="group sources-group">
-        <button type="button" class="collapse-btn" onclick={() => (showSources = !showSources)}>
-          <Icon name={showSources ? 'chevronDown' : 'chevronRight'} size={14} />
-          <span>Wiederkehrende Quellen ({recurringSources.length})</span>
-        </button>
-        {#if showSources}
+                {#if expanded}
+                  <div class="card-details">
+                    {#if c.keys.length > 0}
+                      <div class="keys">
+                        {#each c.keys as k}
+                          <span class="key-chip"><strong>{k.label}:</strong> {k.value}</span>
+                        {/each}
+                      </div>
+                    {/if}
+                    <div class="detail-events" aria-label="Verlauf">
+                      {#each c.events as ev (ev.id)}
+                        <div class="detail-ev">
+                          <span class="ev-marker" class:due={ev.phase === 'due'} class:done={ev.phase === 'done'} aria-hidden="true"></span>
+                          <span class="ev-date" class:is-today={ev.day === today}>{formatArchiveDate(ev.day)}</span>
+                          <span class="ev-text">{ev.label}</span>
+                          {#if ev.messageId != null}
+                            <button
+                              type="button"
+                              class="ev-open"
+                              onclick={() => onopenmessage(ev.messageId!)}
+                            >
+                              Mail öffnen
+                            </button>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+                    <p class="reason"><strong>Warum?</strong> {c.reason}</p>
+                    <div class="card-actions">
+                      <button
+                        type="button"
+                        class="act-btn"
+                        title="Falsch erkannt: Karte entfernen, ohne Mails zu löschen"
+                        onclick={() => onchangestatus(c.id, 'rejected')}
+                      >
+                        Kein Vorgang
+                      </button>
+                      <button type="button" class="act-btn" onclick={() => onselectcase(null)}>
+                        Schließen
+                      </button>
+                    </div>
+                  </div>
+                {/if}
+              </article>
+            {/each}
+          </div>
+        </section>
+      {/if}
+    {:else if activeTab === 'sources'}
+      {#if categories.length === 0 && recurringSources.length === 0}
+        <div class="empty">
+          <p class="empty-title">Keine wiederkehrenden Info-Quellen</p>
+          <p class="empty-text">
+            Regelmäßige Info-Mails, Newsletter und Status-Abos erscheinen hier und lassen sich
+            pro Absender bündeln oder stummschalten.
+          </p>
+        </div>
+      {/if}
+
+      {#if categories.length > 0}
+        <section class="group aside-group">
+          <h2 class="group-title muted">Wiederkehrende Hinweise</h2>
+          <div class="aside-chips">
+            {#each categories as cat (cat.id)}
+              <div class="aside-chip-wrap">
+                <button
+                  type="button"
+                  class="aside-chip"
+                  class:open={openCategoryId === cat.id}
+                  onclick={() => (openCategoryId = openCategoryId === cat.id ? null : cat.id)}
+                >
+                  <Icon name={cat.icon} size={14} />
+                  <span>{cat.label}</span>
+                  <span class="aside-count">{cat.count}</span>
+                </button>
+                {#if openCategoryId === cat.id}
+                  <div class="aside-detail">
+                    <span>{cat.summary}</span>
+                    {#if cat.messageIds[0] != null}
+                      <button type="button" class="ev-open" onclick={() => onopenmessage(cat.messageIds[0])}>
+                        Neueste öffnen
+                      </button>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        </section>
+      {/if}
+
+      {#if recurringSources.length > 0}
+        <section class="group sources-group">
+          <h2 class="group-title muted">Wiederkehrende Quellen ({recurringSources.length})</h2>
           <div class="source-list">
             {#each recurringSources as s (s.id)}
               <div class="source-row">
@@ -343,43 +660,8 @@
               </div>
             {/each}
           </div>
-        {/if}
-      </section>
-    {/if}
-
-    {#if doneCases.length > 0}
-      <section class="group done-group">
-        <button type="button" class="collapse-btn" onclick={() => (showDone = !showDone)}>
-          <Icon name={showDone ? 'chevronDown' : 'chevronRight'} size={14} />
-          <span>Erledigt ({doneCases.length})</span>
-        </button>
-        {#if showDone}
-          <div class="cards muted-cards">
-            {#each doneCases as c (c.id)}
-              <article
-                class="card done-card"
-                onmouseenter={() => onhovercase(c.id)}
-                onmouseleave={() => onhovercase(null)}
-              >
-                <button
-                  type="button"
-                  class="card-main"
-                  onclick={() => onselectcase(selectedCaseId === c.id ? null : c.id)}
-                >
-                  <div class="card-top">
-                    <div class="card-titles">
-                      <span class="card-title">{c.title}</span>
-                      <span class="card-counterparty">{c.counterparty}</span>
-                    </div>
-                    <span class="due-badge">Erledigt</span>
-                  </div>
-                  <p class="next-step">{c.nextStep}</p>
-                </button>
-              </article>
-            {/each}
-          </div>
-        {/if}
-      </section>
+        </section>
+      {/if}
     {/if}
   </div>
 </section>
@@ -410,12 +692,65 @@
     overflow: hidden;
   }
   .board-head {
+    padding: 16px 20px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .board-head-top {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    padding: 16px 20px 10px;
-    border-bottom: 1px solid var(--border);
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .board-tabs {
+    display: inline-flex;
+    align-items: center;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 3px;
+    gap: 3px;
+  }
+  .board-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 0;
+    background: none;
+    padding: 5px 11px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    border-radius: calc(var(--radius) - 2px);
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .board-tab:hover {
+    color: var(--text);
+  }
+  .board-tab.active {
+    background: var(--surface-raised);
+    color: var(--text);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+  }
+  .tab-badge {
+    font-size: 11px;
+    font-weight: 650;
+    padding: 1px 6px;
+    border-radius: var(--radius-pill);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .board-tab.active .tab-badge {
+    background: var(--bg);
+    color: var(--text);
+  }
+  .tab-badge.urgent {
+    background: color-mix(in srgb, var(--ochre) 18%, var(--surface));
+    border-color: color-mix(in srgb, var(--ochre) 45%, var(--border));
+    color: var(--ochre);
   }
   h1 {
     margin: 0;
@@ -780,9 +1115,6 @@
     font-size: 12px;
     font-weight: 600;
   }
-  .done-card {
-    opacity: 0.72;
-  }
   .anomaly-card {
     border-color: var(--ochre);
   }
@@ -876,5 +1208,165 @@
   .mode-btn.active {
     background: var(--accent-fill);
     color: var(--on-accent-fill);
+  }
+  .archive-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+  .archive-title {
+    margin: 0;
+  }
+  .archive-sum {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .archive-sum strong {
+    color: var(--text);
+    font-weight: 650;
+  }
+  .archive-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .archive-search {
+    flex: 1;
+    min-width: 160px;
+    padding: 6px 10px;
+    font-size: 12px;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .archive-search:focus {
+    outline: 1px solid var(--highlight);
+    border-color: var(--highlight);
+  }
+  .order-archive-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .order-row {
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    transition: border-color 0.12s ease;
+  }
+  .order-row:hover,
+  .order-row.expanded {
+    border-color: var(--highlight);
+  }
+  .order-row.cancelled {
+    opacity: 0.72;
+  }
+  .order-row-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-right: 10px;
+  }
+  .order-row-main {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    background: none;
+    padding: 8px 12px;
+    display: grid;
+    grid-template-columns: 82px minmax(105px, 145px) minmax(0, 1fr) auto 86px;
+    align-items: center;
+    gap: 10px;
+    text-align: left;
+    cursor: pointer;
+    color: inherit;
+  }
+  .order-date {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .order-shop {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .order-shop-logo {
+    width: 16px;
+    height: 16px;
+    object-fit: contain;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+  .order-shop-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .order-title-col {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .order-title {
+    font-size: 13px;
+    font-weight: 550;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .order-no-chip {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: var(--radius-pill);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-subtle);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .order-status-chip {
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: var(--radius-pill);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+  .order-status-chip.cancelled {
+    color: var(--text-subtle);
+    border-style: dashed;
+  }
+  .order-amount {
+    font-size: 13px;
+    font-weight: 650;
+    color: var(--text);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .order-amount.cancelled {
+    text-decoration: line-through;
+    color: var(--text-subtle);
+    font-weight: 500;
+  }
+  .order-open-btn {
+    flex-shrink: 0;
+    white-space: nowrap;
   }
 </style>

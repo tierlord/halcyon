@@ -1720,6 +1720,33 @@ impl Store {
         Ok(out)
     }
 
+    /// Lowercased recipient addresses of messages sent by the user, used to
+    /// distinguish real human conversation partners from automated sources.
+    pub fn sent_recipient_addresses(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.to_addrs, m.cc_addrs
+             FROM messages m
+             JOIN folders f ON f.id = m.folder_id
+             WHERE f.role = 'sent'",
+        )?;
+        let mut out = std::collections::HashSet::new();
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (to_raw, cc_raw) = row?;
+            let to_vec: Vec<String> = serde_json::from_str(&to_raw).unwrap_or_default();
+            let cc_vec: Vec<String> = serde_json::from_str(&cc_raw).unwrap_or_default();
+            for addr in to_vec.into_iter().chain(cc_vec) {
+                let lower = addr.trim().to_ascii_lowercase();
+                if !lower.is_empty() {
+                    out.insert(lower);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn touch_case(&self, case_id: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE cases SET updated_at = unixepoch() WHERE id = ?1",
