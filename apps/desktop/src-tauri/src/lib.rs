@@ -656,6 +656,7 @@ async fn run_sync(app: &AppHandle, db_path: &std::path::Path) -> usize {
 struct MessageView {
     rendered: Rendered,
     attachments: Vec<Attachment>,
+    otp_code: Option<String>,
 }
 
 /// The raw message from the store, or downloaded now if it is not there yet.
@@ -713,23 +714,92 @@ async fn message_content(
     allow_remote: bool,
     dark: bool,
 ) -> CmdResult<MessageView> {
-    let trusted = if allow_remote {
-        true
-    } else {
+    let (trusted, subject) = {
         let store = state.store.lock().map_err(err)?;
         match store.message(id).map_err(err)? {
-            Some(msg) => match msg.header.from_addr.as_deref() {
-                Some(addr) => store.is_remote_sender_trusted(addr).map_err(err)?,
-                None => false,
-            },
-            None => false,
+            Some(msg) => {
+                let t = if allow_remote {
+                    true
+                } else {
+                    match msg.header.from_addr.as_deref() {
+                        Some(addr) => store.is_remote_sender_trusted(addr).map_err(err)?,
+                        None => false,
+                    }
+                };
+                (t, msg.header.subject)
+            }
+            None => (allow_remote, None),
         }
     };
     let raw = raw_message(&state, id).await?;
     let parsed = content::parse(&raw);
+    let otp_code = halcyon_core::extract::otp::find_codes(
+        subject.as_deref().unwrap_or(""),
+        parsed.text.as_deref().unwrap_or(""),
+    )
+    .into_iter()
+    .find(|c| c.confidence >= 0.7)
+    .map(|c| c.code);
     Ok(MessageView {
         rendered: content::render(&parsed, allow_remote || trusted, dark),
         attachments: parsed.attachments.clone(),
+        otp_code,
+    })
+}
+
+#[derive(Serialize)]
+struct MaskedPreview {
+    allowed: bool,
+    confidential_reason: Option<String>,
+    masked_subject: String,
+    masked_body: String,
+    replacements: usize,
+}
+
+/// Checks whether a message may leave the device for external analysis and
+/// returns its locally PII-masked subject and body.
+#[tauri::command]
+async fn mask_message_preview(state: State<'_, AppState>, id: i64) -> CmdResult<MaskedPreview> {
+    let msg = {
+        let store = state.store.lock().map_err(err)?;
+        store
+            .message(id)
+            .map_err(err)?
+            .ok_or("Nachricht nicht gefunden.")?
+    };
+    let raw = raw_message(&state, id).await?;
+    let parsed = content::parse(&raw);
+    let subject = msg.header.subject.as_deref().unwrap_or("");
+    let body_text = parsed
+        .text
+        .as_deref()
+        .or(msg.preview.as_deref())
+        .unwrap_or("");
+    let reason = halcyon_core::mask::check_confidential(subject, body_text, false);
+    let confidential_reason = reason.map(|r| match r {
+        halcyon_core::mask::ConfidentialityReason::OneTimeCode => {
+            "Enthält einen Einmalcode (2FA/TAN)".to_string()
+        }
+        halcyon_core::mask::ConfidentialityReason::PasswordOrSecret => {
+            "Enthält Zugangsdaten oder einen Passwort-Link".to_string()
+        }
+        halcyon_core::mask::ConfidentialityReason::ConfidentialCategory => {
+            "Vertrauliche Kategorie".to_string()
+        }
+    });
+    let mut known_names = Vec::new();
+    if let Some(name) = msg.header.from_name.as_deref()
+        && !name.trim().is_empty()
+    {
+        known_names.push(name.trim().to_string());
+    }
+    let masked = halcyon_core::mask::mask_message(subject, body_text, &known_names);
+    Ok(MaskedPreview {
+        allowed: confidential_reason.is_none(),
+        confidential_reason,
+        masked_subject: masked.subject,
+        masked_body: masked.body,
+        replacements: masked.redactions,
     })
 }
 
@@ -1229,6 +1299,82 @@ fn set_case_status(state: State<'_, AppState>, id: i64, status: String) -> CmdRe
         .map_err(err)
 }
 
+#[tauri::command]
+fn sources(state: State<'_, AppState>) -> CmdResult<Vec<halcyon_core::sources::SourceRecord>> {
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .list_sources(100)
+        .map_err(err)
+}
+
+#[tauri::command]
+fn set_source_mode(state: State<'_, AppState>, id: i64, mode: String) -> CmdResult<()> {
+    let mode: halcyon_core::sources::SourceMode = mode.parse().map_err(err)?;
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .set_source_mode(id, mode)
+        .map_err(err)
+}
+
+#[tauri::command]
+fn dismiss_source_anomaly(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .dismiss_source_anomaly(id)
+        .map_err(err)
+}
+
+#[derive(Serialize)]
+struct MessageTurnInfo {
+    message_id: i64,
+    status: String,
+    follow_up_due: bool,
+    reason: String,
+    confidence: f32,
+}
+
+#[tauri::command]
+fn thread_turns(
+    state: State<'_, AppState>,
+    message_ids: Vec<i64>,
+) -> CmdResult<Vec<MessageTurnInfo>> {
+    let now = now_unix_secs();
+    let pairs = state
+        .store
+        .lock()
+        .map_err(err)?
+        .assess_messages_turns(&message_ids, now)
+        .map_err(err)?;
+    Ok(pairs
+        .into_iter()
+        .map(|(message_id, t)| {
+            let (status, follow_up_due) = match t.status {
+                halcyon_core::turn::TurnStatus::NeedsYou => ("needs_you".to_string(), false),
+                halcyon_core::turn::TurnStatus::Waiting { follow_up_due } => {
+                    ("waiting".to_string(), follow_up_due)
+                }
+                halcyon_core::turn::TurnStatus::ReadingAlong => {
+                    ("reading_along".to_string(), false)
+                }
+                halcyon_core::turn::TurnStatus::Done => ("done".to_string(), false),
+            };
+            MessageTurnInfo {
+                message_id,
+                status,
+                follow_up_due,
+                reason: t.reason,
+                confidence: t.confidence,
+            }
+        })
+        .collect())
+}
+
 /// Your own replies to the listed mail, so the list can show whole threads.
 #[tauri::command]
 fn sent_replies(
@@ -1330,6 +1476,11 @@ pub fn run() {
             clear_brand_logos,
             cases,
             set_case_status,
+            sources,
+            set_source_mode,
+            dismiss_source_anomaly,
+            thread_turns,
+            mask_message_preview,
             messages_by_ids,
             sent_replies
         ])

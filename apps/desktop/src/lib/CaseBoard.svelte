@@ -3,25 +3,32 @@
   import Icon from './Icon.svelte'
   import { getBrandLogo, subscribeLogos } from './brandLogos'
   import { caseKindLabel, dayOffset, type AsideCategory, type CaseItem, type CaseStatus } from './cases'
+  import type { SourceMode, SourceRecord } from './types'
 
   let {
     cases,
     categories,
+    sources = [],
     selectedCaseId,
     hoveredCaseId,
     onselectcase,
     onhovercase,
     onopenmessage,
     onchangestatus,
+    onchangesourcemode,
+    ondismissanomaly,
   }: {
     cases: CaseItem[]
     categories: AsideCategory[]
+    sources?: SourceRecord[]
     selectedCaseId: number | null
     hoveredCaseId: number | null
     onselectcase: (id: number | null) => void
     onhovercase: (id: number | null) => void
     onopenmessage: (messageId: number) => void
     onchangestatus: (caseId: number, status: CaseStatus) => void
+    onchangesourcemode?: (sourceId: number, mode: SourceMode) => void
+    ondismissanomaly?: (sourceId: number) => void
   } = $props()
 
   let logoVersion = $state(0)
@@ -40,6 +47,8 @@
   const needsYou = $derived(cases.filter((c) => c.status === 'needs_you'))
   const waiting = $derived(cases.filter((c) => c.status === 'waiting'))
   const doneCases = $derived(cases.filter((c) => c.status === 'done'))
+  const anomalies = $derived(sources.filter((s) => s.anomaly != null))
+  const recurringSources = $derived(sources.filter((s) => s.total_messages >= 2))
   const summary = $derived.by(() => {
     const open = waiting.length === 1 ? '1 Vorgang läuft' : `${waiting.length} Vorgänge laufen`
     if (needsYou.length === 0) return open
@@ -93,7 +102,9 @@
           </div>
           <span class="card-counterparty">{c.counterparty}</span>
         </div>
-        {#if c.dueLabel || (urgent && c.amount)}
+        {#if c.amount && c.dueLabel}
+          <span class="due-badge" class:urgent>{c.amount} · {c.dueLabel}</span>
+        {:else if c.amount || c.dueLabel}
           <span class="due-badge" class:urgent>{urgent ? (c.amount ?? c.dueLabel) : c.dueLabel}</span>
         {/if}
       </div>
@@ -190,7 +201,7 @@
   </header>
 
   <div class="board-scroll">
-    {#if cases.length === 0 && categories.length === 0}
+    {#if cases.length === 0 && categories.length === 0 && sources.length === 0}
       <div class="empty">
         <p class="empty-title">Noch keine Vorgänge</p>
         <p class="empty-text">
@@ -200,10 +211,31 @@
       </div>
     {/if}
 
-    {#if needsYou.length > 0}
+    {#if needsYou.length > 0 || anomalies.length > 0}
       <section class="group">
         <h2 class="group-title urgent">Braucht dich</h2>
         <div class="cards">
+          {#each anomalies as s (`anom-${s.id}`)}
+            <article class="card needs-you anomaly-card">
+              <div class="card-main">
+                <div class="card-top">
+                  <Icon name="warning" size={16} />
+                  <span class="card-title">{s.display_name}</span>
+                  <span class="kind-chip">Anders als sonst</span>
+                  <span class="due-badge urgent">Prüfen</span>
+                </div>
+                <p class="next-step">{s.anomaly?.reason}</p>
+                <div class="card-actions">
+                  {#if s.latest_message_id != null}
+                    <button type="button" class="act-btn" onclick={() => onopenmessage(s.latest_message_id!)}>Mail öffnen</button>
+                  {/if}
+                  {#if ondismissanomaly}
+                    <button type="button" class="act-btn" onclick={() => ondismissanomaly(s.id)}>Verstanden</button>
+                  {/if}
+                </div>
+              </div>
+            </article>
+          {/each}
           {#each needsYou as c (c.id)}
             {@render caseCard(c, true)}
           {/each}
@@ -248,6 +280,45 @@
                   {/if}
                 </div>
               {/if}
+            </div>
+          {/each}
+        </div>
+      </section>
+    {/if}
+
+    {#if recurringSources.length > 0}
+      <section class="group sources-group">
+        <h2 class="group-title muted">Wiederkehrende Quellen ({recurringSources.length})</h2>
+        <div class="source-list">
+          {#each recurringSources as s (s.id)}
+            <div class="source-row">
+              <div class="source-info">
+                <span class="card-title">{s.display_name}</span>
+                <span class="kind-chip">{s.total_messages}×</span>
+                <span class="source-pattern">{s.patterns[0] ?? s.source_key}</span>
+              </div>
+              <div class="source-actions">
+                <div class="mode-switch">
+                  {#each [
+                    ['show', 'Einzeln'],
+                    ['bundle', 'Bündeln'],
+                    ['latest_only', 'Nur neueste'],
+                    ['mute', 'Stumm']
+                  ] as [modeVal, modeLabel]}
+                    <button
+                      type="button"
+                      class="mode-btn"
+                      class:active={s.mode === modeVal}
+                      onclick={() => onchangesourcemode?.(s.id, modeVal as SourceMode)}
+                    >
+                      {modeLabel}
+                    </button>
+                  {/each}
+                </div>
+                {#if s.latest_message_id != null}
+                  <button type="button" class="ev-open" onclick={() => onopenmessage(s.latest_message_id!)}>Neueste</button>
+                {/if}
+              </div>
             </div>
           {/each}
         </div>
@@ -689,5 +760,68 @@
   }
   .done-card {
     opacity: 0.72;
+  }
+  .anomaly-card {
+    border-color: var(--ochre);
+  }
+  .source-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .source-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 14px;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .source-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1;
+  }
+  .source-pattern {
+    font-size: 12px;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .source-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+  .mode-switch {
+    display: inline-flex;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 2px;
+    gap: 2px;
+  }
+  .mode-btn {
+    border: 0;
+    background: none;
+    padding: 3px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    border-radius: calc(var(--radius) - 2px);
+    cursor: pointer;
+  }
+  .mode-btn:hover {
+    color: var(--text);
+  }
+  .mode-btn.active {
+    background: var(--accent-fill);
+    color: var(--on-accent-fill);
   }
 </style>

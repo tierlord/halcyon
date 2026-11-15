@@ -2054,7 +2054,8 @@ impl Store {
             "SELECT id, source_key, display_name, domain, mode, user_mode != 0,
                     total_messages, read_messages, dmarc_pass_count, is_newsletter != 0,
                     first_seen_at, last_seen_at, median_interval_secs, median_amount_cents,
-                    amount_sample_count, anomaly_kind, anomaly_needs_you != 0, anomaly_reason
+                    amount_sample_count, anomaly_kind, anomaly_needs_you != 0, anomaly_reason,
+                    (SELECT m.id FROM messages m WHERE m.source_id = sources.id ORDER BY m.date DESC LIMIT 1)
              FROM sources
              ORDER BY total_messages DESC, last_seen_at DESC
              LIMIT ?1",
@@ -2070,6 +2071,7 @@ impl Store {
             let anomaly_kind: Option<String> = r.get(15)?;
             let anomaly_needs_you: bool = r.get(16)?;
             let anomaly_reason: Option<String> = r.get(17)?;
+            let latest_message_id: Option<i64> = r.get(18)?;
             let anomaly = match (anomaly_kind.as_deref(), anomaly_reason) {
                 (Some(k), Some(reason)) => {
                     k.parse::<AnomalyKind>().ok().map(|kind| SourceAnomaly {
@@ -2098,6 +2100,7 @@ impl Store {
                 amount_sample_count: r.get(14)?,
                 anomaly,
                 patterns: Vec::new(),
+                latest_message_id,
             })
         })?;
         let mut out = Vec::new();
@@ -2118,6 +2121,47 @@ impl Store {
             params![mode.to_string(), source_id],
         )?;
         Ok(())
+    }
+
+    /// Clears an active anomaly banner for a source after user acknowledgement.
+    pub fn dismiss_source_anomaly(&self, source_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sources SET anomaly_kind = NULL, anomaly_needs_you = 0, anomaly_reason = NULL WHERE id = ?1",
+            [source_id],
+        )?;
+        Ok(())
+    }
+
+    /// Evaluates conversation turn status ("Wer ist am Zug?") for a batch of message IDs.
+    pub fn assess_messages_turns(
+        &self,
+        message_ids: &[i64],
+        now: i64,
+    ) -> Result<Vec<(i64, crate::turn::TurnAssessment)>> {
+        if message_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let own: Vec<String> = self
+            .accounts()?
+            .into_iter()
+            .map(|a| a.email.to_ascii_lowercase())
+            .collect();
+        let mut out = Vec::with_capacity(message_ids.len());
+        for &id in message_ids.iter().take(500) {
+            if let Some(msg) = self.message(id)? {
+                let body: String = self
+                    .conn
+                    .query_row(
+                        "SELECT COALESCE(body_text, preview, '') FROM messages WHERE id = ?1",
+                        [id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or_default();
+                let turn = assess_turn(&msg.header, &body, &own, now);
+                out.push((id, turn));
+            }
+        }
+        Ok(out)
     }
 
     /// Computes privacy-preserving numerical metrics for "Wer ist am Zug?"

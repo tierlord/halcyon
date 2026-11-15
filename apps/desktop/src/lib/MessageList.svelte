@@ -5,7 +5,7 @@
   import Icon from './Icon.svelte'
   import { getBrandLogo, subscribeLogos } from './brandLogos'
   import { accountLabel, listDate } from './format'
-  import { isFlagged, isSeen, type MessageSummary } from './types'
+  import { isFlagged, isSeen, type MessageSummary, type MessageTurnInfo } from './types'
 
   let {
     title,
@@ -16,6 +16,7 @@
     highlightedIds = [],
     chatMode = false,
     sentReplies = new Map<string, MessageSummary[]>(),
+    turns = new Map<number, MessageTurnInfo>(),
     onselect,
     onclosecase,
   }: {
@@ -27,6 +28,7 @@
     highlightedIds?: number[]
     chatMode?: boolean
     sentReplies?: Map<string, MessageSummary[]>
+    turns?: Map<number, MessageTurnInfo>
     onselect: (id: number) => void
     onclosecase?: () => void
   } = $props()
@@ -79,6 +81,18 @@
   function senderLabel(m: MessageSummary): string {
     if (m.folder_role === 'sent') return 'Du'
     return m.header.from_name?.trim() || m.header.from_addr || 'Unbekannt'
+  }
+
+  function turnBadge(m: MessageSummary): { label: string; urgent: boolean; reason: string } | null {
+    const t = turns.get(m.id)
+    if (!t) return null
+    if (t.status === 'needs_you') {
+      return { label: 'Am Zug', urgent: true, reason: t.reason }
+    }
+    if (t.status === 'waiting' && t.follow_up_due) {
+      return { label: 'Nachfassen?', urgent: false, reason: t.reason }
+    }
+    return null
   }
 
   const threadGroups = $derived.by((): ThreadGroup[] => {
@@ -250,6 +264,7 @@
     {:else}
       {#each threadGroups as group (group.key)}
         {@const m = group.latest}
+        {@const badge = turnBadge(m)}
         {@const containsSelected = group.items.some((item) => item.id === selectedId)}
         {@const isExpanded = group.isThread && (expandedThreadKeys.has(group.key) || containsSelected)}
         {@const isHighlighted = group.items.some((item) => highlightedIds.includes(item.id))}
@@ -278,7 +293,12 @@
                   />
                 </span>
               {/if}
-              <span class="from">{m.header.from_name ?? m.header.from_addr ?? 'Unbekannt'}</span>
+              <span class="from">
+                {m.header.from_name ?? m.header.from_addr ?? 'Unbekannt'}
+                {#if badge}
+                  <span class="turn-chip" class:urgent={badge.urgent} title={badge.reason}>{badge.label}</span>
+                {/if}
+              </span>
               <time>
                 {#if isFlagged(m)}<span class="flag" title="Markiert"><Icon name="star" size={12} filled /></span>{/if}
                 {listDate(m.header.date)}
@@ -319,7 +339,12 @@
                   />
                 </span>
               {/if}
-              <span class="from">{group.participants}</span>
+              <span class="from">
+                {group.participants}
+                {#if badge}
+                  <span class="turn-chip" class:urgent={badge.urgent} title={badge.reason}>{badge.label}</span>
+                {/if}
+              </span>
               <time>
                 {#if group.hasFlagged}<span class="flag" title="Markiert"><Icon name="star" size={12} filled /></span>{/if}
                 {listDate(m.header.date)}
@@ -700,5 +725,21 @@
     margin-left: auto;
     background: var(--selection);
     border: 1px solid var(--border);
+  }
+  .turn-chip {
+    font-size: 10px;
+    font-weight: 650;
+    padding: 1px 6px;
+    border-radius: 99px;
+    margin-left: 6px;
+    vertical-align: 1px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-muted);
+  }
+  .turn-chip.urgent {
+    background: color-mix(in srgb, var(--ochre) 20%, transparent);
+    border-color: var(--ochre);
+    color: var(--text);
   }
 </style>

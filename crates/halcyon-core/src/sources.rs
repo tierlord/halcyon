@@ -112,6 +112,7 @@ pub struct SourceRecord {
     pub amount_sample_count: u32,
     pub anomaly: Option<SourceAnomaly>,
     pub patterns: Vec<String>,
+    pub latest_message_id: Option<i64>,
 }
 
 /// Privacy-preserving aggregate evaluation numbers for a mailbox (no message

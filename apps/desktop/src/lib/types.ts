@@ -134,6 +134,59 @@ export interface Attachment {
 export interface MessageView {
   rendered: { document: string; remote_blocked: number; is_html: boolean; dark: boolean }
   attachments: Attachment[]
+  otp_code?: string | null
+}
+
+export interface MaskedPreview {
+  allowed: boolean
+  confidential_reason: string | null
+  masked_subject: string
+  masked_body: string
+  replacements: number
+}
+
+export type SourceMode = 'show' | 'bundle' | 'latest_only' | 'mute'
+
+export type AnomalyKind =
+  | 'dmarc_failed'
+  | 'unusual_amount'
+  | 'new_subject_pattern'
+  | 'frequency_spike'
+  | 'long_silence'
+
+export interface SourceAnomaly {
+  kind: AnomalyKind
+  needs_you: boolean
+  reason: string
+}
+
+export interface SourceRecord {
+  id: number
+  source_key: string
+  display_name: string
+  domain: string | null
+  mode: SourceMode
+  user_mode: boolean
+  total_messages: number
+  read_messages: number
+  dmarc_pass_count: number
+  is_newsletter: boolean
+  first_seen_at: number
+  last_seen_at: number
+  median_interval_secs: number | null
+  median_amount_cents: number | null
+  amount_sample_count: number
+  anomaly: SourceAnomaly | null
+  patterns: string[]
+  latest_message_id: number | null
+}
+
+export interface MessageTurnInfo {
+  message_id: number
+  status: 'needs_you' | 'waiting' | 'reading_along' | 'done'
+  follow_up_due: boolean
+  reason: string
+  confidence: number
 }
 
 export interface BrandLogo {

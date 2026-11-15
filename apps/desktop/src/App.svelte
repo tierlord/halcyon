@@ -19,10 +19,13 @@
     isSeen,
     type Draft,
     type LiveState,
+    type MessageTurnInfo,
     type OutboxEvent,
     type ReplyKind,
     type MessageSummary,
     type Overview,
+    type SourceMode,
+    type SourceRecord,
     type SyncUpdate,
     type View,
   } from './lib/types'
@@ -34,6 +37,8 @@
   let selectedId: number | null = $state(null)
   let caseItems = $state<CaseItem[]>([])
   let asideCategories = $state<AsideCategory[]>([])
+  let sourceItems = $state<SourceRecord[]>([])
+  let turnMap = $state<Map<number, MessageTurnInfo>>(new Map())
   let selectedCaseId = $state<number | null>(null)
   let hoveredCaseId = $state<number | null>(null)
   /** The mail of all cases, wherever it is stored (not only the visible list). */
@@ -227,8 +232,16 @@
       .map((m) => m.header.message_id)
       .filter((id): id is string => !!id)
     try {
-      const replies = ids.length > 0 ? await api.sentReplies(ids) : []
-      if (seq === requestSeq) replyMessages = replies
+      const [replies, turns] = await Promise.all([
+        ids.length > 0 ? api.sentReplies(ids) : Promise.resolve([]),
+        list.length > 0
+          ? api.threadTurns(list.slice(0, 200).map((m) => m.id))
+          : Promise.resolve([]),
+      ])
+      if (seq === requestSeq) {
+        replyMessages = replies
+        turnMap = new Map(turns.map((t) => [t.message_id, t]))
+      }
     } catch (e) {
       console.warn('Eigene Antworten nicht geladen', e)
     }
@@ -603,16 +616,42 @@
 
   async function loadCases() {
     try {
-      const r = await api.cases()
+      const [r, srcs] = await Promise.all([api.cases(), api.sources()])
       caseItems = r.cases
       asideCategories = r.categories
-      const ids = [...new Set(r.cases.flatMap((c) => c.messageIds))]
+      sourceItems = srcs
+      const srcMsgIds = srcs
+        .map((s) => s.latest_message_id)
+        .filter((id): id is number => id != null)
+      const ids = [...new Set([...r.cases.flatMap((c) => c.messageIds), ...srcMsgIds])]
       caseMessages = ids.length > 0 ? await api.messagesByIds(ids) : []
       if (selectedCaseId != null && !caseItems.some((c) => c.id === selectedCaseId)) {
         selectedCaseId = null
       }
     } catch (e) {
       console.warn('Vorgänge konnten nicht geladen werden', e)
+    }
+  }
+
+  async function changeSourceMode(sourceId: number, mode: SourceMode) {
+    const before = sourceItems
+    sourceItems = sourceItems.map((s) => (s.id === sourceId ? { ...s, mode, user_mode: true } : s))
+    try {
+      await api.setSourceMode(sourceId, mode)
+    } catch (e) {
+      sourceItems = before
+      console.warn('Quellen-Modus nicht gespeichert', e)
+    }
+  }
+
+  async function dismissAnomaly(sourceId: number) {
+    const before = sourceItems
+    sourceItems = sourceItems.map((s) => (s.id === sourceId ? { ...s, anomaly: null } : s))
+    try {
+      await api.dismissSourceAnomaly(sourceId)
+    } catch (e) {
+      sourceItems = before
+      console.warn('Anomalie konnte nicht ausgeblendet werden', e)
     }
   }
 
@@ -775,6 +814,7 @@
         {highlightedIds}
         chatMode={!!activeCase}
         {sentReplies}
+        turns={turnMap}
         onselect={(id) => (selectedId = id)}
         onclosecase={() => {
           selectedCaseId = null
@@ -812,12 +852,15 @@
           <CaseBoard
             cases={caseItems}
             categories={asideCategories}
+            sources={sourceItems}
             {selectedCaseId}
             {hoveredCaseId}
             onselectcase={(id) => (selectedCaseId = id)}
             onhovercase={(id) => (hoveredCaseId = id)}
             onopenmessage={(id) => (selectedId = id)}
             onchangestatus={changeCaseStatus}
+            onchangesourcemode={changeSourceMode}
+            ondismissanomaly={dismissAnomaly}
           />
         {/if}
         {#if composing}

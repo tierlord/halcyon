@@ -5,7 +5,7 @@
   import Icon from './Icon.svelte'
   import { initials, longDate } from './format'
   import { isAppDark } from './theme.svelte'
-  import { isFlagged, isSeen, type MessageSummary, type MessageView } from './types'
+  import { isFlagged, isSeen, type MaskedPreview, type MessageSummary, type MessageView } from './types'
 
   let {
     message,
@@ -28,6 +28,9 @@
   let notice = $state('')
   let linkWarning = $state<{ shown: string; target: string } | null>(null)
   let frame: HTMLIFrameElement | undefined = $state()
+  let otpCopied = $state(false)
+  let maskedPreview = $state<MaskedPreview | null>(null)
+  let maskLoading = $state(false)
 
   const isNewsletter = $derived(!!message && message.header.list_unsubscribe.length > 0)
   const files = $derived(view?.attachments.filter((a) => !a.inline) ?? [])
@@ -90,8 +93,39 @@
     notice = ''
     linkWarning = null
     view = null
+    otpCopied = false
+    maskedPreview = null
     if (id != null) load(id, false)
   })
+
+  async function copyOtp(code: string) {
+    await navigator.clipboard.writeText(code)
+    otpCopied = true
+    setTimeout(() => {
+      otpCopied = false
+    }, 2500)
+  }
+
+  async function toggleMaskPreview() {
+    if (maskedPreview !== null) {
+      maskedPreview = null
+    } else if (message) {
+      maskLoading = true
+      try {
+        maskedPreview = await api.maskMessagePreview(message.id)
+      } catch (e) {
+        notice = String(e)
+      } finally {
+        maskLoading = false
+      }
+    }
+  }
+
+  async function copyMasked() {
+    if (!maskedPreview) return
+    await navigator.clipboard.writeText(`${maskedPreview.masked_subject}\n\n${maskedPreview.masked_body}`)
+    notice = 'Maskierter Text in die Zwischenablage kopiert.'
+  }
 
   function loadImages() {
     if (!message) return
@@ -225,8 +259,54 @@
         >
           <Icon name="trash" size={16} />
         </button>
+        <span class="sep" aria-hidden="true"></span>
+        <button
+          type="button"
+          class="action"
+          class:on={maskedPreview !== null}
+          onclick={toggleMaskPreview}
+          disabled={maskLoading}
+          title="Lokale PII-Maskierung und Vertraulichkeitsprüfung anzeigen"
+        >
+          <Icon name="shield" size={16} />
+          <span>Maskiert</span>
+        </button>
       </div>
       <h1>{h.subject ?? '(kein Betreff)'}</h1>
+
+      {#if view?.otp_code}
+        <div class="hint otp-banner">
+          <Icon name="copy" size={16} />
+          <span>Bestätigungscode erkannt: <strong class="otp-code">{view.otp_code}</strong></span>
+          <div class="hint-actions">
+            <button type="button" class="small-btn primary" onclick={() => copyOtp(view!.otp_code!)}>
+              {otpCopied ? 'Kopiert ✓' : 'Code kopieren'}
+            </button>
+          </div>
+        </div>
+      {/if}
+      {#if maskedPreview}
+        <div class="mask-panel" role="region" aria-label="PII-maskierte Vorschau">
+          <div class="mask-head">
+            <span class="mask-badge" class:blocked={!maskedPreview.allowed}>
+              <Icon name={maskedPreview.allowed ? 'shield' : 'warning'} size={14} />
+              {maskedPreview.allowed
+                ? `Für externe Analyse freigegeben (${maskedPreview.replacements} Platzhalter maskiert)`
+                : `Vertraulich – lokal gesperrt: ${maskedPreview.confidential_reason ?? 'Schutzregel aktiv'}`}
+            </span>
+            <div class="hint-actions">
+              <button type="button" class="small-btn" onclick={copyMasked}>
+                <Icon name="copy" size={13} /> Kopieren
+              </button>
+              <button type="button" class="icon-btn" onclick={() => (maskedPreview = null)} aria-label="Maskierte Vorschau schließen">
+                <Icon name="x" size={14} />
+              </button>
+            </div>
+          </div>
+          <div class="mask-subject"><strong>Betreff:</strong> {maskedPreview.masked_subject}</div>
+          <pre class="mask-body">{maskedPreview.masked_body}</pre>
+        </div>
+      {/if}
 
       <div class="sender">
         {#if senderLogo}
@@ -704,5 +784,66 @@
     border: 1px solid var(--border);
     border-bottom-width: 2px;
     border-radius: 4px;
+  }
+  .otp-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+    background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+    border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  }
+  .otp-code {
+    font-family: ui-monospace, monospace;
+    font-size: 14px;
+    letter-spacing: 0.05em;
+    padding: 2px 6px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+  .mask-panel {
+    margin-bottom: 12px;
+    padding: 14px 16px;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .mask-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .mask-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--success, #2e7d32);
+  }
+  .mask-badge.blocked {
+    color: var(--danger);
+  }
+  .mask-subject {
+    font-size: 13px;
+    color: var(--text);
+  }
+  .mask-body {
+    margin: 0;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--surface);
+    padding: 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    max-height: 200px;
+    overflow-y: auto;
   }
 </style>

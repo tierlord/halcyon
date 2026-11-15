@@ -11,10 +11,14 @@ import type {
   Recipient,
   ReplyKind,
   LiveState,
+  MaskedPreview,
+  MessageTurnInfo,
   MessageView,
   MessageSummary,
   Overview,
   ServerConfig,
+  SourceMode,
+  SourceRecord,
   SyncUpdate,
   View,
 } from './types'
@@ -208,6 +212,35 @@ export async function cases(): Promise<{ cases: CaseItem[]; categories: AsideCat
 
 export function setCaseStatus(id: number, status: CaseStatus): Promise<void> {
   return native ? invoke('set_case_status', { id, status }) : Promise.resolve()
+}
+
+export function sources(): Promise<SourceRecord[]> {
+  return native ? invoke('sources') : Promise.resolve([])
+}
+
+export function setSourceMode(id: number, mode: SourceMode): Promise<void> {
+  return native ? invoke('set_source_mode', { id, mode }) : Promise.resolve()
+}
+
+export function dismissSourceAnomaly(id: number): Promise<void> {
+  return native ? invoke('dismiss_source_anomaly', { id }) : Promise.resolve()
+}
+
+export function threadTurns(messageIds: number[]): Promise<MessageTurnInfo[]> {
+  return native ? invoke('thread_turns', { messageIds }) : Promise.resolve([])
+}
+
+export function maskMessagePreview(id: number): Promise<MaskedPreview> {
+  if (!native) {
+    return Promise.resolve({
+      allowed: true,
+      confidential_reason: null,
+      masked_subject: '[SUBJECT]',
+      masked_body: '[MASKED_BODY]',
+      replacements: 0,
+    })
+  }
+  return invoke('mask_message_preview', { id })
 }
 
 /** Messages by id, wherever they are stored (the mail of a case). */
