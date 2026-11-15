@@ -370,7 +370,7 @@ impl Store {
             "PRAGMA journal_mode = WAL;
              PRAGMA foreign_keys = ON;
              PRAGMA synchronous = NORMAL;
-             PRAGMA busy_timeout = 5000;",
+             PRAGMA busy_timeout = 15000;",
         )?;
         let mut store = Store { conn };
         store.migrate()?;
@@ -1129,6 +1129,14 @@ impl Store {
     /// The next message due for sending, claimed atomically so it is never
     /// sent twice.
     pub fn claim_due_outgoing(&self, now: i64) -> Result<Option<OutboxItem>> {
+        let has_due: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM outbox WHERE state = 'queued' AND send_after <= ?1)",
+            [now],
+            |r| r.get(0),
+        )?;
+        if !has_due {
+            return Ok(None);
+        }
         Ok(self
             .conn
             .query_row(
@@ -1178,6 +1186,14 @@ impl Store {
     /// the queue. The server may have received them already; a duplicate is
     /// better than a lost mail.
     pub fn requeue_interrupted_outgoing(&self) -> Result<usize> {
+        let has_interrupted: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM outbox WHERE state = 'sending')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_interrupted {
+            return Ok(0);
+        }
         Ok(self.conn.execute(
             "UPDATE outbox SET state = 'queued' WHERE state = 'sending'",
             [],

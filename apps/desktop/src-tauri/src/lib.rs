@@ -1249,19 +1249,24 @@ pub(crate) fn schedule_link(app: &AppHandle) {
         return;
     }
     let app = app.clone();
+    let db_path = state.db_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        let mut store = match Store::open(&db_path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "case linker cannot open the database");
+                state.linking.store(false, Ordering::SeqCst);
+                return;
+            }
+        };
         loop {
             state.link_again.store(false, Ordering::SeqCst);
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-            let result = match state.store.lock() {
-                Ok(mut store) => linker::run(&mut store, now),
-                Err(_) => break,
-            };
-            match result {
+            match linker::run(&mut store, now) {
                 Ok(report) if report.changed() => {
                     tracing::info!(?report, "cases updated");
                     let _ = app.emit("cases-changed", ());

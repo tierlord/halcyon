@@ -295,10 +295,13 @@ fn process_text(text: &str, mapper: &mut Mapper, known_names: &[String]) -> Stri
 }
 
 fn process_url(url: &str, mapper: &mut Mapper) -> String {
+    static QUERY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"=([^&\s#]+)"#).unwrap());
+    static PATH_SEG_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"/([A-Za-z0-9_-]{20,})"#).unwrap());
+
     // Query parameter values: =[^&\s#]+ -> =[TOKEN]
     // Also long path segments >= 20 chars of [A-Za-z0-9_-]
-    let query_re = Regex::new(r#"=([^&\s#]+)"#).unwrap();
-    let replaced_query = query_re
+    let replaced_query = QUERY_RE
         .replace_all(url, |caps: &regex::Captures| {
             let val = &caps[1];
             // If it looks like a token/id
@@ -308,8 +311,7 @@ fn process_url(url: &str, mapper: &mut Mapper) -> String {
         .to_string();
 
     // Path segments of >= 20 chars [A-Za-z0-9_-]
-    let path_seg_re = Regex::new(r#"/([A-Za-z0-9_-]{20,})"#).unwrap();
-    path_seg_re
+    PATH_SEG_RE
         .replace_all(&replaced_query, |caps: &regex::Captures| {
             let seg = &caps[1];
             mapper.map_token(seg);

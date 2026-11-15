@@ -281,25 +281,26 @@ pub fn run(store: &mut Store, now: i64) -> Result<LinkReport> {
         .into_iter()
         .map(|a| a.email.to_ascii_lowercase())
         .collect();
-    store.in_transaction(|store| {
-        let mut report = LinkReport::default();
-        loop {
-            let batch = store.case_scan_batch(now - SCAN_WINDOW_SECS, BATCH)?;
-            if batch.is_empty() {
-                break;
-            }
+    let mut report = LinkReport::default();
+    loop {
+        let batch = store.case_scan_batch(now - SCAN_WINDOW_SECS, BATCH)?;
+        if batch.is_empty() {
+            break;
+        }
+        store.in_transaction(|store| {
             for m in &batch {
                 link_message(store, m, &own, &mut report)?;
                 store.mark_case_scanned(m.id, m.body_text.is_some())?;
                 report.scanned += 1;
             }
-            if batch.len() < BATCH {
-                break;
-            }
+            Ok(())
+        })?;
+        if batch.len() < BATCH {
+            break;
         }
-        report.closed += store.close_stale_cases(now - STALE_AFTER_SECS)?;
-        Ok(report)
-    })
+    }
+    report.closed += store.close_stale_cases(now - STALE_AFTER_SECS)?;
+    Ok(report)
 }
 
 fn direction(m: &ScanMessage, own: &HashSet<String>) -> EventDirection {

@@ -443,6 +443,19 @@ fn extract_due_date(text: &str, reference_date: i64) -> Option<i64> {
 
 /// Extracts invoice, contract, customer, and support ticket numbers.
 pub fn find_business_keys(subject: &str, body_text: &str) -> Vec<BusinessKey> {
+    static RE_INVOICE_KEY: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?i)(?:rechnungsnummer|rechnungs-nr\.?|rechnungsnr\.?|rechnung(?:\s+nr\.?)?|belegnummer|invoice\s*(?:number|no\.?|id|#)?)\s*[:#]?\s*([A-Za-z0-9\-/]{4,28})"#).unwrap()
+    });
+    static RE_CONTRACT_KEY: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?i)(?:vertragsnummer|vertrags-nr\.?|vertragsnr\.?|vertragskonto|policennummer|vertrags\b|vertrag\b|contract\s*(?:number|no\.?|id|#)?)\s*[:#]?\s*([A-Za-z0-9\-/]{4,28})"#).unwrap()
+    });
+    static RE_CUSTOMER_KEY: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?i)(?:kundennummer|kunden-nr\.?|kundennr\.?|mitgliedsnummer|customer\s*(?:number|no\.?|id|#))\s*[:#]?\s*([A-Za-z0-9\-/]{4,28})"#).unwrap()
+    });
+    static RE_TICKET_KEY: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?i)(?:ticketnummer|ticket-nr\.?|ticket-id|vorgangsnummer|aktenzeichen|ticket\s*#?|case\s*#?|incident\s*#?)\s*[:#]?\s*([A-Za-z0-9\-/]{4,28})"#).unwrap()
+    });
+
     let mut results: HashMap<(BusinessKeyKind, String), (String, f32)> = HashMap::new();
 
     fn process_text(
@@ -452,26 +465,14 @@ pub fn find_business_keys(subject: &str, body_text: &str) -> Vec<BusinessKey> {
     ) {
         let confidence = if is_subject { 0.9 } else { 0.8 };
 
-        let patterns = [
-            (
-                BusinessKeyKind::InvoiceNumber,
-                Regex::new(r#"(?i)(?:rechnungsnummer|rechnungs-nr\.?|rechnungsnr\.?|rechnung(?:\s+nr\.?)?|belegnummer|invoice\s*(?:number|no\.?|id|#)?)\s*[:#]?\s*([A-Za-z0-9\-/]{4,28})"#).unwrap(),
-            ),
-            (
-                BusinessKeyKind::ContractNumber,
-                Regex::new(r#"(?i)(?:vertragsnummer|vertrags-nr\.?|vertragsnr\.?|vertragskonto|policennummer|vertrags\b|vertrag\b|contract\s*(?:number|no\.?|id|#)?)\s*[:#]?\s*([A-Za-z0-9\-/]{4,28})"#).unwrap(),
-            ),
-            (
-                BusinessKeyKind::CustomerNumber,
-                Regex::new(r#"(?i)(?:kundennummer|kunden-nr\.?|kundennr\.?|mitgliedsnummer|customer\s*(?:number|no\.?|id|#))\s*[:#]?\s*([A-Za-z0-9\-/]{4,28})"#).unwrap(),
-            ),
-            (
-                BusinessKeyKind::TicketNumber,
-                Regex::new(r#"(?i)(?:ticketnummer|ticket-nr\.?|ticket-id|vorgangsnummer|aktenzeichen|ticket\s*#?|case\s*#?|incident\s*#?)\s*[:#]?\s*([A-Za-z0-9\-/]{4,28})"#).unwrap(),
-            ),
+        let patterns: [(BusinessKeyKind, &Regex); 4] = [
+            (BusinessKeyKind::InvoiceNumber, &RE_INVOICE_KEY),
+            (BusinessKeyKind::ContractNumber, &RE_CONTRACT_KEY),
+            (BusinessKeyKind::CustomerNumber, &RE_CUSTOMER_KEY),
+            (BusinessKeyKind::TicketNumber, &RE_TICKET_KEY),
         ];
 
-        for (kind, re) in &patterns {
+        for (kind, re) in patterns {
             for cap in re.captures_iter(text) {
                 if let Some(val_match) = cap.get(1) {
                     let val = val_match
@@ -480,7 +481,7 @@ pub fn find_business_keys(subject: &str, body_text: &str) -> Vec<BusinessKey> {
                     if val.len() >= 4 && val.len() <= 28 {
                         let digit_count = val.chars().filter(|c| c.is_ascii_digit()).count();
                         if digit_count >= 3 {
-                            let key = (*kind, val.to_ascii_lowercase());
+                            let key = (kind, val.to_ascii_lowercase());
                             results
                                 .entry(key)
                                 .and_modify(|(_, conf)| {
