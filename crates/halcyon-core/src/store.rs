@@ -1828,8 +1828,11 @@ impl Store {
             .flatten();
 
         if let Some(sid) = existing_source_id {
-            // If an amount was newly extracted from the body, update running amount stats.
-            if let Some(cents) = amount_cents
+            // If an amount was newly extracted from the body, update running amount stats
+            // (for non-newsletter, non-order-status recurring sources only).
+            if !is_newsletter
+                && !is_status_update
+                && let Some(cents) = amount_cents
                 && cents > 0
             {
                 self.update_source_amount(sid, m, pattern, cents, currency)?;
@@ -1906,6 +1909,12 @@ impl Store {
             |r| r.get(0),
         )?;
 
+        let effective_amount = if stored_newsletter || is_newsletter || is_status_update {
+            None
+        } else {
+            amount_cents.filter(|&c| c > 0)
+        };
+
         let stats = SourceStats {
             total_messages,
             dmarc_pass_count,
@@ -1920,7 +1929,7 @@ impl Store {
             occurred_at: m.date,
             normalized_pattern: pattern.to_string(),
             dmarc_pass: m.dmarc_pass,
-            amount_cents,
+            amount_cents: effective_amount,
             currency: currency.map(str::to_string),
         };
         let anomaly = detect_anomaly(&stats, &incoming);
@@ -1937,7 +1946,7 @@ impl Store {
         } else {
             median_interval_secs
         };
-        let (new_median_amount, new_amount_samples) = match amount_cents.filter(|&c| c > 0) {
+        let (new_median_amount, new_amount_samples) = match effective_amount {
             Some(c) => (
                 Some(match median_amount_cents {
                     Some(prev) => (prev * 3 + c) / 4,
@@ -1947,6 +1956,7 @@ impl Store {
             ),
             None => (median_amount_cents, amount_sample_count),
         };
+        let is_newest = total_messages == 0 || m.date >= last_seen_at;
         let new_last_seen = m.date.max(last_seen_at);
         let suggested = suggest_source_mode(
             new_total,
@@ -1965,10 +1975,10 @@ impl Store {
                  median_amount_cents  = ?6,
                  amount_sample_count  = ?7,
                  mode                 = CASE WHEN user_mode = 0 THEN ?8 ELSE mode END,
-                 anomaly_kind         = COALESCE(?9, anomaly_kind),
-                 anomaly_needs_you    = CASE WHEN ?9 IS NOT NULL THEN ?10 ELSE anomaly_needs_you END,
-                 anomaly_reason       = COALESCE(?11, anomaly_reason),
-                 anomaly_message_id   = CASE WHEN ?9 IS NOT NULL THEN ?12 ELSE anomaly_message_id END
+                 anomaly_kind         = CASE WHEN ?14 != 0 THEN ?9 ELSE COALESCE(?9, anomaly_kind) END,
+                 anomaly_needs_you    = CASE WHEN ?14 != 0 THEN ?10 WHEN ?9 IS NOT NULL THEN ?10 ELSE anomaly_needs_you END,
+                 anomaly_reason       = CASE WHEN ?14 != 0 THEN ?11 ELSE COALESCE(?11, anomaly_reason) END,
+                 anomaly_message_id   = CASE WHEN ?14 != 0 THEN (CASE WHEN ?9 IS NOT NULL THEN ?12 ELSE NULL END) WHEN ?9 IS NOT NULL THEN ?12 ELSE anomaly_message_id END
              WHERE id = ?13",
             params![
                 new_total,
@@ -1984,6 +1994,7 @@ impl Store {
                 anomaly.as_ref().map(|a| a.reason.as_str()),
                 m.id,
                 source_id,
+                is_newest as i64,
             ],
         )?;
         let _ = user_mode;
@@ -2082,21 +2093,33 @@ impl Store {
              ORDER BY message_count DESC, last_seen_at DESC
              LIMIT 5",
         )?;
+        let max_date: i64 = self
+            .conn
+            .query_row("SELECT COALESCE(MAX(date), 0) FROM messages", [], |r| {
+                r.get(0)
+            })
+            .unwrap_or(0);
+        let anomaly_cutoff = (max_date - 14 * 86_400).max(0);
         let rows = stmt.query_map([limit as i64], |r| {
             let id: i64 = r.get(0)?;
+            let last_seen_at: i64 = r.get(11)?;
             let anomaly_kind: Option<String> = r.get(15)?;
             let anomaly_needs_you: bool = r.get(16)?;
             let anomaly_reason: Option<String> = r.get(17)?;
             let latest_message_id: Option<i64> = r.get(18)?;
-            let anomaly = match (anomaly_kind.as_deref(), anomaly_reason) {
-                (Some(k), Some(reason)) => {
-                    k.parse::<AnomalyKind>().ok().map(|kind| SourceAnomaly {
-                        kind,
-                        needs_you: anomaly_needs_you,
-                        reason,
-                    })
+            let anomaly = if last_seen_at >= anomaly_cutoff {
+                match (anomaly_kind.as_deref(), anomaly_reason) {
+                    (Some(k), Some(reason)) => {
+                        k.parse::<AnomalyKind>().ok().map(|kind| SourceAnomaly {
+                            kind,
+                            needs_you: anomaly_needs_you,
+                            reason,
+                        })
+                    }
+                    _ => None,
                 }
-                _ => None,
+            } else {
+                None
             };
             Ok(SourceRecord {
                 id,

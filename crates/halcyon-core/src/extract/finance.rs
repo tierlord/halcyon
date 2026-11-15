@@ -80,6 +80,14 @@ static PROMO_KEYWORDS: &[&str] = &[
     "voucher",
     "discount",
     "free shipping",
+    "aktienkapital",
+    "stammkapital",
+    "handelsregister",
+    "widerruf",
+    "nicht überschreitet",
+    "gewinnen",
+    "staatliche zulagen",
+    "mindestbestellwert",
 ];
 
 static TOTAL_KEYWORDS: &[&str] = &[
@@ -187,7 +195,7 @@ fn parse_line_amounts(line: &str) -> Vec<(i64, String)> {
                 |
                 [0-9]{1,3}(?:[,\.][0-9]{3})*(?:[\.,][0-9]{1,2})?
                 |
-                [0-9]+(?:[\.,][0-9]{1,2})?
+                [0-9]+(?:[\.,][0-9]{1,16})?
             )
             \s*
             (?:(?P<suf_cur>€|EUR|Euro|\$|USD|US\$|CHF|Fr\.?|£|GBP))?
@@ -197,6 +205,13 @@ fn parse_line_amounts(line: &str) -> Vec<(i64, String)> {
     });
 
     for cap in AMT_RE.captures_iter(line) {
+        let full_match = cap.get(0).unwrap();
+        if full_match.start() > 0 {
+            let prev = line.as_bytes()[full_match.start() - 1];
+            if prev.is_ascii_digit() || prev == b'.' || prev == b',' {
+                continue;
+            }
+        }
         let pre = cap.name("pre_cur").map(|m| m.as_str());
         let suf = cap.name("suf_cur").map(|m| m.as_str());
         let num_str = cap.name("num").unwrap().as_str();
@@ -265,7 +280,7 @@ fn parse_amount_str(s: &str) -> Option<i64> {
         }
         (None, Some(d)) => {
             let dec_part_str = &s[d + 1..];
-            if dec_part_str.len() == 2 && !dec_part_str.contains('.') {
+            if (dec_part_str.len() == 2 || dec_part_str.len() > 3) && !dec_part_str.contains('.') {
                 let int_part_str = &s[..d];
                 let int_val = parse_integer_part(&int_part_str.replace(',', ""))?;
                 let dec_val = parse_decimal_part(dec_part_str)?;
@@ -298,7 +313,9 @@ fn parse_decimal_part(s: &str) -> Option<i64> {
     if cleaned.len() == 1 {
         cleaned.parse::<i64>().ok().map(|v| v * 10)
     } else if cleaned.len() >= 2 {
-        cleaned[..2].parse::<i64>().ok()
+        let base = cleaned[..2].parse::<i64>().ok()?;
+        let round_up = cleaned.as_bytes().get(2).is_some_and(|&d| d >= b'5');
+        Some(base + i64::from(round_up))
     } else {
         Some(0)
     }

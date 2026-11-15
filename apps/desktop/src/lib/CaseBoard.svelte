@@ -216,15 +216,22 @@
         <h2 class="group-title urgent">Braucht dich</h2>
         <div class="cards">
           {#each anomalies as s (`anom-${s.id}`)}
-            <article class="card needs-you anomaly-card">
+            <article class="card anomaly-card" class:needs-you={s.anomaly?.needs_you}>
               <div class="card-main">
                 <div class="card-top">
                   <Icon name="warning" size={16} />
                   <span class="card-title">{s.display_name}</span>
                   <span class="kind-chip">Anders als sonst</span>
-                  <span class="due-badge urgent">Prüfen</span>
+                  <span class="due-badge" class:urgent={s.anomaly?.needs_you}>
+                    {s.anomaly?.needs_you ? 'Prüfen' : 'Hinweis'}
+                  </span>
                 </div>
                 <p class="next-step">{s.anomaly?.reason}</p>
+                <p class="reason">
+                  <strong>Warum?</strong> Quelle <code>{s.source_key}</code> ({s.total_messages} Mails{s.median_interval_secs
+                    ? `, üblicher Abstand ~${Math.max(1, Math.round(s.median_interval_secs / 86400))} Tage`
+                    : ''})
+                </p>
                 <div class="card-actions">
                   {#if s.latest_message_id != null}
                     <button type="button" class="act-btn" onclick={() => onopenmessage(s.latest_message_id!)}>Mail öffnen</button>

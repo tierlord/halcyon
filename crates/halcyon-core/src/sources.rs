@@ -292,9 +292,14 @@ pub fn normalize_subject_pattern(subject: &str) -> String {
 
     // 2. Replace quoted strings ("...", '...', „...“, “...”) of length >= 3 with {item}
     static QUOTED_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r#"(?:„[^“"']{1,}“|“[^“"']{1,}"|"[^"]{1,}"|'[^']{1,}')"#).unwrap()
+        Regex::new(r#"(?:[„"“][^„“”"]{3,}[“”"]|'[^']{3,}')(?:\s+und\s+\d+\s+weitere\s+Artikel)?"#)
+            .unwrap()
     });
     current = QUOTED_REGEX.replace_all(&current, "{item}").to_string();
+
+    static ITEM_QTY_REGEX: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"\b\d+\s+\{item\}"#).unwrap());
+    current = ITEM_QTY_REGEX.replace_all(&current, "{item}").to_string();
 
     // 3. Replace date expressions with {date}
     static DATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
@@ -372,10 +377,15 @@ pub fn detect_anomaly(stats: &SourceStats, incoming: &IncomingSourceMail) -> Opt
         let diff = (actual - median).abs();
         if diff >= 500 && (diff as f64 / median as f64) > 0.25 {
             let needs_you = actual > median;
+            let cur = incoming.currency.as_deref().unwrap_or("EUR");
             return Some(SourceAnomaly {
                 kind: AnomalyKind::UnusualAmount,
                 needs_you,
-                reason: "Betrag weicht deutlich vom üblichen Wert ab".into(),
+                reason: format!(
+                    "Betrag ({:.2} {cur}) weicht deutlich vom üblichen Wert (~{:.2} {cur}) ab",
+                    actual as f64 / 100.0,
+                    median as f64 / 100.0,
+                ),
             });
         }
     }
@@ -401,11 +411,15 @@ pub fn detect_anomaly(stats: &SourceStats, incoming: &IncomingSourceMail) -> Opt
         && iv >= 86_400
     {
         let gap = incoming.occurred_at - last;
-        if gap > iv * 3 {
+        if gap > iv * 3 && gap >= 14 * 86_400 {
+            let gap_days = (gap / 86_400).max(1);
+            let iv_days = (iv / 86_400).max(1);
             return Some(SourceAnomaly {
                 kind: AnomalyKind::LongSilence,
                 needs_you: false,
-                reason: "Quelle meldet sich nach ungewöhnlich langer Pause wieder".into(),
+                reason: format!(
+                    "Quelle meldet sich nach ungewöhnlich langer Pause wieder ({gap_days} Tage Pause, üblich: alle ~{iv_days} Tage)"
+                ),
             });
         }
     }
@@ -422,7 +436,10 @@ pub fn detect_anomaly(stats: &SourceStats, incoming: &IncomingSourceMail) -> Opt
         return Some(SourceAnomaly {
             kind: AnomalyKind::NewSubjectPattern,
             needs_you: false,
-            reason: "Neues Betreffmuster von einem bekannten Absender".into(),
+            reason: format!(
+                "Neues Betreffmuster von einem bekannten Absender („{}“)",
+                incoming.normalized_pattern
+            ),
         });
     }
 
@@ -613,7 +630,7 @@ mod tests {
             ..Default::default()
         };
         let incoming = IncomingSourceMail {
-            occurred_at: 400_000,
+            occurred_at: 2_000_000,
             normalized_pattern: "Test".into(),
             dmarc_pass: true,
             amount_cents: None,
