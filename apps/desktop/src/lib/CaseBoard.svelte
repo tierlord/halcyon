@@ -33,6 +33,7 @@
 
   let logoVersion = $state(0)
   let showDone = $state(false)
+  let showSources = $state(false)
   let openCategoryId = $state<string | null>(null)
 
   const today = dayOffset(0)
@@ -295,40 +296,54 @@
 
     {#if recurringSources.length > 0}
       <section class="group sources-group">
-        <h2 class="group-title muted">Wiederkehrende Quellen ({recurringSources.length})</h2>
-        <div class="source-list">
-          {#each recurringSources as s (s.id)}
-            <div class="source-row">
-              <div class="source-info">
-                <span class="card-title">{s.display_name}</span>
-                <span class="kind-chip">{s.total_messages}×</span>
-                <span class="source-pattern">{s.patterns[0] ?? s.source_key}</span>
-              </div>
-              <div class="source-actions">
-                <div class="mode-switch">
-                  {#each [
-                    ['show', 'Einzeln'],
-                    ['bundle', 'Bündeln'],
-                    ['latest_only', 'Nur neueste'],
-                    ['mute', 'Stumm']
-                  ] as [modeVal, modeLabel]}
-                    <button
-                      type="button"
-                      class="mode-btn"
-                      class:active={s.mode === modeVal}
-                      onclick={() => onchangesourcemode?.(s.id, modeVal as SourceMode)}
-                    >
-                      {modeLabel}
+        <button type="button" class="collapse-btn" onclick={() => (showSources = !showSources)}>
+          <Icon name={showSources ? 'chevronDown' : 'chevronRight'} size={14} />
+          <span>Wiederkehrende Quellen ({recurringSources.length})</span>
+        </button>
+        {#if showSources}
+          <div class="source-list">
+            {#each recurringSources as s (s.id)}
+              <div class="source-row">
+                <div class="source-top">
+                  <div class="source-ident">
+                    <span class="source-name" title={s.source_key}>{s.display_name}</span>
+                    <span class="kind-chip">{s.total_messages}×</span>
+                    <span class="source-domain">{s.domain ?? s.source_key}</span>
+                  </div>
+                  {#if s.latest_message_id != null}
+                    <button type="button" class="ev-open" onclick={() => onopenmessage(s.latest_message_id!)}>
+                      Neueste öffnen
                     </button>
-                  {/each}
+                  {/if}
                 </div>
-                {#if s.latest_message_id != null}
-                  <button type="button" class="ev-open" onclick={() => onopenmessage(s.latest_message_id!)}>Neueste</button>
-                {/if}
+                <div class="source-bottom">
+                  <span class="source-pattern" title={s.patterns[0] ?? s.source_key}>
+                    {s.patterns[0] ?? s.source_key}
+                  </span>
+                  <div class="source-actions">
+                    <div class="mode-switch">
+                      {#each [
+                        ['show', 'Einzeln'],
+                        ['bundle', 'Bündeln'],
+                        ['latest_only', 'Nur neueste'],
+                        ['mute', 'Stumm']
+                      ] as [modeVal, modeLabel]}
+                        <button
+                          type="button"
+                          class="mode-btn"
+                          class:active={s.mode === modeVal}
+                          onclick={() => onchangesourcemode?.(s.id, modeVal as SourceMode)}
+                        >
+                          {modeLabel}
+                        </button>
+                      {/each}
+                    </div>
+                  </div>
+                </div>
               </div>
-            </div>
-          {/each}
-        </div>
+            {/each}
+          </div>
+        {/if}
       </section>
     {/if}
 
@@ -774,24 +789,53 @@
   .source-list {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
+    margin-top: 8px;
   }
   .source-row {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
+    flex-direction: column;
+    gap: 6px;
     padding: 10px 14px;
     background: var(--surface-raised);
     border: 1px solid var(--border);
     border-radius: var(--radius);
   }
-  .source-info {
+  .source-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
+  }
+  .source-ident {
     display: flex;
     align-items: center;
     gap: 8px;
     min-width: 0;
     flex: 1;
+  }
+  .source-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .source-domain {
+    font-size: 11px;
+    color: var(--text-subtle);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .source-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
   }
   .source-pattern {
     font-size: 12px;
@@ -799,6 +843,8 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    min-width: 0;
+    flex: 1;
   }
   .source-actions {
     display: flex;

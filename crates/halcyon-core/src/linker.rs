@@ -579,7 +579,18 @@ fn link_invoice_or_contract(
         CaseKind::Invoice
     };
     let domain = m.from_addr.as_deref().and_then(base_domain);
-    let key_norms: Vec<String> = bkeys.iter().map(|k| normalize_key(&k.value)).collect();
+    // Invoices are per-bill (never merge recurring monthly bills by CustomerNumber).
+    let key_norms: Vec<String> = bkeys
+        .iter()
+        .filter(|k| {
+            if is_contract {
+                true
+            } else {
+                k.kind == crate::extract::finance::BusinessKeyKind::InvoiceNumber
+            }
+        })
+        .map(|k| normalize_key(&k.value))
+        .collect();
     let found = store.case_for_keys(kind, &key_norms)?;
 
     let (status, next_step, event_kind, event_label, phase) = if is_contract {
@@ -610,21 +621,42 @@ fn link_invoice_or_contract(
                 CaseEventPhase::Done,
             ),
             Some(PaymentDisposition::DirectDebit) => (
-                CaseStatus::Waiting,
+                CaseStatus::Done,
                 "Wird per Lastschrift eingezogen",
                 "invoice.debit",
                 "Lastschrift",
-                CaseEventPhase::Update,
+                CaseEventPhase::Done,
             ),
-            _ => (
+            Some(PaymentDisposition::NeedsTransfer) => (
                 CaseStatus::NeedsYou,
                 "Rechnung offen · bitte überweisen",
                 "invoice.issued",
                 "Rechnung",
                 CaseEventPhase::Due,
             ),
+            None if found.is_some() => (
+                CaseStatus::NeedsYou,
+                "Rechnung offen · bitte überweisen",
+                "invoice.issued",
+                "Rechnung",
+                CaseEventPhase::Due,
+            ),
+            None => (
+                CaseStatus::Done,
+                "Rechnung zur Information",
+                "invoice.info",
+                "Rechnung",
+                CaseEventPhase::Done,
+            ),
         }
     };
+
+    // Recurring or already-settled bills (e.g. SEPA direct debit, paid receipts) do not
+    // require user action and never receive a follow-up confirmation email — only attach
+    // them when they close an existing open invoice case.
+    if kind == CaseKind::Invoice && found.is_none() && status == CaseStatus::Done {
+        return Ok(());
+    }
 
     let case_id = match found {
         Some(id) => id,
@@ -636,7 +668,10 @@ fn link_invoice_or_contract(
                 .or_else(|| domain.clone())
                 .unwrap_or_else(|| "Unbekannt".into());
             let title = clean_subject(subject);
-            let reason = match bkeys.first() {
+            let reason_key = bkeys.iter().find(|k| {
+                is_contract || k.kind == crate::extract::finance::BusinessKeyKind::InvoiceNumber
+            });
+            let reason = match reason_key {
                 Some(bk) => format!("{}: {} {}", event_label, bk.kind.label(), bk.value),
                 None => format!("{event_label} am Betreff erkannt"),
             };
@@ -659,7 +694,9 @@ fn link_invoice_or_contract(
     };
 
     for bk in &bkeys {
-        store.add_case_key(case_id, bk.kind.label(), &bk.value)?;
+        if is_contract || bk.kind == crate::extract::finance::BusinessKeyKind::InvoiceNumber {
+            store.add_case_key(case_id, bk.kind.label(), &bk.value)?;
+        }
     }
     store.update_case_financials(
         case_id,
@@ -1102,5 +1139,27 @@ mod tests {
         );
         assert!(sources[0].anomaly.is_some());
         assert!(sources[0].anomaly.as_ref().unwrap().needs_you);
+    }
+
+    #[test]
+    fn direct_debit_invoices_do_not_open_waiting_cases() {
+        let (mut store, inbox, _) = store_with_inbox();
+        let sep = mail(
+            1,
+            "Ihre klarmobil.de Rechnung September 2026 – Kundennummer: 1501306791 – 9,99 € wird per SEPA-Lastschrift eingezogen",
+            "rechnungsinfo@service.klarmobil.de",
+            NOW - 60 * DAY,
+        );
+        let oct = mail(
+            2,
+            "Ihre klarmobil.de Rechnung Oktober 2026 – Kundennummer: 1501306791 – 9,99 € wird per SEPA-Lastschrift eingezogen",
+            "rechnungsinfo@service.klarmobil.de",
+            NOW - 30 * DAY,
+        );
+        store.insert_messages(inbox, &[sep, oct]).unwrap();
+
+        let report = run(&mut store, NOW).unwrap();
+        assert_eq!(report.created, 0);
+        assert!(store.list_cases(false).unwrap().is_empty());
     }
 }
