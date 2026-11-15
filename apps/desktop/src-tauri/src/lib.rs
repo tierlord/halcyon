@@ -1335,6 +1335,40 @@ fn dismiss_source_anomaly(state: State<'_, AppState>, id: i64) -> CmdResult<()> 
         .map_err(err)
 }
 
+#[tauri::command]
+async fn remove_source(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    source_id: i64,
+    as_junk: bool,
+) -> Result<usize, String> {
+    let role = if as_junk {
+        FolderRole::Junk
+    } else {
+        FolderRole::Trash
+    };
+    let affected = state
+        .store
+        .lock()
+        .map_err(err)?
+        .remove_source_and_messages(source_id, role)
+        .map_err(|e| match e {
+            halcyon_core::Error::Other(m) if m.contains("trash") => {
+                "Dieses Konto hat keinen Papierkorb-Ordner.".to_string()
+            }
+            halcyon_core::Error::Other(m) if m.contains("junk") => {
+                "Dieses Konto hat keinen Spam-Ordner.".to_string()
+            }
+            e => e.to_string(),
+        })?;
+    let count = affected.len();
+    if count > 0 {
+        schedule_flush(&app);
+    }
+    let _ = app.emit("cases-changed", ());
+    Ok(count)
+}
+
 #[derive(Serialize)]
 struct MessageTurnInfo {
     message_id: i64,
@@ -1484,6 +1518,7 @@ pub fn run() {
             sources,
             set_source_mode,
             dismiss_source_anomaly,
+            remove_source,
             thread_turns,
             mask_message_preview,
             messages_by_ids,

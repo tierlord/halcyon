@@ -17,6 +17,7 @@
     onchangestatus,
     onchangesourcemode,
     ondismissanomaly,
+    onremovesource,
   }: {
     cases: CaseItem[]
     categories: AsideCategory[]
@@ -29,6 +30,7 @@
     onchangestatus: (caseId: number, status: CaseStatus) => void
     onchangesourcemode?: (sourceId: number, mode: SourceMode) => void
     ondismissanomaly?: (sourceId: number) => void
+    onremovesource?: (sourceId: number, asJunk: boolean) => void
   } = $props()
 
   let logoVersion = $state(0)
@@ -37,6 +39,8 @@
   let orderSearch = $state('')
   let orderYear = $state<string>('all')
   let openCategoryId = $state<string | null>(null)
+  let sourceSearch = $state('')
+  let sourceSort = $state<'recent' | 'count'>('recent')
 
   const today = dayOffset(0)
   const yesterday = dayOffset(-1)
@@ -55,6 +59,22 @@
   const doneCases = $derived(nonOrderCases.filter((c) => c.status === 'done'))
   const anomalies = $derived(sources.filter((s) => s.anomaly != null))
   const recurringSources = $derived(sources.filter((s) => s.total_messages >= 2))
+  const filteredSources = $derived.by(() => {
+    const q = sourceSearch.trim().toLowerCase()
+    const list = recurringSources.filter((s) => {
+      if (!q) return true
+      if (s.display_name.toLowerCase().includes(q)) return true
+      if (s.source_key.toLowerCase().includes(q)) return true
+      if (s.domain && s.domain.toLowerCase().includes(q)) return true
+      if (s.patterns[0] && s.patterns[0].toLowerCase().includes(q)) return true
+      return false
+    })
+    return list.slice().sort((a, b) =>
+      sourceSort === 'recent'
+        ? b.last_seen_at - a.last_seen_at
+        : b.total_messages - a.total_messages || b.last_seen_at - a.last_seen_at,
+    )
+  })
 
   const activeOrders = $derived(
     orderCases
@@ -142,6 +162,31 @@
   function formatArchiveDate(dayIso?: string): string {
     if (!dayIso || dayIso.length < 10) return '—'
     return `${dayIso.slice(8, 10)}.${dayIso.slice(5, 7)}.${dayIso.slice(0, 4)}`
+  }
+
+  function formatUnixDate(ts: number | null | undefined): string {
+    if (ts == null || ts <= 0) return '—'
+    const d = new Date(ts * 1000)
+    const now = new Date()
+    if (
+      d.getDate() === now.getDate() &&
+      d.getMonth() === now.getMonth() &&
+      d.getFullYear() === now.getFullYear()
+    ) {
+      return 'Heute'
+    }
+    const yesterdayDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+    if (
+      d.getDate() === yesterdayDate.getDate() &&
+      d.getMonth() === yesterdayDate.getMonth() &&
+      d.getFullYear() === yesterdayDate.getFullYear()
+    ) {
+      return 'Gestern'
+    }
+    const day = String(d.getDate()).padStart(2, '0')
+    const month = String(d.getMonth() + 1).padStart(2, '0')
+    const year = d.getFullYear()
+    return `${day}.${month}.${year}`
   }
 
   function primaryOrderNumber(c: CaseItem): string | null {
@@ -617,15 +662,50 @@
 
       {#if recurringSources.length > 0}
         <section class="group sources-group">
-          <h2 class="group-title muted">Wiederkehrende Quellen ({recurringSources.length})</h2>
+          <h2 class="group-title muted">
+            Wiederkehrende Quellen ({filteredSources.length}{filteredSources.length !== recurringSources.length ? ` von ${recurringSources.length}` : ''})
+          </h2>
+          <div class="archive-toolbar">
+            <input
+              type="search"
+              class="archive-search"
+              placeholder="Quelle oder Betreffmuster suchen…"
+              bind:value={sourceSearch}
+            />
+            <div class="mode-switch">
+              <button
+                type="button"
+                class="mode-btn"
+                class:active={sourceSort === 'recent'}
+                onclick={() => (sourceSort = 'recent')}
+              >
+                Neueste zuerst
+              </button>
+              <button
+                type="button"
+                class="mode-btn"
+                class:active={sourceSort === 'count'}
+                onclick={() => (sourceSort = 'count')}
+              >
+                Häufigste zuerst
+              </button>
+            </div>
+          </div>
           <div class="source-list">
-            {#each recurringSources as s (s.id)}
+            {#if filteredSources.length === 0}
+              <div class="empty" style="margin: 24px auto;">
+                <p class="empty-title">Keine Quellen gefunden</p>
+                <p class="empty-text">Keine Quelle entspricht der aktuellen Suche.</p>
+              </div>
+            {/if}
+            {#each filteredSources as s (s.id)}
               <div class="source-row">
                 <div class="source-top">
                   <div class="source-ident">
                     <span class="source-name" title={s.source_key}>{s.display_name}</span>
                     <span class="kind-chip">{s.total_messages}×</span>
                     <span class="source-domain">{s.domain ?? s.source_key}</span>
+                    <span class="source-date">Zuletzt: {formatUnixDate(s.last_seen_at)}</span>
                   </div>
                   {#if s.latest_message_id != null}
                     <button type="button" class="ev-open" onclick={() => onopenmessage(s.latest_message_id!)}>
@@ -655,6 +735,22 @@
                         </button>
                       {/each}
                     </div>
+                    <button
+                      type="button"
+                      class="source-action-btn"
+                      title="Alle Mails dieser Quelle als Spam verschieben und Quelle entfernen"
+                      onclick={() => onremovesource?.(s.id, true)}
+                    >
+                      Spam
+                    </button>
+                    <button
+                      type="button"
+                      class="source-action-btn"
+                      title="Alle Mails dieser Quelle in den Papierkorb verschieben"
+                      onclick={() => onremovesource?.(s.id, false)}
+                    >
+                      Löschen
+                    </button>
                   </div>
                 </div>
               </div>
@@ -1162,6 +1258,12 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .source-date {
+    font-size: 11px;
+    color: var(--text-subtle);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
   .source-bottom {
     display: flex;
     align-items: center;
@@ -1181,8 +1283,25 @@
   .source-actions {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     flex-shrink: 0;
+  }
+  .source-action-btn {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-muted);
+    padding: 3px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: all 0.12s ease;
+    line-height: 1.4;
+  }
+  .source-action-btn:hover {
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+    background: color-mix(in srgb, var(--danger) 8%, var(--surface));
   }
   .mode-switch {
     display: inline-flex;

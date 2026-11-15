@@ -2102,7 +2102,7 @@ impl Store {
         Ok(())
     }
 
-    /// Lists recurring sources ordered by message volume descending.
+    /// Lists recurring sources with DMARC pass ordered by recency descending.
     pub fn list_sources(&self, limit: usize) -> Result<Vec<SourceRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, source_key, display_name, domain, mode, user_mode != 0,
@@ -2111,7 +2111,8 @@ impl Store {
                     amount_sample_count, anomaly_kind, anomaly_needs_you != 0, anomaly_reason,
                     (SELECT m.id FROM messages m WHERE m.source_id = sources.id ORDER BY m.date DESC LIMIT 1)
              FROM sources
-             ORDER BY total_messages DESC, last_seen_at DESC
+             WHERE dmarc_pass_count > 0
+             ORDER BY last_seen_at DESC, total_messages DESC
              LIMIT ?1",
         )?;
         let mut pat_stmt = self.conn.prepare(
@@ -2196,6 +2197,136 @@ impl Store {
             [source_id],
         )?;
         Ok(())
+    }
+
+    /// Removes a recurring source and moves its associated messages to the given `role`
+    /// (e.g. `FolderRole::Trash` or `FolderRole::Junk`), creating sync pending ops.
+    pub fn remove_source_and_messages(
+        &mut self,
+        source_id: i64,
+        role: FolderRole,
+    ) -> Result<Vec<i64>> {
+        let tx = self.conn.transaction()?;
+
+        let source_key: Option<String> = tx
+            .query_row(
+                "SELECT source_key FROM sources WHERE id = ?1",
+                [source_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(source_key) = source_key else {
+            return Ok(Vec::new());
+        };
+
+        let mut id_set = std::collections::HashSet::new();
+
+        {
+            let mut stmt = tx.prepare("SELECT id FROM messages WHERE source_id = ?1")?;
+            let rows = stmt.query_map([source_id], |r| r.get(0))?;
+            for id in rows {
+                id_set.insert(id?);
+            }
+        }
+
+        if let Some(addr) = source_key.strip_prefix("addr:") {
+            let addr_lower = addr.to_ascii_lowercase();
+            let mut stmt = tx.prepare(
+                "SELECT m.id FROM messages m
+                 JOIN folders f ON f.id = m.folder_id
+                 WHERE (f.role IS NULL OR f.role NOT IN ('trash', 'junk'))
+                   AND LOWER(m.from_addr) = ?1",
+            )?;
+            let rows = stmt.query_map([addr_lower], |r| r.get(0))?;
+            for id in rows {
+                id_set.insert(id?);
+            }
+        } else if let Some(list_id) = source_key.strip_prefix("list:") {
+            let list_lower = list_id.to_ascii_lowercase();
+            let bracketed = format!("<{list_lower}>");
+            let mut stmt = tx.prepare(
+                "SELECT m.id FROM messages m
+                 JOIN folders f ON f.id = m.folder_id
+                 WHERE (f.role IS NULL OR f.role NOT IN ('trash', 'junk'))
+                   AND (LOWER(m.list_id) = ?1 OR LOWER(m.list_id) = ?2)",
+            )?;
+            let rows = stmt.query_map(params![list_lower, bracketed], |r| r.get(0))?;
+            for id in rows {
+                id_set.insert(id?);
+            }
+        }
+
+        let mut message_ids: Vec<i64> = id_set.into_iter().collect();
+        message_ids.sort_unstable();
+
+        let mut affected = Vec::new();
+        for id in message_ids {
+            let row: Option<(i64, String, u32, Option<String>)> = tx
+                .query_row(
+                    "SELECT f.account_id, f.path, m.uid, f.role FROM messages m
+                     JOIN folders f ON f.id = m.folder_id WHERE m.id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            let Some((account_id, path, uid, current_role)) = row else {
+                continue;
+            };
+
+            let (op, arg) = if current_role.as_deref() == Some(role.as_str()) {
+                ("expunge", None)
+            } else {
+                let target_folder: Option<String> = tx
+                    .query_row(
+                        "SELECT path FROM folders WHERE account_id = ?1 AND role = ?2 LIMIT 1",
+                        params![account_id, role.as_str()],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let target_folder = match target_folder {
+                    Some(p) => Some(p),
+                    None if role == FolderRole::Junk => tx
+                        .query_row(
+                            "SELECT path FROM folders WHERE account_id = ?1 AND role = 'trash' LIMIT 1",
+                            [account_id],
+                            |r| r.get(0),
+                        )
+                        .optional()?,
+                    None => None,
+                };
+                match target_folder {
+                    Some(t) => ("move", Some(t)),
+                    None => {
+                        return Err(crate::Error::Other(format!(
+                            "this account has no {} folder",
+                            role.as_str()
+                        )));
+                    }
+                }
+            };
+
+            tx.execute(
+                "INSERT INTO pending_ops (account_id, message_id, folder_path, uid, op, arg)
+                 VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
+                params![account_id, path, uid, op, arg],
+            )?;
+            tx.execute("DELETE FROM pending_ops WHERE message_id = ?1", [id])?;
+            tx.execute("DELETE FROM messages WHERE id = ?1", [id])?;
+            affected.push(id);
+        }
+
+        tx.execute(
+            "DELETE FROM source_patterns WHERE source_id = ?1",
+            [source_id],
+        )?;
+        tx.execute(
+            "UPDATE messages SET source_id = NULL WHERE source_id = ?1",
+            [source_id],
+        )?;
+        tx.execute("DELETE FROM sources WHERE id = ?1", [source_id])?;
+
+        tx.commit()?;
+        Ok(affected)
     }
 
     /// Evaluates conversation turn status ("Wer ist am Zug?") for a batch of message IDs.

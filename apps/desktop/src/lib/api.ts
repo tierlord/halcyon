@@ -226,6 +226,11 @@ export function dismissSourceAnomaly(id: number): Promise<void> {
   return native ? invoke('dismiss_source_anomaly', { id }) : Promise.resolve()
 }
 
+/** Removes a recurring source and moves its messages to trash (asJunk=false) or junk (asJunk=true). */
+export function removeSource(sourceId: number, asJunk: boolean): Promise<number> {
+  return native ? invoke<number>('remove_source', { sourceId, asJunk }) : Promise.resolve(0)
+}
+
 export function threadTurns(messageIds: number[]): Promise<MessageTurnInfo[]> {
   return native ? invoke('thread_turns', { messageIds }) : Promise.resolve([])
 }

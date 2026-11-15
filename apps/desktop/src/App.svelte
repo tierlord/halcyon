@@ -655,6 +655,17 @@
     }
   }
 
+  async function handleRemoveSource(sourceId: number, asJunk: boolean) {
+    sourceItems = sourceItems.filter((s) => s.id !== sourceId)
+    try {
+      await api.removeSource(sourceId, asJunk)
+      await Promise.all([loadCases(), load(), refreshOverview()])
+    } catch (e) {
+      errors = [...errors, String(e)]
+      await loadCases()
+    }
+  }
+
   async function changeCaseStatus(caseId: number, status: CaseStatus) {
     const before = caseItems
     caseItems =
@@ -861,6 +872,7 @@
             onchangestatus={changeCaseStatus}
             onchangesourcemode={changeSourceMode}
             ondismissanomaly={dismissAnomaly}
+            onremovesource={handleRemoveSource}
           />
         {/if}
         {#if composing}
