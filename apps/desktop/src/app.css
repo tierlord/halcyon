@@ -24,6 +24,32 @@
   --danger: #b3261e;
   --wash-mix: 48%;
 
+  /* Cards: borderless, lifted by shadow (light) or a lighter surface (dark).
+     Brand tint: see lib/brandColor.ts, which mirrors these numbers. */
+  --card-surface: color-mix(in srgb, var(--snow) 40%, white);
+  --card-radius: 22px;
+  --card-radius-sm: 16px;
+  --card-shadow: 0 1px 2px rgb(21 17 14 / 6%), 0 10px 28px -12px rgb(21 17 14 / 18%);
+  --card-highlight: inset 0 0 0 0 transparent;
+  --brand-mix: 14%;
+  /* Gradient end: light fades out to the plain surface, dark keeps a colour. */
+  --brand-mix-end: 0%;
+  /* 0 in light, 100 in dark: lets .brand-scope pick the per-theme brand values. */
+  --dark-share: 0%;
+  --is-dark: 0;
+  --card-shadow-hover: 0 2px 4px rgb(21 17 14 / 8%), 0 18px 36px -12px rgb(21 17 14 / 26%);
+  --edge-w: 0px;
+  --card-radius-edge: var(--card-radius);
+  --glow-mix: 0%;
+  --glow-mix-hover: 0%;
+  --halo-blur: 0px;
+  --halo-spread: 4px;
+  --halo-mix: 16%;
+  --chip-mix: 22%;
+  --text-soft: color-mix(in srgb, var(--text) 74%, transparent);
+  --tile-shadow: 0 1px 3px rgb(21 17 14 / 16%);
+  --pill-mix: 10%;
+
   /* Kingfisher-blue navigation rail in light mode */
   --sidebar-bg: color-mix(in srgb, var(--blue-slate) 72%, #0f4454);
   --sidebar-border: color-mix(in srgb, var(--snow) 16%, transparent);
@@ -64,6 +90,24 @@
     --sync-glow: color-mix(in srgb, var(--blue-green) 55%, transparent);
     --danger: #ff8a80;
     --wash-mix: 26%;
+    --card-surface: color-mix(in srgb, var(--blue-slate) 22%, color-mix(in srgb, var(--snow) 6%, var(--pitch-black)));
+    --card-shadow: 0 0 0 0 transparent;
+    --card-shadow-hover: 0 0 0 0 transparent;
+    --card-highlight: inset 0 1px 0 rgb(247 240 240 / 7%);
+    --brand-mix: 42%;
+    --brand-mix-end: 14%;
+    --dark-share: 100%;
+    --is-dark: 1;
+    --edge-w: 4px;
+    --card-radius-edge: 8px;
+    --glow-mix: 30%;
+    --glow-mix-hover: 48%;
+    --halo-blur: 18px;
+    --halo-spread: 1px;
+    --halo-mix: 55%;
+    --chip-mix: 16%;
+    --tile-shadow: 0 0 0 1px rgb(247 240 240 / 14%);
+    --pill-mix: 12%;
 
     --sidebar-bg: var(--surface);
     --sidebar-border: var(--border);
@@ -93,6 +137,24 @@
   --sync-glow: color-mix(in srgb, var(--blue-green) 55%, transparent);
   --danger: #ff8a80;
   --wash-mix: 26%;
+  --card-surface: color-mix(in srgb, var(--blue-slate) 22%, color-mix(in srgb, var(--snow) 6%, var(--pitch-black)));
+  --card-shadow: 0 0 0 0 transparent;
+  --card-shadow-hover: 0 0 0 0 transparent;
+  --card-highlight: inset 0 1px 0 rgb(247 240 240 / 7%);
+  --brand-mix: 42%;
+  --brand-mix-end: 14%;
+  --dark-share: 100%;
+  --is-dark: 1;
+  --edge-w: 4px;
+  --card-radius-edge: 8px;
+  --glow-mix: 30%;
+  --glow-mix-hover: 48%;
+  --halo-blur: 18px;
+  --halo-spread: 1px;
+  --halo-mix: 55%;
+  --chip-mix: 16%;
+  --tile-shadow: 0 0 0 1px rgb(247 240 240 / 14%);
+  --pill-mix: 12%;
 
   --sidebar-bg: var(--surface);
   --sidebar-border: var(--border);
@@ -138,4 +200,15 @@ button {
 
 ::selection {
   background: color-mix(in srgb, var(--blue-green) 40%, transparent);
+}
+
+/* Per-theme brand values for a card. Elements that set --brand* inline also
+   carry this class; the share tokens make light use --brand/--brand-k and dark
+   use the vivid --brand-d/--brand-dt/--brand-kd (see lib/brandColor.ts). */
+.brand-scope {
+  --brand-acc: color-mix(in srgb, var(--brand-d, var(--brand)) var(--dark-share), var(--brand));
+  --brand-src: color-mix(in srgb, var(--brand-dt, var(--brand)) var(--dark-share), var(--brand));
+  --brand-kk: calc(var(--brand-k, 1) * (1 - var(--is-dark)) + var(--brand-kd, 1) * var(--is-dark));
+  --tint: color-mix(in srgb, var(--brand-src) calc(var(--brand-mix) * var(--brand-kk)), var(--card-surface));
+  --tint-end: color-mix(in srgb, var(--brand-src) calc(var(--brand-mix-end) * var(--brand-kk)), var(--card-surface));
 }

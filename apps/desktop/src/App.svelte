@@ -4,14 +4,23 @@
   import * as mock from './lib/mock'
   import AccountDialog from './lib/AccountDialog.svelte'
   import CaseBoard from './lib/CaseBoard.svelte'
-  import type { AsideCategory, CaseItem, CaseStatus } from './lib/cases'
+  import {
+    createMockSources,
+    createMockTurns,
+    type AsideCategory,
+    type CaseItem,
+    type CaseStatus,
+  } from './lib/cases'
   import Composer from './lib/Composer.svelte'
   import ContextMenu, { type MenuItem } from './lib/ContextMenu.svelte'
   import type { SidebarTarget } from './lib/Sidebar.svelte'
   import Icon from './lib/Icon.svelte'
+  import Invoices from './lib/Invoices.svelte'
   import MessageList from './lib/MessageList.svelte'
   import ReadingPane from './lib/ReadingPane.svelte'
   import Sidebar from './lib/Sidebar.svelte'
+  import Today from './lib/Today.svelte'
+  import { buildToday, loadSince, saveSince, type Dismissal } from './lib/today'
   import { accountLabel } from './lib/format'
   import {
     type AccountInfo,
@@ -32,6 +41,12 @@
 
   let overview: Overview | null = $state(null)
   let view: View = $state({ kind: 'unified', role: 'inbox' })
+  /** Top-level view. "Heute" is where the app starts; `mail` is the classic mailbox. */
+  let section: 'today' | 'invoices' | 'mail' = $state('today')
+  /** The mail opened from "Heute" (shown in place of the Heute column). */
+  let todayOpenId: number | null = $state(null)
+  /** Expanded "Für dich" card; survives the round trip through the full reading view. */
+  let todayExpanded: string | null = $state(null)
   let messages: MessageSummary[] = $state([])
   let loading = $state(true)
   let selectedId: number | null = $state(null)
@@ -240,7 +255,10 @@
       ])
       if (seq === requestSeq) {
         replyMessages = replies
-        turnMap = new Map(turns.map((t) => [t.message_id, t]))
+        const all = api.isMock
+          ? createMockTurns(mock.allMockMessages()).map(api.applyMockTurnDismissal)
+          : turns
+        turnMap = new Map(all.map((t) => [t.message_id, t]))
       }
     } catch (e) {
       console.warn('Eigene Antworten nicht geladen', e)
@@ -257,11 +275,32 @@
 
   let searchTimer: ReturnType<typeof setTimeout> | undefined
   function onSearchInput() {
+    if (searching && section !== 'mail') showSection('mail')
     clearTimeout(searchTimer)
     searchTimer = setTimeout(load, 150)
   }
 
+  /** Since when "Heute" summarises; read again whenever it opens. */
+  let todaySince = $state(loadSince(api.isMock ? 72 * 3600 : 24 * 3600))
+
+  function showSection(next: 'today' | 'invoices' | 'mail') {
+    if (section === 'today' && next !== 'today') saveSince()
+    if (next === 'today' && section !== 'today') {
+      todaySince = loadSince(api.isMock ? 72 * 3600 : 24 * 3600)
+      // Heute summarises the unified inbox; make sure that is what is loaded.
+      if (view.kind !== 'unified' || searching) {
+        view = { kind: 'unified', role: 'inbox' }
+        query = ''
+        load()
+      }
+    }
+    todayOpenId = null
+    todayExpanded = null
+    section = next
+  }
+
   function selectView(v: View) {
+    showSection('mail')
     view = v
     query = ''
     selectedId = null
@@ -619,7 +658,7 @@
       const [r, srcs] = await Promise.all([api.cases(), api.sources()])
       caseItems = r.cases
       asideCategories = r.categories
-      sourceItems = srcs
+      sourceItems = api.isMock ? createMockSources(mock.allMockMessages()) : srcs
       const srcMsgIds = srcs
         .map((s) => s.latest_message_id)
         .filter((id): id is number => id != null)
@@ -681,7 +720,120 @@
     }
   }
 
+  // ----- Heute -----------------------------------------------------------
+
+  /** How long the "Rückgängig" bar stays; a deferred dismissal is committed after it. */
+  const UNDO_MS = 6000
+  interface PendingUndo {
+    label: string
+    undo: () => void
+    /** Deferred part, run when the window expires (or another item is removed). */
+    commit?: () => void
+  }
+  let pendingUndo = $state<PendingUndo | null>(null)
+  let pendingTimer: ReturnType<typeof setTimeout> | undefined
+  /** Anomalies hidden during the undo window; there is no way to restore one afterwards. */
+  let hiddenAnomalies = $state<Set<number>>(new Set())
+
+  function flushUndo() {
+    clearTimeout(pendingTimer)
+    const p = pendingUndo
+    pendingUndo = null
+    p?.commit?.()
+  }
+
+  function offerUndo(p: PendingUndo) {
+    flushUndo()
+    pendingUndo = p
+    pendingTimer = setTimeout(flushUndo, UNDO_MS)
+  }
+
+  function undoLast() {
+    clearTimeout(pendingTimer)
+    const p = pendingUndo
+    pendingUndo = null
+    p?.undo()
+  }
+
+  function setTurnStatus(messageId: number, info: MessageTurnInfo | undefined) {
+    const next = new Map(turnMap)
+    if (info) next.set(messageId, info)
+    else next.delete(messageId)
+    turnMap = next
+  }
+
+  function dismissFromToday(d: Dismissal, label = 'Entfernt') {
+    if (d.kind === 'case') {
+      void changeCaseStatus(d.caseId, 'done')
+      offerUndo({ label, undo: () => void changeCaseStatus(d.caseId, d.previous) })
+    } else if (d.kind === 'anomaly') {
+      hiddenAnomalies = new Set(hiddenAnomalies).add(d.sourceId)
+      const show = () => {
+        const next = new Set(hiddenAnomalies)
+        next.delete(d.sourceId)
+        hiddenAnomalies = next
+      }
+      offerUndo({
+        label,
+        undo: show,
+        commit: () => {
+          void dismissAnomaly(d.sourceId).then(show)
+        },
+      })
+    } else {
+      const before = turnMap.get(d.messageId)
+      if (before) setTurnStatus(d.messageId, { ...before, status: 'done', follow_up_due: false })
+      api.dismissTurn(d.messageId).catch((e) => {
+        if (before) setTurnStatus(d.messageId, before)
+        console.warn('Konversation konnte nicht entfernt werden', e)
+      })
+      offerUndo({
+        label,
+        undo: () => {
+          if (before) setTurnStatus(d.messageId, before)
+          api.restoreTurn(d.messageId).catch((e) => console.warn('Wiederherstellen fehlgeschlagen', e))
+        },
+      })
+    }
+  }
+
+  const firstName = $derived(
+    (overview as Overview | null)?.accounts
+      .find((a) => a.display_name?.trim())
+      ?.display_name?.trim()
+      .split(/\s+/)[0] ?? null,
+  )
+  const todayModel = $derived(
+    buildToday({
+      cases: caseItems,
+      sources: sourceItems.filter((s) => !hiddenAnomalies.has(s.id)),
+      turns: turnMap,
+      pool: messagePool,
+      since: todaySince,
+      firstName,
+    }),
+  )
+  const todayOpen = $derived(
+    todayOpenId != null ? (messagePool.find((m) => m.id === todayOpenId) ?? null) : null,
+  )
+
+  function markSeenFromToday(id: number) {
+    const m = messagePool.find((x) => x.id === id)
+    if (m && !isSeen(m)) setFlag([id], 'seen', true)
+  }
+
+  function openFromToday(id: number) {
+    todayOpenId = id
+    markSeenFromToday(id)
+  }
+
   onMount(() => {
+    // The last visit of "Heute" counts from when the window closes, too.
+    const onPageHide = () => {
+      flushUndo()
+      if (section === 'today') saveSince()
+    }
+    window.addEventListener('pagehide', onPageHide)
     refreshOverview()
     load()
     loadCases()
@@ -699,6 +851,7 @@
       }),
     ]
     return () => {
+      window.removeEventListener('pagehide', onPageHide)
       unlisteners.forEach((u) => u.then((f) => f()))
     }
   })
@@ -715,24 +868,19 @@
   <Sidebar
     {overview}
     {view}
+    {section}
+    needsYou={todayModel.forYou.length > 0}
     {activeEmails}
-    cases={caseItems}
-    {selectedCaseId}
     onselect={(v) => {
       selectedCaseId = null
       selectView(v)
     }}
+    onselectsection={(s) => {
+      selectedCaseId = null
+      showSection(s)
+    }}
     onmanageaccounts={() => (accountDialogOpen = true)}
     oncontext={openContext}
-    onshowcases={() => {
-      selectedId = null
-      selectedCaseId = null
-    }}
-    onselectcase={(id) => {
-      selectedId = null
-      selectedCaseId = id
-    }}
-    onhovercase={(id) => (hoveredCaseId = id)}
   />
 
   <div
@@ -815,6 +963,52 @@
       </div>
     {/if}
 
+    {#if section !== 'mail'}
+      <div class="pane-slot full">
+        {#if section === 'invoices'}
+          <Invoices />
+        {:else if todayOpen}
+          <div class="pane-backbar">
+            <button type="button" class="pane-backbtn" onclick={() => (todayOpenId = null)}>
+              ← Zurück zu Heute
+            </button>
+          </div>
+          <ReadingPane
+            message={todayOpen}
+            ontoggleread={toggleRead}
+            ontoggleflag={toggleFlag}
+            ondelete={(m) => deleteMessage(m)}
+            onreply={reply}
+          />
+        {:else}
+          <Today
+            model={todayModel}
+            bind:expandedKey={todayExpanded}
+            findMessage={(id) => messagePool.find((m) => m.id === id) ?? null}
+            onexpand={markSeenFromToday}
+            ontoggleread={toggleRead}
+            ontoggleflag={toggleFlag}
+            ondelete={(m) => deleteMessage(m)}
+            onreplyto={reply}
+            onopen={openFromToday}
+            onreply={(m) => reply(m, 'reply')}
+            undo={pendingUndo}
+            ondismiss={dismissFromToday}
+            onundo={undoLast}
+          />
+        {/if}
+        {#if composing}
+          {#key composerKey}
+            <Composer
+              initial={composing}
+              accounts={overview?.accounts ?? []}
+              onsend={send}
+              onclose={() => (composing = null)}
+            />
+          {/key}
+        {/if}
+      </div>
+    {:else}
     <div bind:this={contentEl} class="content" style:--list-w="{listWidth}px">
       <MessageList
         {title}
@@ -887,6 +1081,7 @@
         {/if}
       </div>
     </div>
+    {/if}
   </main>
 </div>
 
@@ -977,7 +1172,11 @@
     min-width: 0;
     min-height: 0;
   }
+  .pane-slot.full {
+    flex: 1;
+  }
   .pane-slot > :global(.pane),
+  .pane-slot > :global(.today),
   .pane-slot > :global(.board) {
     flex: 1;
     min-height: 0;

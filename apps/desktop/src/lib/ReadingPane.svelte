@@ -13,12 +13,15 @@
     ontoggleflag,
     ondelete,
     onreply,
+    embedded = false,
   }: {
     message: MessageSummary | null
     ontoggleread: (m: MessageSummary) => void
     ontoggleflag: (m: MessageSummary) => void
     ondelete: (m: MessageSummary) => void
     onreply: (m: MessageSummary, kind: 'reply' | 'reply_all' | 'forward') => void
+    /** Inside another card (Heute): no pane chrome, compact toolbar, scrolls within its own max height. */
+    embedded?: boolean
   } = $props()
 
   let view = $state<MessageView | null>(null)
@@ -200,7 +203,7 @@
   }
 </script>
 
-<article class="pane">
+<article class="pane" class:embedded>
   {#if message}
     {@const h = message.header}
     <header class="head">
@@ -845,5 +848,57 @@
     border: 1px solid var(--border);
     max-height: 200px;
     overflow-y: auto;
+  }
+
+  /* Embedded in a card (Heute): the card provides background and padding. The
+     whole pane scrolls inside a bounded height; the message frame gets a fixed
+     height so its own scrolling stays usable. */
+  .pane.embedded {
+    background: transparent;
+    max-height: 60vh;
+    overflow-y: auto;
+  }
+  .embedded .head {
+    padding: 0 0 8px;
+    max-height: none;
+    overflow: visible;
+  }
+  .embedded .actions {
+    gap: 4px;
+    margin-bottom: 10px;
+  }
+  .embedded .action {
+    min-height: 28px;
+    padding: 3px 8px;
+  }
+  .embedded .action span {
+    /* compact toolbar: only "Antworten" keeps its label */
+    display: none;
+  }
+  .embedded .action:first-child span {
+    display: inline;
+  }
+  .embedded h1 {
+    margin: 0 0 10px;
+    font-size: 16px;
+  }
+  .embedded .details {
+    margin: 10px 0 6px;
+  }
+  .embedded .body {
+    flex: none;
+    padding: 0;
+  }
+  .embedded iframe {
+    flex: none;
+    height: max(320px, 45vh);
+  }
+  .embedded .state {
+    min-height: 120px;
+  }
+  .embedded .warn-backdrop {
+    /* the pane scrolls, so a pane-relative backdrop could end up off screen */
+    position: fixed;
+    z-index: 30;
   }
 </style>

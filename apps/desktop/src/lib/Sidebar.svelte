@@ -13,7 +13,6 @@
   import { fade, slide } from 'svelte/transition'
   import Icon from './Icon.svelte'
   import { accountLabel } from './format'
-  import type { CaseItem } from './cases'
   import { getThemeMode, setThemeMode, type ThemeMode } from './theme.svelte'
   import type { FolderRole, Overview, View } from './types'
 
@@ -21,29 +20,27 @@
   let {
     overview,
     view,
+    section = 'mail',
+    needsYou = false,
     activeEmails = [],
-    cases = [],
-    selectedCaseId = null,
     onselect,
+    onselectsection,
     onmanageaccounts,
     oncontext,
-    onshowcases,
-    onselectcase,
-    onhovercase,
   }: {
     overview: Overview | null
     view: View
+    /** Top-level view: Heute, Rechnungen, or the mailbox views. */
+    section?: 'today' | 'invoices' | 'mail'
+    /** Shows a quiet dot on "Heute" when something waits for the user. */
+    needsYou?: boolean
     /** Accounts being synced right now. */
     activeEmails?: string[]
-    cases?: CaseItem[]
-    selectedCaseId?: number | null
     onselect: (v: View) => void
+    onselectsection: (s: 'today' | 'invoices') => void
     onmanageaccounts: () => void
     /** Right-click or context-menu key on an item; x/y in window coordinates. */
     oncontext: (target: SidebarTarget, x: number, y: number) => void
-    onshowcases?: () => void
-    onselectcase?: (id: number) => void
-    onhovercase?: (id: number | null) => void
   } = $props()
 
   // First the list grows, then the folders fade in one after another.
@@ -69,7 +66,8 @@
     }
   }
 
-  const isUnified = $derived(view.kind === 'unified')
+  const inMail = $derived(section === 'mail')
+  const isUnified = $derived(inMail && view.kind === 'unified')
   let expandedAccountId = $state<number | null>(null)
   let settingsOpen = $state(false)
   let brandRowEl: HTMLDivElement | undefined = $state()
@@ -187,6 +185,19 @@
 
   <ul class="section">
     <li>
+      <button class="item" class:active={section === 'today'} onclick={() => onselectsection('today')}>
+        <Icon name="mailopen" />
+        <span class="label">Heute</span>
+        {#if needsYou}<span class="quiet-dot" title="Etwas wartet auf dich" aria-label="Etwas wartet auf dich"></span>{/if}
+      </button>
+    </li>
+    <li>
+      <button class="item" class:active={section === 'invoices'} onclick={() => onselectsection('invoices')}>
+        <Icon name="paperclip" />
+        <span class="label">Rechnungen</span>
+      </button>
+    </li>
+    <li>
       <button
         class="item"
         class:active={isUnified}
@@ -196,7 +207,6 @@
       >
         <Icon name="inbox" />
         <span class="label">Alle Posteingänge</span>
-        {#if overview?.unread_inbox}<span class="count">{overview.unread_inbox}</span>{/if}
       </button>
     </li>
   </ul>
@@ -220,8 +230,8 @@
       <li>
         <button
           class="item"
-          class:active={view.kind === 'account' && view.accountId === account.id}
-          class:parent-active={view.kind === 'folder' && view.accountId === account.id}
+          class:active={inMail && view.kind === 'account' && view.accountId === account.id}
+          class:parent-active={inMail && view.kind === 'folder' && view.accountId === account.id}
           class:syncing={activeEmails.includes(account.email)}
           aria-busy={activeEmails.includes(account.email)}
           aria-expanded={hasFolders ? expanded : undefined}
@@ -237,7 +247,6 @@
           {/if}
           <Icon name="mail" />
           <span class="label">{account.display_name ?? accountLabel(account.email)}</span>
-          {#if account.unread_inbox}<span class="count">{account.unread_inbox}</span>{/if}
         </button>
 
         {#if expanded && hasFolders}
@@ -247,7 +256,7 @@
             transition:slide={{ duration: EXPAND_MS, easing: cubicOut }}
           >
             {#each account.folders as folder, i (folder.id)}
-              {@const folderActive = view.kind === 'folder' && view.folderId === folder.id}
+              {@const folderActive = inMail && view.kind === 'folder' && view.folderId === folder.id}
               <li in:fade={{ duration: 160, delay: EXPAND_MS * 0.6 + i * STAGGER_MS }}>
                 {#if folder.selectable}
                   <button
@@ -261,7 +270,6 @@
                   >
                     <Icon name={folderIcon(folder.role)} size={15} />
                     <span class="label">{folder.name}</span>
-                    {#if folder.unread}<span class="folder-count">{folder.unread}</span>{/if}
                   </button>
                 {:else}
                   <div
@@ -286,35 +294,6 @@
     {/each}
   </ul>
 
-  <div class="cases-header">
-    <button
-      type="button"
-      class="cases-title-btn"
-      onclick={() => onshowcases?.()}
-      title="Vorgänge-Übersicht anzeigen"
-    >
-      <h2>Vorgänge</h2>
-    </button>
-  </div>
-  <ul class="section cases-scroll" aria-label="Vorgänge">
-    {#each [...cases.filter((c) => c.status !== 'done' && c.status !== 'aside'), ...cases.filter((c) => c.status === 'done')] as c (c.id)}
-      <li>
-        <button
-          type="button"
-          class="item case-nav-item"
-          class:active={selectedCaseId === c.id}
-          class:muted-case={c.status === 'done'}
-          onmouseenter={() => onhovercase?.(c.id)}
-          onmouseleave={() => onhovercase?.(null)}
-          onclick={() => onselectcase?.(c.id)}
-          title={c.nextStep}
-        >
-          <span class="case-dot" class:urgent={c.status === 'needs_you'} class:done={c.status === 'done'}></span>
-          <span class="label">{c.title}</span>
-        </button>
-      </li>
-    {/each}
-  </ul>
 </nav>
 
 <style>
@@ -553,16 +532,6 @@
     padding: 0 0 0 6px;
     border-left: 1px solid var(--sidebar-border);
   }
-  /* Folder counts stay quiet: a number, no pill. */
-  .folder-count {
-    font-size: 12px;
-    font-variant-numeric: tabular-nums;
-    color: var(--sidebar-text-muted);
-    opacity: 0.85;
-  }
-  .folder-item.active .folder-count {
-    color: var(--sidebar-text);
-  }
   .folder-item {
     gap: 8px;
     padding-top: 5px;
@@ -580,15 +549,13 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .count {
-    font-size: 12px;
-    font-weight: 650;
-    min-width: 22px;
-    padding: 0 6px;
-    border-radius: 99px;
-    text-align: center;
-    background: var(--sidebar-accent-fill);
-    color: var(--sidebar-on-accent-fill);
+  /* A dot, not a number: something is waiting, nothing is counted. */
+  .quiet-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex: none;
+    background: var(--ochre);
   }
   .disabled {
     color: var(--sidebar-text-muted);
@@ -602,60 +569,11 @@
     color: var(--sidebar-text-muted);
     font-size: 13px;
   }
-  .cases-header {
-    margin: 18px 8px 6px;
-  }
-  .cases-title-btn {
-    border: 0;
-    background: none;
-    padding: 0;
-    text-align: left;
-  }
-  .cases-title-btn h2 {
-    margin: 0;
-  }
-  .cases-title-btn:hover h2 {
-    color: var(--sidebar-accent-text);
-  }
-  /* Folders and cases share the height; both scroll on their own. */
+  /* The folders scroll on their own; the freed space below stays empty for now. */
   .accounts-scroll {
     flex: 0 1 auto;
     min-height: 80px;
     overflow-y: auto;
     scrollbar-width: thin;
-  }
-  .cases-scroll {
-    flex: 1 1 0;
-    min-height: 120px;
-    overflow-y: auto;
-    padding-bottom: 28px;
-    mask-image: linear-gradient(to bottom, #000 72%, transparent 100%);
-    -webkit-mask-image: linear-gradient(to bottom, #000 72%, transparent 100%);
-    scrollbar-width: thin;
-  }
-  .case-nav-item {
-    gap: 8px;
-    padding: 5px 8px;
-    font-size: 13px;
-  }
-  .case-nav-item.muted-case {
-    color: var(--sidebar-text-muted);
-    opacity: 0.65;
-  }
-  .case-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    flex: none;
-    background: var(--sidebar-accent-fill);
-    opacity: 0.7;
-  }
-  .case-dot.urgent {
-    background: var(--ochre);
-    opacity: 1;
-  }
-  .case-dot.done {
-    background: var(--sidebar-text-muted);
-    opacity: 0.5;
   }
 </style>

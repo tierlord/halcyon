@@ -235,6 +235,33 @@ export function threadTurns(messageIds: number[]): Promise<MessageTurnInfo[]> {
   return native ? invoke('thread_turns', { messageIds }) : Promise.resolve([])
 }
 
+// Mock browser mode: dismissed mail ids, so the undo flow can be tried.
+const mockDismissedTurns = new Set<number>()
+
+/** Hides the conversation of this mail until a new mail arrives in the thread. */
+export function dismissTurn(messageId: number): Promise<void> {
+  if (!native) {
+    mockDismissedTurns.add(messageId)
+    return Promise.resolve()
+  }
+  return invoke('dismiss_turn', { messageId })
+}
+
+/** Mock mode only: applies dismissals to freshly generated sample turns. */
+export function applyMockTurnDismissal(t: MessageTurnInfo): MessageTurnInfo {
+  return mockDismissedTurns.has(t.message_id)
+    ? { ...t, status: 'done', follow_up_due: false, reason: 'Von dir als erledigt entfernt' }
+    : t
+}
+
+export function restoreTurn(messageId: number): Promise<void> {
+  if (!native) {
+    mockDismissedTurns.delete(messageId)
+    return Promise.resolve()
+  }
+  return invoke('restore_turn', { messageId })
+}
+
 export function maskMessagePreview(id: number): Promise<MaskedPreview> {
   if (!native) {
     return Promise.resolve({

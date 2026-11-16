@@ -1,4 +1,4 @@
-import type { MessageSummary } from './types'
+import type { MessageSummary, MessageTurnInfo, SourceRecord } from './types'
 
 export type CaseKind =
   | 'order'
@@ -17,6 +17,8 @@ export interface CaseEvent {
   /** ISO date YYYY-MM-DD for timeline alignment. */
   day: string
   label: string
+  /** Machine kind from the linker, e.g. `order.shipped`; absent in mock data. */
+  kind?: string
   /** Role on the horizontal calendar: start, update, due, or done. */
   phase: 'start' | 'update' | 'due' | 'done'
   messageId?: number
@@ -53,6 +55,8 @@ export interface CaseItem {
   events: CaseEvent[]
   attachments?: CaseAttachment[]
   messageIds: number[]
+  /** Unix seconds of the last change (status etc.); absent in mock data. */
+  updatedAt?: number
 }
 
 export interface AsideCategory {
@@ -108,6 +112,9 @@ export function createMockCases(messages: MessageSummary[]): {
   const fotobuchId = findId(/Fotobuch/)
   const versicherungId = findId(/Vertrag Nr\. 2026-1184/)
   const bankId = findId(/Neue Dokumente/)
+  const dhlId = findId(/Ihre Sendung kommt heute/)
+  const lieferungId = findId(/Lieferung KW 44/)
+  const werkzeugId = findId(/Rechnung 2026-0417/)
 
   const cases: CaseItem[] = [
     {
@@ -184,7 +191,7 @@ export function createMockCases(messages: MessageSummary[]): {
       keys: [{ label: 'Bestellung', value: 'FB-9021' }],
       events: [
         { id: 13, day: dayOffset(-8), label: 'Bestellt', phase: 'start', messageId: fotobuchId, direction: 'in' },
-        { id: 14, day: dayOffset(-5), label: 'Versandt', phase: 'done', messageId: fotobuchId, direction: 'in' },
+        { id: 14, day: dayOffset(-1), label: 'Zugestellt', kind: 'order.delivered', phase: 'done', messageId: fotobuchId, direction: 'in' },
       ],
       attachments: [
         { id: 'att-fb-1', name: 'Rechnung_FB-9021.pdf', sizeLabel: '142 KB', messageId: fotobuchId },
@@ -205,6 +212,105 @@ export function createMockCases(messages: MessageSummary[]): {
         { id: 15, day: dayOffset(-7), label: 'Eingegangen', phase: 'done', messageId: bankId, direction: 'in' },
       ],
       messageIds: bankId != null ? [bankId] : [],
+    },
+    {
+      id: 8,
+      title: 'Bestellung 48213',
+      counterparty: 'Pixelwerk',
+      domain: 'pixelwerk.example',
+      kind: 'order',
+      status: 'waiting',
+      nextStep: 'Unterwegs · wartet auf Zustellung',
+      amount: '89,90 €',
+      amountCents: 8990,
+      currency: 'EUR',
+      orderDate: dayOffset(-4),
+      reason: 'Bestellbestätigung und Versandmail mit gleicher Bestellnummer',
+      keys: [{ label: 'Bestellung', value: '48213' }],
+      events: [
+        { id: 20, day: dayOffset(-4), label: 'Bestellt', kind: 'order.placed', phase: 'start', messageId: dhlId, direction: 'in' },
+        { id: 21, day: dayOffset(-2), label: 'Versandt', kind: 'order.shipped', phase: 'update', messageId: dhlId, direction: 'in' },
+        { id: 22, day: dayOffset(0), label: 'In Zustellung', phase: 'update', messageId: dhlId, direction: 'in' },
+      ],
+      messageIds: dhlId != null ? [dhlId] : [],
+    },
+    {
+      id: 9,
+      title: 'Bestellung ZL-7730',
+      counterparty: 'Zulieferer Kranz',
+      domain: 'zulieferer.example',
+      kind: 'order',
+      status: 'waiting',
+      nextStep: 'Unterwegs · wartet auf Zustellung',
+      amount: '312,00 €',
+      amountCents: 31200,
+      currency: 'EUR',
+      orderDate: dayOffset(-11),
+      reason: 'Versandmail zur Bestellung ZL-7730',
+      keys: [{ label: 'Bestellung', value: 'ZL-7730' }],
+      events: [
+        { id: 23, day: dayOffset(-11), label: 'Bestellt', kind: 'order.placed', phase: 'start', messageId: lieferungId, direction: 'in' },
+        { id: 24, day: dayOffset(-7), label: 'Versandt', kind: 'order.shipped', phase: 'update', messageId: lieferungId, direction: 'in' },
+      ],
+      messageIds: lieferungId != null ? [lieferungId] : [],
+    },
+    {
+      id: 10,
+      title: 'Bestellung WB-2291',
+      counterparty: 'Werkzeugbedarf',
+      domain: 'muster-werkstatt.example',
+      kind: 'order',
+      status: 'waiting',
+      nextStep: 'Bestellt · wartet auf Versand',
+      amount: '57,40 €',
+      amountCents: 5740,
+      currency: 'EUR',
+      orderDate: dayOffset(-9),
+      reason: 'Bestellbestätigung erkannt',
+      keys: [{ label: 'Bestellung', value: 'WB-2291' }],
+      events: [
+        { id: 25, day: dayOffset(-9), label: 'Bestellt', kind: 'order.placed', phase: 'start', messageId: werkzeugId, direction: 'in' },
+      ],
+      messageIds: werkzeugId != null ? [werkzeugId] : [],
+    },
+    {
+      id: 11,
+      title: 'Bestellung 48377',
+      counterparty: 'Pixelwerk',
+      domain: 'pixelwerk.example',
+      kind: 'order',
+      status: 'waiting',
+      nextStep: 'Unterwegs · wartet auf Zustellung',
+      amount: '24,90 €',
+      amountCents: 2490,
+      currency: 'EUR',
+      orderDate: dayOffset(-3),
+      reason: 'Versandmail zur Bestellung 48377',
+      keys: [{ label: 'Bestellung', value: '48377' }],
+      events: [
+        { id: 26, day: dayOffset(-3), label: 'Bestellt', kind: 'order.placed', phase: 'start', messageId: dhlId, direction: 'in' },
+        { id: 27, day: dayOffset(-1), label: 'Versandt', kind: 'order.shipped', phase: 'update', messageId: dhlId, direction: 'in' },
+      ],
+      messageIds: dhlId != null ? [dhlId] : [],
+    },
+    {
+      id: 12,
+      title: 'Bestellung 48402',
+      counterparty: 'Pixelwerk',
+      domain: 'pixelwerk.example',
+      kind: 'order',
+      status: 'waiting',
+      nextStep: 'Bestellt · wartet auf Versand',
+      amount: '129,00 €',
+      amountCents: 12900,
+      currency: 'EUR',
+      orderDate: dayOffset(-1),
+      reason: 'Bestellbestätigung erkannt',
+      keys: [{ label: 'Bestellung', value: '48402' }],
+      events: [
+        { id: 28, day: dayOffset(-1), label: 'Bestellt', kind: 'order.placed', phase: 'start', messageId: lieferungId, direction: 'in' },
+      ],
+      messageIds: lieferungId != null ? [lieferungId] : [],
     },
   ]
 
@@ -289,6 +395,7 @@ export function fromCaseView(v: CaseView): CaseItem {
     id: e.id,
     day: localDay(e.occurred_at),
     label: e.label,
+    kind: e.kind ?? undefined,
     phase: e.phase,
     messageId: e.message_id ?? undefined,
     direction: e.direction ?? undefined,
@@ -312,5 +419,85 @@ export function fromCaseView(v: CaseView): CaseItem {
       .map((k) => ({ label: k.label, value: k.value })),
     events,
     messageIds: v.message_ids,
+    updatedAt: v.updated_at,
   }
+}
+
+/**
+ * Sample sources for the browser preview (the backend computes them natively).
+ * Matched to mock mail by sender domain, like the real source records.
+ */
+export function createMockSources(messages: MessageSummary[]): SourceRecord[] {
+  const nowSec = Math.floor(Date.now() / 1000)
+  const latest = (domain: string) =>
+    messages
+      .filter((m) => m.header.from_addr?.endsWith(`@${domain}`) && m.folder_role === 'inbox')
+      .sort((a, b) => (b.header.date ?? 0) - (a.header.date ?? 0))[0]?.id ?? null
+  const make = (
+    id: number,
+    display_name: string,
+    domain: string,
+    mode: SourceRecord['mode'],
+    is_newsletter: boolean,
+    anomaly: SourceRecord['anomaly'] = null,
+  ): SourceRecord => ({
+    id,
+    source_key: `noreply@${domain}`,
+    display_name,
+    domain,
+    mode,
+    user_mode: false,
+    total_messages: 40 + id * 7,
+    read_messages: 12,
+    dmarc_pass_count: 30,
+    is_newsletter,
+    first_seen_at: nowSec - 300 * 86400,
+    last_seen_at: nowSec - 3600,
+    median_interval_secs: 7 * 86400,
+    median_amount_cents: null,
+    amount_sample_count: 0,
+    anomaly,
+    patterns: [],
+    latest_message_id: latest(domain),
+  })
+  return [
+    make(1, 'Shop Wochenpost', 'shop.example', 'bundle', true),
+    make(2, 'Streamingdienst', 'stream.example', 'mute', true),
+    make(3, 'GitHub', 'github.example', 'bundle', false),
+    make(4, 'PayPal', 'paypal.example', 'latest_only', false),
+    make(5, 'Kleinanzeigen', 'kleinanzeigen.example', 'show', false),
+    make(6, 'Telekom', 'telekom.example', 'show', false, {
+      kind: 'unusual_amount',
+      needs_you: true,
+      reason: 'Die Telekom-Rechnung ist diesmal 12 € höher als sonst',
+    }),
+  ]
+}
+
+/** Sample "who is on turn" results for the browser preview. */
+export function createMockTurns(messages: MessageSummary[]): MessageTurnInfo[] {
+  const find = (re: RegExp, sent = false) =>
+    messages.find((m) => re.test(m.header.subject ?? '') && (m.folder_role === 'sent') === sent)
+  const jonas = find(/Dienstplan Dezember/)
+  const rennrad = find(/^Re: Nutzer-Anfrage/, true)
+  const out: MessageTurnInfo[] = []
+  if (jonas) {
+    out.push({
+      message_id: jonas.id,
+      status: 'needs_you',
+      follow_up_due: false,
+      reason: 'Die letzte Mail kommt von Jonas, du stehst in An und sie enthält eine Frage',
+      confidence: 0.8,
+    })
+  }
+  if (rennrad) {
+    out.push({
+      message_id: rennrad.id,
+      status: 'waiting',
+      follow_up_due: true,
+      reason: 'Deine Mail ist die letzte und enthält eine Frage',
+      confidence: 0.7,
+    })
+  }
+  return out
 }
