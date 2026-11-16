@@ -330,6 +330,124 @@ ALTER TABLE messages ADD COLUMN subject_pattern TEXT;
 CREATE INDEX messages_source ON messages(source_id, date DESC);
 DELETE FROM case_scan;
 "#,
+    // 13: invoice ledger. Invoices outlive the mail they came from
+    // (`message_id` is cleared, not the row), proof copies are kept in
+    // `invoice_files`, and `sender_portals` remembers where a sender's
+    // customer area is. `kind` on accounts splits private from business.
+    r#"
+ALTER TABLE accounts ADD COLUMN kind TEXT NOT NULL DEFAULT 'private';
+
+CREATE TABLE invoices (
+    id             INTEGER PRIMARY KEY,
+    account_id     INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    issuer         TEXT NOT NULL,
+    domain         TEXT,
+    title          TEXT NOT NULL,
+    invoice_number TEXT,
+    number_norm    TEXT,
+    amount_cents   INTEGER,
+    currency       TEXT,
+    issued_at      INTEGER NOT NULL,
+    due_at         INTEGER,
+    paid           INTEGER NOT NULL DEFAULT 0,
+    paid_source    TEXT,
+    paid_note      TEXT,
+    kind_override  TEXT,
+    evidence       TEXT NOT NULL DEFAULT 'none',
+    message_id     INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    rfc_message_id TEXT,
+    case_id        INTEGER REFERENCES cases(id) ON DELETE SET NULL,
+    created_at     INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX invoices_issued ON invoices(issued_at DESC);
+CREATE INDEX invoices_rfc ON invoices(account_id, rfc_message_id);
+CREATE INDEX invoices_number ON invoices(account_id, domain, number_norm);
+
+CREATE TABLE invoice_files (
+    id         INTEGER PRIMARY KEY,
+    invoice_id INTEGER NOT NULL UNIQUE REFERENCES invoices(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    mime_type  TEXT NOT NULL,
+    size       INTEGER NOT NULL,
+    data_zstd  BLOB NOT NULL
+);
+
+CREATE TABLE sender_portals (
+    domain     TEXT PRIMARY KEY,
+    url        TEXT NOT NULL,
+    label      TEXT NOT NULL,
+    origin     TEXT NOT NULL,
+    score      INTEGER NOT NULL,
+    message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+-- Messages the invoice pass has looked at (see `case_scan`).
+CREATE TABLE invoice_scan (
+    message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    with_body  INTEGER NOT NULL
+);
+"#,
+    // 14: remember the RFC `Message-ID` on case events. A mail moved to
+    // Trash is a new row (new UID) and the old row's events lose their
+    // `message_id`; without this the moved copy would be counted twice.
+    r#"
+ALTER TABLE case_events ADD COLUMN rfc_message_id TEXT;
+UPDATE case_events SET rfc_message_id =
+    (SELECT m.message_id FROM messages m WHERE m.id = case_events.message_id)
+ WHERE message_id IS NOT NULL;
+CREATE INDEX case_events_rfc ON case_events(rfc_message_id);
+"#,
+    // 15: the ledger lists every order, also when no invoice mail ever
+    // arrives. `from_order` marks such a placeholder row (one per order
+    // case); an invoice for the same case takes it over.
+    r#"
+ALTER TABLE invoices ADD COLUMN from_order INTEGER NOT NULL DEFAULT 0;
+CREATE UNIQUE INDEX invoices_order_case ON invoices(case_id) WHERE from_order = 1;
+"#,
+    // 16: "Von dir als erledigt entfernt" for conversations. Keyed by the RFC
+    // `Message-ID` of the judged mail (not the row id), so the dismissal
+    // survives moves between folders and copies, while a NEW mail in the
+    // thread has a new id and is assessed normally. `from_addr` is kept as
+    // the raw signal for learning which senders never need the user.
+    r#"
+CREATE TABLE turn_dismissals (
+    rfc_message_id TEXT PRIMARY KEY,
+    from_addr      TEXT,
+    created_at     INTEGER NOT NULL DEFAULT (unixepoch())
+);
+"#,
+    // 17: keywords on the server. `folders.keywords` is whether the folder
+    // accepts client-defined keywords (PERMANENTFLAGS contains `\*`), learnt
+    // when the folder is selected. `filing_scan` remembers which inbox mails
+    // the auto-read pass has already judged, so it judges each one once and
+    // never re-marks a mail the user marked unread again.
+    r#"
+ALTER TABLE folders ADD COLUMN keywords INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE filing_scan (
+    message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE
+);
+"#,
+    // 18: which mails the user has answered, by RFC `Message-ID`. Kept apart
+    // from the sent mail itself, so an answered question does not come back
+    // as "needs you" when the Sent folder is emptied before the inbox.
+    r#"
+CREATE TABLE answered_mails (
+    rfc_message_id TEXT PRIMARY KEY,
+    answered_at    INTEGER NOT NULL
+);
+INSERT INTO answered_mails (rfc_message_id, answered_at)
+SELECT rfc, MAX(at) FROM (
+    SELECT m.in_reply_to AS rfc, COALESCE(m.date, 0) AS at
+    FROM messages m JOIN folders f ON f.id = m.folder_id
+    WHERE f.role = 'sent' AND m.in_reply_to IS NOT NULL
+    UNION ALL
+    SELECT j.value, COALESCE(m.date, 0)
+    FROM messages m JOIN folders f ON f.id = m.folder_id, json_each(m.refs) j
+    WHERE f.role = 'sent'
+) WHERE rfc IS NOT NULL AND rfc != '' GROUP BY rfc;
+"#,
 ];
 
 /// Result of looking up a domain in the persistent brand logo cache.
@@ -350,7 +468,8 @@ const ZSTD_LEVEL: i32 = 3;
 const PREVIEW_CHARS: usize = 180;
 
 pub struct Store {
-    conn: Connection,
+    /// Shared with the other store-backed modules (`invoices`).
+    pub(crate) conn: Connection,
 }
 
 impl Store {
@@ -507,6 +626,26 @@ impl Store {
         )?)
     }
 
+    /// Records whether the server accepts client-defined keywords here.
+    pub fn set_folder_keywords(&self, folder_id: i64, allowed: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE folders SET keywords = ?2 WHERE id = ?1",
+            params![folder_id, allowed],
+        )?;
+        Ok(())
+    }
+
+    pub fn folder_by_path(&self, account_id: i64, path: &str) -> Result<Option<Folder>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT * FROM folders WHERE account_id = ?1 AND path = ?2",
+                params![account_id, path],
+                folder_from_row,
+            )
+            .optional()?)
+    }
+
     pub fn folders(&self, account_id: i64) -> Result<Vec<Folder>> {
         let mut stmt = self
             .conn
@@ -600,6 +739,26 @@ impl Store {
                     h.list_unsubscribe_post,
                     h.dmarc_pass,
                 ])?;
+            }
+            let sent: bool = tx.query_row(
+                "SELECT COALESCE(role, '') = 'sent' FROM folders WHERE id = ?1",
+                [folder_id],
+                |r| r.get(0),
+            )?;
+            if sent {
+                let mut answered = tx.prepare_cached(
+                    "INSERT INTO answered_mails (rfc_message_id, answered_at) VALUES (?1, ?2)
+                     ON CONFLICT (rfc_message_id) DO UPDATE SET
+                        answered_at = MAX(answered_at, excluded.answered_at)",
+                )?;
+                for h in headers {
+                    let at = h.date.unwrap_or(0);
+                    for rfc in h.in_reply_to.iter().chain(&h.references) {
+                        if !rfc.is_empty() {
+                            answered.execute(params![rfc, at])?;
+                        }
+                    }
+                }
             }
         }
         tx.commit()?;
@@ -870,23 +1029,29 @@ impl Store {
         Ok(changed)
     }
 
-    /// Sets or clears a flag (`\Seen`, `\Flagged`, …) locally and queues the
-    /// change for the server. Returns the number of messages changed.
+    /// Sets or clears a flag (`\Seen`, `\Flagged`, …) or keyword (`$Name`)
+    /// locally and queues the change for the server. Returns the number of
+    /// messages changed. A keyword is skipped (neither stored nor queued) for
+    /// folders that do not accept keywords.
     pub fn queue_flag(&mut self, message_ids: &[i64], flag: &str, on: bool) -> Result<usize> {
+        let is_keyword = !flag.starts_with('\\');
         let tx = self.conn.transaction()?;
         let mut changed = 0;
         for &id in message_ids {
-            let row: Option<(String, i64, String, u32)> = tx
+            let row: Option<(String, i64, String, u32, bool)> = tx
                 .query_row(
-                    "SELECT m.flags, f.account_id, f.path, m.uid FROM messages m
+                    "SELECT m.flags, f.account_id, f.path, m.uid, f.keywords FROM messages m
                      JOIN folders f ON f.id = m.folder_id WHERE m.id = ?1",
                     [id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                 )
                 .optional()?;
-            let Some((raw, account_id, path, uid)) = row else {
+            let Some((raw, account_id, path, uid, keywords_ok)) = row else {
                 continue;
             };
+            if is_keyword && !keywords_ok {
+                continue;
+            }
             let mut flags: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
             if flags.iter().any(|f| f == flag) == on {
                 continue;
@@ -1369,8 +1534,9 @@ impl Store {
     pub fn add_case_event(&self, case_id: i64, ev: &NewCaseEvent) -> Result<CaseEvent> {
         self.conn.execute(
             "INSERT INTO case_events (case_id, message_id, occurred_at, kind, label, phase,
-                                      direction, confidence, manual)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                      direction, confidence, manual, rfc_message_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                     (SELECT message_id FROM messages WHERE id = ?2))",
             params![
                 case_id,
                 ev.message_id,
@@ -1463,6 +1629,170 @@ impl Store {
             params![status.to_string(), case_id],
         )?;
         Ok(())
+    }
+
+    /// Mails of a case that still exist, without the user's own replies
+    /// (their Sent folder is not where the decision is read back).
+    fn case_message_ids(&self, case_id: i64) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT e.message_id FROM case_events e
+             JOIN messages m ON m.id = e.message_id
+             WHERE e.case_id = ?1 AND COALESCE(e.direction, 'in') != 'out'",
+        )?;
+        let rows = stmt.query_map([case_id], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Like [`Store::set_case_status`], for a decision the user made: marking
+    /// a case done also tags its mails `$HalcyonDone`, any other status
+    /// removes the tag, so other devices see the same state.
+    pub fn set_case_status_by_user(&mut self, case_id: i64, status: CaseStatus) -> Result<()> {
+        self.set_case_status(case_id, status)?;
+        let ids = self.case_message_ids(case_id)?;
+        self.queue_flag(
+            &ids,
+            crate::filing::KEYWORD_DONE,
+            status == CaseStatus::Done,
+        )?;
+        Ok(())
+    }
+
+    /// Closes open cases whose mails all carry `$HalcyonDone`: the user
+    /// settled them on another device. A new mail without the tag keeps
+    /// the case open. Returns how many cases were closed.
+    pub fn settle_cases_done_by_user(&self) -> Result<usize> {
+        let tagged = "instr(m.flags, '\"$HalcyonDone\"') > 0";
+        Ok(self.conn.execute(
+            &format!(
+                "UPDATE cases SET status = 'done', next_step = 'Von dir erledigt',
+                                  updated_at = unixepoch()
+                 WHERE status IN ('waiting', 'needs_you')
+                   AND EXISTS (SELECT 1 FROM case_events e JOIN messages m ON m.id = e.message_id
+                               WHERE e.case_id = cases.id AND COALESCE(e.direction, 'in') != 'out')
+                   AND NOT EXISTS (SELECT 1 FROM case_events e JOIN messages m ON m.id = e.message_id
+                                   WHERE e.case_id = cases.id AND COALESCE(e.direction, 'in') != 'out'
+                                     AND NOT ({tagged}))"
+            ),
+            [],
+        )?)
+    }
+
+    // ----- small settings -------------------------------------------------
+
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .optional()?)
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    // ----- filed mail -----------------------------------------------------
+
+    /// Inbox mail dated `since` or later that the auto-read pass has not
+    /// judged yet, oldest first.
+    pub(crate) fn filing_candidates(
+        &self,
+        since: i64,
+        limit: usize,
+    ) -> Result<Vec<crate::filing::Candidate>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id, COALESCE(m.date, 0), m.flags, m.dmarc_pass,
+                    COALESCE(m.subject, ''), m.body_text, m.in_reply_to, m.refs,
+                    m.message_id, m.source_id,
+                    EXISTS (SELECT 1 FROM case_scan cs
+                            WHERE cs.message_id = m.id AND cs.with_body = 1)
+             FROM messages m JOIN folders f ON f.id = m.folder_id
+             WHERE f.role = 'inbox' AND m.date >= ?1
+               AND NOT EXISTS (SELECT 1 FROM filing_scan fs WHERE fs.message_id = m.id)
+             ORDER BY m.date ASC, m.id ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since, limit as i64], |r| {
+            let flags: Vec<String> =
+                serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or_default();
+            let refs: Vec<String> =
+                serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default();
+            Ok(crate::filing::Candidate {
+                id: r.get(0)?,
+                date: r.get(1)?,
+                unread: !flags.iter().any(|f| f == "\\Seen"),
+                dmarc_pass: r.get(3)?,
+                subject: r.get(4)?,
+                body_text: r.get(5)?,
+                is_reply: r.get::<_, Option<String>>(6)?.is_some() || !refs.is_empty(),
+                rfc_message_id: r.get(8)?,
+                source_id: r.get(9)?,
+                linked: r.get(10)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub(crate) fn mark_filing_scanned(&self, message_id: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO filing_scan (message_id) VALUES (?1)",
+            [message_id],
+        )?;
+        Ok(())
+    }
+
+    /// `(case kind, case status, event kind)` of every case event of a mail
+    /// (any copy of it).
+    pub(crate) fn case_links_of(
+        &self,
+        message_id: i64,
+        rfc_message_id: Option<&str>,
+    ) -> Result<Vec<(String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.kind, c.status, COALESCE(e.kind, '') FROM case_events e
+             JOIN cases c ON c.id = e.case_id
+             WHERE e.message_id = ?1 OR (?2 IS NOT NULL AND e.rfc_message_id = ?2)",
+        )?;
+        let rows = stmt.query_map(params![message_id, rfc_message_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Whether the ledger invoice made from this mail is settled, if the
+    /// mail produced one.
+    pub(crate) fn invoice_paid_of(&self, message_id: i64) -> Result<Option<bool>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT paid FROM invoices WHERE message_id = ?1 ORDER BY paid ASC LIMIT 1",
+                [message_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Mode and "needs you" state of a mail's recurring source. An anomaly
+    /// raised by this very mail counts as needing the user.
+    pub(crate) fn source_of(
+        &self,
+        source_id: i64,
+        message_id: i64,
+    ) -> Result<Option<(SourceMode, bool)>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT mode, anomaly_kind IS NOT NULL
+                        AND (anomaly_needs_you != 0 OR anomaly_message_id = ?2)
+                 FROM sources WHERE id = ?1",
+                params![source_id, message_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)),
+            )
+            .optional()?;
+        Ok(row.and_then(|(mode, needs_you)| Some((mode.parse().ok()?, needs_you))))
     }
 
     /// Marks a case as "Dies ist kein Vorgang" (`rejected`).
@@ -1560,18 +1890,29 @@ impl Store {
     /// Mail since `since` the linker has not looked at yet, or looked at
     /// before its text was downloaded. Oldest first, so an order
     /// confirmation is seen before its shipping notice.
-    pub fn case_scan_batch(&self, since: i64, limit: usize) -> Result<Vec<ScanMessage>> {
+    ///
+    /// Trash is included only for mail since `trash_since` whose text is
+    /// there: a delivery notice deleted on another device still advances its
+    /// order, but the linker must never create anything from it.
+    pub fn case_scan_batch(
+        &self,
+        since: i64,
+        trash_since: i64,
+        limit: usize,
+    ) -> Result<Vec<ScanMessage>> {
         let sql = format!(
             "{SCAN_SELECT}
              LEFT JOIN case_scan s ON s.message_id = m.id
              WHERE m.date >= ?1
                AND (s.message_id IS NULL OR (s.with_body = 0 AND m.body_text IS NOT NULL))
-               AND COALESCE(f.role, '') NOT IN ('junk', 'trash', 'drafts')
+               AND COALESCE(f.role, '') NOT IN ('junk', 'drafts')
+               AND (COALESCE(f.role, '') != 'trash'
+                    OR (m.date >= ?3 AND m.body_text IS NOT NULL))
              ORDER BY m.date ASC, m.id ASC
              LIMIT ?2"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![since, limit as i64], scan_from_row)?;
+        let rows = stmt.query_map(params![since, limit as i64, trash_since], scan_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -1615,9 +1956,8 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT e.case_id FROM case_events e
-                 JOIN messages m ON m.id = e.message_id
-                 WHERE m.message_id = ?1
+                "SELECT case_id FROM case_events
+                 WHERE rfc_message_id = ?1
                  LIMIT 1",
                 [rfc_message_id],
                 |r| r.get(0),
@@ -1730,9 +2070,7 @@ impl Store {
              WHERE f.role = 'sent'",
         )?;
         let mut out = std::collections::HashSet::new();
-        let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         for row in rows {
             let (to_raw, cc_raw) = row?;
             let to_vec: Vec<String> = serde_json::from_str(&to_raw).unwrap_or_default();
@@ -2181,6 +2519,29 @@ impl Store {
         Ok(out)
     }
 
+    /// Mode of the source with this key and whether it has a recent anomaly
+    /// that needs you. Used right after sync, before the linker has filed
+    /// the new mail, so only what is known from earlier mail counts.
+    pub fn source_notify_state(
+        &self,
+        source_key: &str,
+        now: i64,
+    ) -> Result<Option<(SourceMode, bool)>> {
+        // Same 14-day horizon as `list_sources`, so an old unresolved
+        // anomaly does not keep a quiet source loud forever.
+        let row = self
+            .conn
+            .query_row(
+                "SELECT mode, anomaly_kind IS NOT NULL AND anomaly_needs_you != 0
+                        AND last_seen_at >= ?2
+                 FROM sources WHERE source_key = ?1",
+                params![source_key, now - 14 * 86_400],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)),
+            )
+            .optional()?;
+        Ok(row.and_then(|(mode, needs_you)| Some((mode.parse().ok()?, needs_you))))
+    }
+
     /// Sets the user's explicit display mode for a source (`user_mode = 1`).
     pub fn set_source_mode(&self, source_id: i64, mode: SourceMode) -> Result<()> {
         self.conn.execute(
@@ -2329,6 +2690,58 @@ impl Store {
         Ok(affected)
     }
 
+    fn is_turn_dismissed(&self, rfc_message_id: Option<&str>) -> Result<bool> {
+        let Some(rfc) = rfc_message_id.filter(|s| !s.is_empty()) else {
+            return Ok(false);
+        };
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM turn_dismissals WHERE rfc_message_id = ?1",
+                [rfc],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Marks the conversation of this mail as settled ("Heute" and the turn
+    /// badges then show it as done). Only this exact mail is dismissed.
+    ///
+    /// The decision also travels to other devices as the `$HalcyonDone`
+    /// keyword (where the folder allows keywords).
+    pub fn dismiss_turn(&mut self, message_id: i64) -> Result<()> {
+        let (rfc, from): (Option<String>, Option<String>) = self
+            .conn
+            .query_row(
+                "SELECT message_id, from_addr FROM messages WHERE id = ?1",
+                [message_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| crate::Error::Other("message not found".into()))?;
+        let rfc = rfc
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| crate::Error::Other("message has no Message-ID".into()))?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO turn_dismissals (rfc_message_id, from_addr) VALUES (?1, ?2)",
+            params![rfc, from.map(|f| f.to_ascii_lowercase())],
+        )?;
+        self.queue_flag(&[message_id], crate::filing::KEYWORD_DONE, true)?;
+        Ok(())
+    }
+
+    /// Undoes [`Store::dismiss_turn`].
+    pub fn restore_turn(&mut self, message_id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM turn_dismissals WHERE rfc_message_id =
+                 (SELECT message_id FROM messages WHERE id = ?1)",
+            [message_id],
+        )?;
+        self.queue_flag(&[message_id], crate::filing::KEYWORD_DONE, false)?;
+        Ok(())
+    }
+
     /// Evaluates conversation turn status ("Wer ist am Zug?") for a batch of message IDs.
     pub fn assess_messages_turns(
         &self,
@@ -2343,22 +2756,106 @@ impl Store {
             .into_iter()
             .map(|a| a.email.to_ascii_lowercase())
             .collect();
+        // Once per call: the sent folder can hold thousands of recipients.
+        let correspondents = self.sent_recipient_addresses()?;
+        let answered = self.answered_message_ids()?;
         let mut out = Vec::with_capacity(message_ids.len());
         for &id in message_ids.iter().take(500) {
             if let Some(msg) = self.message(id)? {
-                let body: String = self
+                // A mail is judged on its own, so without this an answered
+                // question would keep asking for an answer.
+                let from_me = msg
+                    .header
+                    .from_addr
+                    .as_deref()
+                    .is_some_and(|a| own.contains(&a.trim().to_ascii_lowercase()));
+                let answered_at = msg
+                    .header
+                    .message_id
+                    .as_deref()
+                    .and_then(|rfc| answered.get(rfc).copied());
+                // `\\Answered` is set by the replying client on the original,
+                // so it also covers replies whose sent copy never reached us.
+                let flagged = msg.header.flags.iter().any(|f| f == "\\Answered");
+                if !from_me
+                    && msg.folder_role != Some(FolderRole::Sent)
+                    && (flagged || answered_at.is_some_and(|at| at >= msg.header.date.unwrap_or(0)))
+                {
+                    out.push((
+                        id,
+                        crate::turn::TurnAssessment {
+                            status: crate::turn::TurnStatus::Done,
+                            confidence: 0.95,
+                            reason: "Du hast schon geantwortet".into(),
+                        },
+                    ));
+                    continue;
+                }
+                // `$HalcyonDone` from the server is the same decision made on
+                // another device.
+                if msg
+                    .header
+                    .flags
+                    .iter()
+                    .any(|f| f == crate::filing::KEYWORD_DONE)
+                    || self.is_turn_dismissed(msg.header.message_id.as_deref())?
+                {
+                    out.push((
+                        id,
+                        crate::turn::TurnAssessment {
+                            status: crate::turn::TurnStatus::Done,
+                            confidence: 1.0,
+                            reason: "Von dir als erledigt entfernt".into(),
+                        },
+                    ));
+                    continue;
+                }
+                let (body, source_total): (String, Option<i64>) = self
                     .conn
                     .query_row(
-                        "SELECT COALESCE(body_text, preview, '') FROM messages WHERE id = ?1",
+                        "SELECT COALESCE(m.body_text, m.preview, ''), s.total_messages
+                         FROM messages m LEFT JOIN sources s ON s.id = m.source_id
+                         WHERE m.id = ?1",
                         [id],
-                        |r| r.get(0),
+                        |r| Ok((r.get(0)?, r.get(1)?)),
                     )
                     .unwrap_or_default();
-                let turn = assess_turn(&msg.header, &body, &own, now);
+                let from = msg
+                    .header
+                    .from_addr
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
+                let is_reply =
+                    msg.header.in_reply_to.is_some() || !msg.header.references.is_empty();
+                let context = crate::turn::TurnContext {
+                    known_correspondent: is_reply || correspondents.contains(&from),
+                    recurring_source: source_total
+                        .is_some_and(|n| n >= crate::turn::RECURRING_SOURCE_MIN_MESSAGES),
+                };
+                let turn = crate::turn::assess_turn_with_context(
+                    &msg.header,
+                    &body,
+                    &own,
+                    now,
+                    Some(context),
+                );
                 out.push((id, turn));
             }
         }
         Ok(out)
+    }
+
+    /// `Message-ID`s the user has replied to, with the date of the latest
+    /// reply. Recorded when a sent mail is stored and kept after that mail
+    /// is gone; every mail of the thread up to the reply counts as answered.
+    fn answered_message_ids(&self) -> Result<std::collections::HashMap<String, i64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT rfc_message_id, answered_at FROM answered_mails")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
     /// Computes privacy-preserving numerical metrics for "Wer ist am Zug?"
@@ -2685,6 +3182,7 @@ fn folder_from_row(row: &Row<'_>) -> rusqlite::Result<Folder> {
         highest_modseq: row
             .get::<_, Option<i64>>("highest_modseq")?
             .map(|v| v as u64),
+        keywords: row.get("keywords")?,
     })
 }
 
@@ -2746,7 +3244,7 @@ pub struct ScanMessage {
     pub folder_role: Option<FolderRole>,
 }
 
-const SCAN_SELECT: &str = "
+pub(crate) const SCAN_SELECT: &str = "
     SELECT m.id, m.message_id, m.in_reply_to, m.refs, m.subject, m.from_name,
            m.from_addr, m.to_addrs, m.cc_addrs, COALESCE(m.date, 0) AS date, m.list_id,
            m.list_unsubscribe != '[]' OR m.list_unsubscribe_post != 0 AS has_unsubscribe,
@@ -2755,7 +3253,7 @@ const SCAN_SELECT: &str = "
     FROM messages m
     JOIN folders f ON f.id = m.folder_id";
 
-fn scan_from_row(row: &Row<'_>) -> rusqlite::Result<ScanMessage> {
+pub(crate) fn scan_from_row(row: &Row<'_>) -> rusqlite::Result<ScanMessage> {
     Ok(ScanMessage {
         id: row.get("id")?,
         message_id: row.get("message_id")?,
@@ -2860,6 +3358,317 @@ mod tests {
             date: Some(date),
             ..Default::default()
         }
+    }
+
+    /// Inbox with the user's account and a sent mail to `anna@example.com`.
+    fn turn_store() -> (Store, i64, i64) {
+        let mut store = Store::open_in_memory().unwrap();
+        let a = store.add_account(&account("me@example.org")).unwrap();
+        let inbox = store
+            .upsert_folder(a.id, "INBOX", None, Some(FolderRole::Inbox), true)
+            .unwrap();
+        let sent = store
+            .upsert_folder(a.id, "Sent", None, Some(FolderRole::Sent), true)
+            .unwrap();
+        store
+            .insert_messages(
+                sent.id,
+                &[MessageHeader {
+                    to: vec!["Anna@Example.com".into()],
+                    ..header(1, "Termin", "me@example.org", 50)
+                }],
+            )
+            .unwrap();
+        (store, inbox.id, a.id)
+    }
+
+    fn turn_of(store: &Store, folder: i64, uid: u32) -> crate::turn::TurnAssessment {
+        let id = store
+            .folder_messages(folder, 100)
+            .unwrap()
+            .iter()
+            .find(|m| m.header.uid == uid)
+            .unwrap()
+            .id;
+        store
+            .assess_messages_turns(&[id], 1000)
+            .unwrap()
+            .remove(0)
+            .1
+    }
+
+    fn question_mail(uid: u32, rfc_id: &str) -> MessageHeader {
+        MessageHeader {
+            to: vec!["me@example.org".into()],
+            message_id: Some(rfc_id.into()),
+            ..header(uid, "Frage", "bob@example.net", 100 + uid as i64)
+        }
+    }
+
+    fn set_preview(store: &Store, uid: u32) {
+        store
+            .conn
+            .execute(
+                "UPDATE messages SET preview = 'Hast du Zeit für einen Anruf?' WHERE uid = ?1",
+                [uid],
+            )
+            .unwrap();
+    }
+
+    fn id_of(store: &Store, folder: i64, uid: u32) -> i64 {
+        store
+            .folder_messages(folder, 100)
+            .unwrap()
+            .iter()
+            .find(|m| m.header.uid == uid)
+            .unwrap()
+            .id
+    }
+
+    #[test]
+    fn dismissed_turn_is_done_until_restored() {
+        let (mut store, inbox, _) = turn_store();
+        store
+            .insert_messages(inbox, &[question_mail(20, "<q1@example.net>")])
+            .unwrap();
+        set_preview(&store, 20);
+        assert_eq!(turn_of(&store, inbox, 20).status, TurnStatus::NeedsYou);
+
+        let id = id_of(&store, inbox, 20);
+        store.dismiss_turn(id).unwrap();
+        let a = turn_of(&store, inbox, 20);
+        assert_eq!(a.status, TurnStatus::Done);
+        assert_eq!(a.reason, "Von dir als erledigt entfernt");
+
+        // Dismissing twice is harmless.
+        store.dismiss_turn(id).unwrap();
+        store.restore_turn(id).unwrap();
+        assert_eq!(turn_of(&store, inbox, 20).status, TurnStatus::NeedsYou);
+    }
+
+    #[test]
+    fn answered_mail_no_longer_needs_you() {
+        let (mut store, inbox, a) = turn_store();
+        let sent = store
+            .upsert_folder(a, "Sent", None, Some(FolderRole::Sent), true)
+            .unwrap();
+        store
+            .insert_messages(
+                inbox,
+                &[
+                    question_mail(20, "<q1@example.net>"),
+                    MessageHeader {
+                        in_reply_to: Some("<q1@example.net>".into()),
+                        references: vec!["<q1@example.net>".into()],
+                        ..question_mail(21, "<q2@example.net>")
+                    },
+                    // Arrives after the reply: the other side is waiting again.
+                    question_mail(40, "<q3@example.net>"),
+                ],
+            )
+            .unwrap();
+        for uid in [20, 21, 40] {
+            set_preview(&store, uid);
+        }
+        assert_eq!(turn_of(&store, inbox, 21).status, TurnStatus::NeedsYou);
+
+        // The reply answers the forwarded mail and, through References, the
+        // first one as well.
+        store
+            .insert_messages(
+                sent.id,
+                &[MessageHeader {
+                    to: vec!["bob@example.net".into()],
+                    in_reply_to: Some("<q2@example.net>".into()),
+                    references: vec!["<q1@example.net>".into(), "<q2@example.net>".into()],
+                    ..header(2, "Re: Frage", "me@example.org", 130)
+                }],
+            )
+            .unwrap();
+        for uid in [20, 21] {
+            let t = turn_of(&store, inbox, uid);
+            assert_eq!(t.status, TurnStatus::Done);
+            assert_eq!(t.reason, "Du hast schon geantwortet");
+        }
+        assert_eq!(turn_of(&store, inbox, 40).status, TurnStatus::NeedsYou);
+
+        // Emptying the Sent folder must not bring the answered mails back.
+        store
+            .conn
+            .execute("DELETE FROM messages WHERE folder_id = ?1", [sent.id])
+            .unwrap();
+        assert_eq!(turn_of(&store, inbox, 21).status, TurnStatus::Done);
+    }
+
+    #[test]
+    fn answered_flag_counts_without_a_sent_copy() {
+        let (mut store, inbox, _) = turn_store();
+        store
+            .insert_messages(
+                inbox,
+                &[MessageHeader {
+                    flags: vec!["\\Answered".into(), "\\Seen".into()],
+                    ..question_mail(20, "<q1@example.net>")
+                }],
+            )
+            .unwrap();
+        set_preview(&store, 20);
+        assert_eq!(turn_of(&store, inbox, 20).status, TurnStatus::Done);
+    }
+
+    #[test]
+    fn new_mail_in_dismissed_thread_is_assessed_normally() {
+        let (mut store, inbox, _) = turn_store();
+        store
+            .insert_messages(
+                inbox,
+                &[
+                    question_mail(20, "<q1@example.net>"),
+                    question_mail(21, "<q2@example.net>"),
+                ],
+            )
+            .unwrap();
+        set_preview(&store, 20);
+        set_preview(&store, 21);
+        store.dismiss_turn(id_of(&store, inbox, 20)).unwrap();
+        assert_eq!(turn_of(&store, inbox, 20).status, TurnStatus::Done);
+        assert_eq!(turn_of(&store, inbox, 21).status, TurnStatus::NeedsYou);
+    }
+
+    #[test]
+    fn dismissal_follows_the_message_id_to_other_copies() {
+        let (mut store, inbox, a) = turn_store();
+        let archive = store
+            .upsert_folder(a, "Archive", None, Some(FolderRole::Archive), true)
+            .unwrap();
+        store
+            .insert_messages(inbox, &[question_mail(20, "<q1@example.net>")])
+            .unwrap();
+        store
+            .insert_messages(archive.id, &[question_mail(7, "<q1@example.net>")])
+            .unwrap();
+        set_preview(&store, 7);
+        store.dismiss_turn(id_of(&store, inbox, 20)).unwrap();
+        assert_eq!(turn_of(&store, archive.id, 7).status, TurnStatus::Done);
+    }
+
+    #[test]
+    fn marketing_mail_without_list_id_is_not_needs_you() {
+        let (mut store, inbox, _) = turn_store();
+        // The real-world shape: unsubscribe header, news@ sender, anonymous
+        // greeting, several earlier mails, the user never wrote to it.
+        let mut headers = Vec::new();
+        for uid in 10..16 {
+            headers.push(MessageHeader {
+                to: vec!["me@example.org".into()],
+                list_unsubscribe: vec!["<mailto:u@example.net>".into()],
+                ..header(
+                    uid,
+                    "Angebote der Woche",
+                    "news@shop.example.com",
+                    100 + uid as i64,
+                )
+            });
+        }
+        store.insert_messages(inbox, &headers).unwrap();
+        let a = turn_of(&store, inbox, 15);
+        assert_eq!(a.status, TurnStatus::ReadingAlong, "{a:?}");
+    }
+
+    #[test]
+    fn recurring_unknown_sender_without_machine_headers_is_reading_along() {
+        let (mut store, inbox, _) = turn_store();
+        let headers: Vec<_> = (10..14)
+            .map(|uid| MessageHeader {
+                to: vec!["me@example.org".into()],
+                ..header(uid, "Hallo", "team@shop.example.com", 100 + uid as i64)
+            })
+            .collect();
+        store.insert_messages(inbox, &headers).unwrap();
+        // Before the sender is known as a source: unknown, no question.
+        assert_eq!(turn_of(&store, inbox, 13).status, TurnStatus::ReadingAlong);
+        // Pretend the source pass counted them; a question does not help then.
+        store
+            .conn
+            .execute(
+                "INSERT INTO sources (source_key, display_name, total_messages)
+                 VALUES ('team@shop.example.com', 'Shop', 4)",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE messages SET source_id = (SELECT id FROM sources)",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE messages SET preview = 'Kannst du uns kurz antworten?' WHERE uid = 13",
+                [],
+            )
+            .unwrap();
+        let a = turn_of(&store, inbox, 13);
+        assert_eq!(a.status, TurnStatus::ReadingAlong, "{a:?}");
+    }
+
+    #[test]
+    fn unknown_sender_with_a_question_still_needs_you() {
+        let (mut store, inbox, _) = turn_store();
+        store
+            .insert_messages(
+                inbox,
+                &[MessageHeader {
+                    to: vec!["me@example.org".into()],
+                    ..header(20, "Frage", "bob@example.net", 100)
+                }],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE messages SET preview = 'Hast du Zeit für einen Anruf?' WHERE uid = 20",
+                [],
+            )
+            .unwrap();
+        let a = turn_of(&store, inbox, 20);
+        assert_eq!(a.status, TurnStatus::NeedsYou);
+        assert!(a.confidence < 0.7);
+    }
+
+    #[test]
+    fn reply_from_someone_the_user_wrote_to_needs_you() {
+        let (mut store, inbox, _) = turn_store();
+        store
+            .insert_messages(
+                inbox,
+                &[MessageHeader {
+                    to: vec!["me@example.org".into()],
+                    ..header(30, "Re: Termin", "anna@example.com", 100)
+                }],
+            )
+            .unwrap();
+        // Known by the sent folder, even without a question.
+        let a = turn_of(&store, inbox, 30);
+        assert_eq!(a.status, TurnStatus::NeedsYou, "{a:?}");
+    }
+
+    #[test]
+    fn reply_headers_mark_a_known_correspondent() {
+        let (mut store, inbox, _) = turn_store();
+        store
+            .insert_messages(
+                inbox,
+                &[MessageHeader {
+                    to: vec!["me@example.org".into()],
+                    in_reply_to: Some("<mine@example.org>".into()),
+                    ..header(31, "Re: Angebot", "carl@example.net", 100)
+                }],
+            )
+            .unwrap();
+        assert_eq!(turn_of(&store, inbox, 31).status, TurnStatus::NeedsYou);
     }
 
     #[test]

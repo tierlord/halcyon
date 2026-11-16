@@ -51,6 +51,11 @@ enum Command {
     },
     /// Run local case/source analysis and print privacy-preserving numbers only.
     Stats,
+    /// Print the invoice ledger (all invoices, or those of one year).
+    Invoices {
+        #[arg(long)]
+        year: Option<i32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -169,7 +174,59 @@ async fn main() -> Result<()> {
             let mut store = Store::open(&db_path)?;
             print_stats(&mut store)
         }
+        Command::Invoices { year } => {
+            let mut store = Store::open(&db_path)?;
+            print_invoices(&mut store, year)
+        }
     }
+}
+
+fn print_invoices(store: &mut Store, year: Option<i32>) -> Result<()> {
+    let now = Local::now().timestamp();
+    // The ledger is filled after the linker, as in the app.
+    halcyon_core::linker::run(store, now)?;
+    let report = halcyon_core::invoices::run(store, now)?;
+    eprintln!(
+        "Rechnungslauf: {} geprüft, {} neu, {} aktualisiert",
+        report.scanned, report.created, report.updated
+    );
+    let list = store.invoices(year)?;
+    for i in &list {
+        let date = Local
+            .timestamp_opt(i.issued_at, 0)
+            .single()
+            .map(|d| d.format("%d.%m.%Y").to_string())
+            .unwrap_or_default();
+        let amount = i
+            .amount_cents
+            .map(|c| {
+                format!(
+                    "{},{:02} {}",
+                    c / 100,
+                    c.abs() % 100,
+                    i.currency.as_deref().unwrap_or("")
+                )
+            })
+            .unwrap_or_else(|| "–".into());
+        println!(
+            "{date}  {:<24.24}  {:<16.16}  {:>12}  {}  {:<10}  {}",
+            i.issuer,
+            i.invoice_number.as_deref().unwrap_or("–"),
+            amount,
+            if i.paid { "bezahlt" } else { "OFFEN  " },
+            match i.kind {
+                halcyon_core::model::AccountKind::Private => "privat",
+                halcyon_core::model::AccountKind::Business => "geschäftlich",
+            },
+            i.portal_url
+                .as_deref()
+                .filter(|_| i.file_name.is_none())
+                .or(i.file_name.as_deref())
+                .unwrap_or("kein Nachweis"),
+        );
+    }
+    println!("{} Rechnungen", list.len());
+    Ok(())
 }
 
 async fn discover(email: &str) -> Result<()> {
@@ -368,6 +425,18 @@ async fn run_sync(store: &mut Store, only: Option<&str>) -> Result<()> {
             Err(e) => println!("   FAILED: {e}"),
         }
     }
+    // Same order as in the app: cases, ledger, then the pass that reads
+    // their verdicts. The marks it queues are sent by the next sync.
+    let now = Local::now().timestamp();
+    halcyon_core::linker::run(store, now)?;
+    halcyon_core::invoices::run(store, now)?;
+    let filed = halcyon_core::filing::run(store, now)?;
+    if filed.marked > 0 {
+        println!(
+            "{} filed mails marked read (sent with the next sync)",
+            filed.marked
+        );
+    }
     Ok(())
 }
 
@@ -401,6 +470,7 @@ fn print_messages(messages: &[MessageSummary]) {
 fn print_stats(store: &mut Store) -> Result<()> {
     let now = Local::now().timestamp();
     let link_report = halcyon_core::linker::run(store, now)?;
+    halcyon_core::invoices::run(store, now)?;
     let s = store.evaluate_mailbox_stats(now)?;
     let pct = |n: usize, d: usize| -> f64 {
         if d == 0 {

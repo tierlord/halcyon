@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use halcyon_core::imap::{self, Credentials};
 use halcyon_core::model::{Account, FolderRole, MessageSummary};
+use halcyon_core::notify::{NotifyInput, notification_text, should_notify};
 use halcyon_core::secrets::{self, SecretKind};
+use halcyon_core::sources::derive_source_key;
 use halcyon_core::store::Store;
 use halcyon_core::sync;
 use serde::Serialize;
@@ -152,15 +154,18 @@ async fn watch_connected(app: &AppHandle, account: &Account) -> Result<(), Strin
             activity(false);
             match synced.map_err(|e| e.to_string())? {
                 Some(report) => {
+                    // Notify before `changed` starts the linker: its filing
+                    // pass may mark order or invoice mail read, and the
+                    // notification only looks at unread mail.
+                    if report.new_messages > 0 {
+                        notify_new(app, &store, account, before);
+                    }
                     changed(
                         app,
                         account,
                         report.new_messages,
                         report.removed + report.flags_updated,
                     );
-                    if report.new_messages > 0 {
-                        notify_new(app, &store, account, before);
-                    }
                 }
                 // Never fully synced yet: the regular sync creates the folders.
                 None => {
@@ -236,31 +241,54 @@ fn notify_new(app: &AppHandle, store: &Store, account: &Account, before: i64) {
     if focused {
         return;
     }
-    let fresh: Vec<MessageSummary> = store
+    let correspondents = store.sent_recipient_addresses().unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let fresh: Vec<(String, String)> = store
         .messages(Some(account.id), Some(FolderRole::Inbox), 50)
         .unwrap_or_default()
         .into_iter()
         .filter(|m| m.id > before && !m.is_seen())
-        .collect();
-    let (title, body) = match fresh.as_slice() {
-        [] => return,
-        [m] => (
-            sender(m),
-            m.header
+        .filter(|m| matters(store, m, &correspondents, now))
+        .map(|m| {
+            let subject = m
+                .header
                 .subject
                 .clone()
-                .unwrap_or_else(|| "(kein Betreff)".into()),
-        ),
-        many => (
-            format!("{} neue Nachrichten", many.len()),
-            many.iter()
-                .take(3)
-                .map(sender)
-                .collect::<Vec<_>>()
-                .join(", "),
-        ),
+                .unwrap_or_else(|| "(kein Betreff)".into());
+            (sender(&m), subject)
+        })
+        .collect();
+    let Some((title, body)) = notification_text(&fresh) else {
+        return;
     };
     let _ = app.notification().builder().title(title).body(body).show();
+}
+
+/// Whether a new mail is worth interrupting for (see `notify::should_notify`).
+fn matters(
+    store: &Store,
+    m: &MessageSummary,
+    correspondents: &std::collections::HashSet<String>,
+    now: i64,
+) -> bool {
+    let h = &m.header;
+    let source = derive_source_key(h.from_addr.as_deref(), h.list_id.as_deref())
+        .and_then(|key| store.source_notify_state(&key, now).ok().flatten());
+    let from_known_correspondent = h
+        .from_addr
+        .as_deref()
+        .is_some_and(|a| correspondents.contains(&a.to_ascii_lowercase()));
+    should_notify(&NotifyInput {
+        is_list_mail: h.list_id.is_some() || !h.list_unsubscribe.is_empty(),
+        source_mode: source.map(|(mode, _)| mode),
+        source_needs_you: source.is_some_and(|(_, needs_you)| needs_you),
+        dmarc_pass: h.dmarc_pass,
+        // Sources are only recorded for mail that passed DMARC, so having
+        // one means the sender has been seen before.
+        sender_known: source.is_some() || from_known_correspondent,
+    })
 }
 
 fn sender(m: &MessageSummary) -> String {

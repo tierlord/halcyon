@@ -18,11 +18,19 @@ const FETCH_CHUNK: usize = 250;
 /// Content of messages from this many days is downloaded during sync;
 /// older messages are fetched when opened.
 const PREFETCH_DAYS: i64 = 90;
+/// See `prefetch_days_for`.
+pub const TRASH_PREFETCH_DAYS: i64 = 30;
 /// Larger messages (usually because of attachments) are fetched on demand.
 const PREFETCH_MAX_SIZE: u32 = 2 * 1024 * 1024;
 /// Upper bounds for one round trip of content downloads.
 const BODY_BATCH_BYTES: u64 = 8 * 1024 * 1024;
 const BODY_BATCH_MESSAGES: usize = 50;
+/// Invoice and order mail older than the prefetch window is downloaded too
+/// (the ledger and the order linker need its text), but only this many mails
+/// per folder and sync run, newest first. A first sync stays quick and later
+/// runs continue where the last one stopped, since fetched mail drops out of
+/// the candidates.
+const LEDGER_BACKFILL_PER_RUN: usize = 200;
 
 #[derive(Debug)]
 pub enum SyncEvent<'a> {
@@ -102,14 +110,14 @@ pub async fn sync_account(
             continue;
         }
         report.folders += 1;
-        let skip_bodies = matches!(folder.role, Some(FolderRole::Trash));
+        let prefetch_days = prefetch_days_for(folder.role);
         match sync_folder(
             store,
             &mut session,
             &caps,
             folder.id,
             &rf.path,
-            skip_bodies,
+            prefetch_days,
             &mut on_event,
         )
         .await
@@ -154,14 +162,17 @@ async fn sync_folder(
     caps: &Capabilities,
     folder_id: i64,
     path: &str,
-    skip_bodies: bool,
+    prefetch_days: i64,
     on_event: &mut impl FnMut(SyncEvent<'_>),
 ) -> Result<FolderResult> {
+    // Always a read-write SELECT: EXAMINE reports no PERMANENTFLAGS, so the
+    // keyword capability could not be learned from it.
     let mailbox = if caps.condstore {
         session.select_condstore(path).await?
     } else {
-        session.examine(path).await?
+        session.select(path).await?
     };
+    store.set_folder_keywords(folder_id, imap::allows_keywords(&mailbox.permanent_flags))?;
     // Servers without UIDVALIDITY violate RFC 3501; treat them as constant.
     if store.set_uid_validity(folder_id, mailbox.uid_validity.unwrap_or(0))? {
         on_event(SyncEvent::FolderReset { path });
@@ -250,9 +261,9 @@ async fn sync_folder(
     store.set_highest_modseq(folder_id, mailbox.highest_modseq)?;
     result.new_messages = uids.len();
 
-    if !skip_bodies {
-        result.bodies = prefetch_bodies(store, session, folder_id, path, on_event).await?;
-    }
+    result.bodies =
+        prefetch_bodies(store, session, folder_id, path, prefetch_days, on_event).await?;
+    result.bodies += backfill_ledger_bodies(store, session, &folder, on_event).await?;
     Ok(result)
 }
 
@@ -269,10 +280,21 @@ pub async fn flush_changes(
     let ops = store.pending_ops(account_id)?;
     let mut sent = 0;
     let mut selected: Option<String> = None;
+    let mut keywords_ok = false;
     for op in ops {
         if selected.as_deref() != Some(op.folder_path.as_str()) {
-            session.select(&op.folder_path).await?;
+            let mailbox = session.select(&op.folder_path).await?;
+            keywords_ok = imap::allows_keywords(&mailbox.permanent_flags);
+            if let Some(folder) = store.folder_by_path(account_id, &op.folder_path)? {
+                store.set_folder_keywords(folder.id, keywords_ok)?;
+            }
             selected = Some(op.folder_path.clone());
+        }
+        // Queued while the folder still seemed to allow keywords; the server
+        // would answer NO and the op would burn its retries for nothing.
+        if op.change.is_keyword() && !keywords_ok {
+            store.complete_op(op.id)?;
+            continue;
         }
         match apply_change(session, caps, op.uid, &op.change).await {
             Ok(()) => {
@@ -350,15 +372,28 @@ async fn expunge(session: &mut ImapSession, caps: &Capabilities, uid: &str) -> R
     Ok(())
 }
 
+/// How far back bodies are downloaded ahead of time. Trash only gets recent
+/// mail: a mail deleted on another device before it was synced (a delivery
+/// notice, say) still has to be readable by the case linker, but an old
+/// trash folder is not worth the traffic.
+fn prefetch_days_for(role: Option<FolderRole>) -> i64 {
+    if role == Some(FolderRole::Trash) {
+        TRASH_PREFETCH_DAYS
+    } else {
+        PREFETCH_DAYS
+    }
+}
+
 /// Downloads the content of recent messages that do not have it yet.
 async fn prefetch_bodies(
     store: &mut Store,
     session: &mut ImapSession,
     folder_id: i64,
     path: &str,
+    days: i64,
     on_event: &mut impl FnMut(SyncEvent<'_>),
 ) -> Result<usize> {
-    let since = unix_now() - PREFETCH_DAYS * 24 * 3600;
+    let since = unix_now() - days * 24 * 3600;
     let missing = store.messages_without_body(folder_id, since, PREFETCH_MAX_SIZE, usize::MAX)?;
     if missing.is_empty() {
         return Ok(0);
@@ -376,6 +411,50 @@ async fn prefetch_bodies(
         }
         done += batch.len();
         on_event(SyncEvent::Bodies { path, done, total });
+    }
+    Ok(done)
+}
+
+/// Downloads content of older mail whose subject marks it as an invoice or
+/// an order step, so the ledger and the order linker can see it. Reaches back
+/// as far as the ledger does and accepts as large a message as it would keep
+/// as proof. Junk, drafts and the user's own mail are of no use there, and
+/// trash keeps its short window.
+async fn backfill_ledger_bodies(
+    store: &mut Store,
+    session: &mut ImapSession,
+    folder: &crate::model::Folder,
+    on_event: &mut impl FnMut(SyncEvent<'_>),
+) -> Result<usize> {
+    let days = match folder.role {
+        Some(FolderRole::Junk | FolderRole::Drafts | FolderRole::Sent) => return Ok(0),
+        Some(FolderRole::Trash) => TRASH_PREFETCH_DAYS,
+        _ => crate::invoices::SCAN_WINDOW_SECS / 86_400,
+    };
+    let since = unix_now() - days * 24 * 3600;
+    let max_size = u32::try_from(crate::invoices::MAX_FILE_BYTES).unwrap_or(u32::MAX);
+    let missing =
+        store.ledger_body_candidates(folder.id, since, max_size, LEDGER_BACKFILL_PER_RUN)?;
+    if missing.is_empty() {
+        return Ok(0);
+    }
+    let sizes = store.message_sizes(&missing.iter().map(|(id, _)| *id).collect::<Vec<_>>())?;
+    let total = missing.len();
+    let mut done = 0;
+    for batch in size_batches(&missing, &sizes) {
+        let uids: Vec<u32> = batch.iter().map(|(_, uid)| *uid).collect();
+        let fetched = imap::fetch_raw(session, &uid_set(&uids)).await?;
+        for (uid, raw) in fetched {
+            if let Some((id, _)) = batch.iter().find(|(_, u)| *u == uid) {
+                store.store_body(*id, &raw)?;
+            }
+        }
+        done += batch.len();
+        on_event(SyncEvent::Bodies {
+            path: &folder.path,
+            done,
+            total,
+        });
     }
     Ok(done)
 }
@@ -469,7 +548,7 @@ pub async fn sync_inbox(
         caps,
         inbox.id,
         &inbox.path,
-        false,
+        PREFETCH_DAYS,
         &mut |_| {},
     )
     .await?;
@@ -521,14 +600,14 @@ pub async fn sync_changed_folders(
         if !changed {
             continue;
         }
-        let skip_bodies = folder.role == Some(FolderRole::Trash);
+        let prefetch_days = prefetch_days_for(folder.role);
         let r = sync_folder(
             store,
             session,
             caps,
             folder.id,
             &folder.path,
-            skip_bodies,
+            prefetch_days,
             &mut |_| {},
         )
         .await?;

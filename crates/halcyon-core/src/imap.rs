@@ -297,6 +297,16 @@ pub fn flag_names(fetch: &Fetch) -> Vec<String> {
     fetch.flags().filter_map(|f| flag_name(&f)).collect()
 }
 
+/// Whether a `SELECT` response allows client-defined keywords: the server
+/// announces `\*` in `PERMANENTFLAGS` (RFC 3501 §7.1). Servers with a fixed
+/// keyword list or none at all would reject `STORE +FLAGS ($Keyword)`.
+///
+/// Only meaningful for a read-write `SELECT`; `EXAMINE` reports an empty
+/// list on most servers.
+pub fn allows_keywords(permanent_flags: &[Flag<'_>]) -> bool {
+    permanent_flags.iter().any(|f| matches!(f, Flag::MayCreate))
+}
+
 fn flag_name(flag: &Flag<'_>) -> Option<String> {
     Some(match flag {
         Flag::Seen => "\\Seen".into(),
@@ -406,8 +416,7 @@ fn has_aligned_dkim_pass(value: &str, from_domain: Option<&str>) -> bool {
         let Some(after) = rest.trim_start().strip_prefix("pass") else {
             return false;
         };
-        if !(after.is_empty() || after.starts_with(|c: char| c.is_ascii_whitespace() || c == '('))
-        {
+        if !(after.is_empty() || after.starts_with(|c: char| c.is_ascii_whitespace() || c == '(')) {
             return false;
         }
         dkim_header_domain(&lower).is_some_and(|d| domains_aligned(d, from_dom))
@@ -529,6 +538,24 @@ fn angle_items(value: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyword_support_comes_from_permanentflags() {
+        // As the parser builds them from `[PERMANENTFLAGS (\Seen \*)]`.
+        let open: Vec<Flag<'static>> = ["\\Seen", "\\Deleted", "\\*"]
+            .into_iter()
+            .map(|s| Flag::from(s.to_string()))
+            .collect();
+        assert!(allows_keywords(&open));
+        // A fixed list of keywords does not let us invent new ones.
+        let fixed: Vec<Flag<'static>> = ["\\Seen", "$Junk"]
+            .into_iter()
+            .map(|s| Flag::from(s.to_string()))
+            .collect();
+        assert!(!allows_keywords(&fixed));
+        // Read-only EXAMINE: `[PERMANENTFLAGS ()]`.
+        assert!(!allows_keywords(&[]));
+    }
 
     #[test]
     fn parses_newsletter_headers() {

@@ -17,8 +17,11 @@ use halcyon_core::brand::{self, BrandLogo};
 use halcyon_core::cases::{CaseStatus, CaseView};
 use halcyon_core::content::{self, Attachment, Rendered};
 use halcyon_core::imap::{self, Credentials};
+use halcyon_core::invoices::{self, AccountKindInfo, InvoiceExportReport, InvoiceRecord};
 use halcyon_core::linker;
-use halcyon_core::model::{Account, AuthMethod, FolderRole, MessageSummary, ServerConfig};
+use halcyon_core::model::{
+    Account, AccountKind, AuthMethod, FolderRole, MessageSummary, ServerConfig,
+};
 use halcyon_core::secrets::{self, SecretKind};
 use halcyon_core::store::{CachedLogo, Store};
 use halcyon_core::sync::{self, SyncEvent};
@@ -1274,6 +1277,37 @@ pub(crate) fn schedule_link(app: &AppHandle) {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "case linking failed"),
             }
+            // The ledger runs after the linker so it can point at the case.
+            match invoices::run(&mut store, now) {
+                Ok(report) if report.changed() => {
+                    tracing::info!(?report, "invoices updated");
+                    let _ = app.emit("invoices-changed", ());
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "invoice pass failed"),
+            }
+            // Last: it reads what the linker and the ledger just decided.
+            match halcyon_core::filing::run(&mut store, now) {
+                Ok(report) if report.changed() => {
+                    tracing::info!(?report, "filed mail marked read");
+                    // Marked mail changed locally; the server follows.
+                    if report.marked > 0 {
+                        schedule_flush(&app);
+                        let _ = app.emit(
+                            "mail-changed",
+                            watch::MailChanged {
+                                account_id: 0,
+                                new_messages: 0,
+                            },
+                        );
+                    }
+                    if report.settled_cases > 0 {
+                        let _ = app.emit("cases-changed", ());
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "filing pass failed"),
+            }
             if !state.link_again.load(Ordering::SeqCst) {
                 break;
             }
@@ -1294,13 +1328,33 @@ fn cases(state: State<'_, AppState>) -> CmdResult<Vec<CaseView>> {
 
 /// Sets a case's status from the card ("Erledigt", "Kein Vorgang").
 #[tauri::command]
-fn set_case_status(state: State<'_, AppState>, id: i64, status: String) -> CmdResult<()> {
+fn set_case_status(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+    status: String,
+) -> CmdResult<()> {
     let status: CaseStatus = status.parse().map_err(err)?;
     state
         .store
         .lock()
         .map_err(err)?
-        .set_case_status(id, status)
+        .set_case_status_by_user(id, status)
+        .map_err(err)?;
+    // The `$HalcyonDone` tags on the case's mails follow to the server.
+    schedule_flush(&app);
+    Ok(())
+}
+
+/// Whether mail Halcyon filed on its own is marked read.
+#[tauri::command]
+fn auto_mark_read(state: State<'_, AppState>) -> CmdResult<bool> {
+    halcyon_core::filing::auto_mark_read(&*state.store.lock().map_err(err)?).map_err(err)
+}
+
+#[tauri::command]
+fn set_auto_mark_read(state: State<'_, AppState>, enabled: bool) -> CmdResult<()> {
+    halcyon_core::filing::set_auto_mark_read(&*state.store.lock().map_err(err)?, enabled)
         .map_err(err)
 }
 
@@ -1367,6 +1421,144 @@ async fn remove_source(
     }
     let _ = app.emit("cases-changed", ());
     Ok(count)
+}
+
+// ----- invoices ("Rechnungen") ----------------------------------------------
+
+/// Invoices of a calendar year (local time), or all of them, newest first.
+#[tauri::command]
+fn invoices(state: State<'_, AppState>, year: Option<i32>) -> CmdResult<Vec<InvoiceRecord>> {
+    state.store.lock().map_err(err)?.invoices(year).map_err(err)
+}
+
+/// Years that have invoices, newest first.
+#[tauri::command]
+fn invoice_years(state: State<'_, AppState>) -> CmdResult<Vec<i32>> {
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .invoice_years()
+        .map_err(err)
+}
+
+#[tauri::command]
+fn set_invoice_paid(state: State<'_, AppState>, id: i64, paid: bool) -> CmdResult<()> {
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .set_invoice_paid(id, paid)
+        .map_err(err)
+}
+
+/// `kind: null` goes back to the account's kind.
+#[tauri::command]
+fn set_invoice_kind(state: State<'_, AppState>, id: i64, kind: Option<String>) -> CmdResult<()> {
+    let kind: Option<AccountKind> = kind.map(|k| k.parse()).transpose().map_err(err)?;
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .set_invoice_kind(id, kind)
+        .map_err(err)
+}
+
+#[tauri::command]
+fn account_kinds(state: State<'_, AppState>) -> CmdResult<Vec<AccountKindInfo>> {
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .account_kinds()
+        .map_err(err)
+}
+
+#[tauri::command]
+fn set_account_kind(state: State<'_, AppState>, account_id: i64, kind: String) -> CmdResult<()> {
+    let kind: AccountKind = kind.parse().map_err(err)?;
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .set_account_kind(account_id, kind)
+        .map_err(err)
+}
+
+/// The downloads folder, where proof files and exports go.
+fn download_dir() -> CmdResult<PathBuf> {
+    directories::UserDirs::new()
+        .and_then(|d| d.download_dir().map(|p| p.to_path_buf()))
+        .ok_or_else(|| "Kein Download-Ordner gefunden.".to_string())
+}
+
+/// Writes the stored proof file of an invoice to the downloads folder and
+/// shows it in the file manager, like [`save_attachment`]. The same file is
+/// reused when it is already there, so opening twice does not litter.
+#[tauri::command]
+fn open_invoice_file(state: State<'_, AppState>, id: i64) -> CmdResult<String> {
+    let file = state
+        .store
+        .lock()
+        .map_err(err)?
+        .invoice_file(id)
+        .map_err(err)?
+        .ok_or("Zu dieser Rechnung ist kein Beleg gespeichert.")?;
+    let dir = download_dir()?;
+    let name = content::safe_file_name(&file.name);
+    let same = dir.join(&name);
+    let path = if std::fs::read(&same).is_ok_and(|existing| existing == file.data) {
+        same
+    } else {
+        let path = unique_path(&dir, &name);
+        std::fs::write(&path, &file.data).map_err(err)?;
+        path
+    };
+    let _ = tauri_plugin_opener::reveal_item_in_dir(&path);
+    Ok(path.display().to_string())
+}
+
+/// Exports the invoices of a year (proof files by private/business and an
+/// overview CSV) into a new folder in the downloads folder.
+#[tauri::command]
+async fn export_invoices(state: State<'_, AppState>, year: i32) -> CmdResult<InvoiceExportReport> {
+    let dir = download_dir()?;
+    let db_path = state.db_path.clone();
+    // Own connection: writing many files must not block the UI's queries.
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = Store::open(&db_path).map_err(err)?;
+        let report = invoices::export_year(&store, year, &dir).map_err(err)?;
+        let _ = tauri_plugin_opener::reveal_item_in_dir(&report.path);
+        Ok(report)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// "Von dir als erledigt entfernt": hides this mail's conversation from "Heute"
+/// until a new mail arrives in the thread.
+#[tauri::command]
+fn dismiss_turn(app: AppHandle, state: State<'_, AppState>, message_id: i64) -> CmdResult<()> {
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .dismiss_turn(message_id)
+        .map_err(err)?;
+    schedule_flush(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn restore_turn(app: AppHandle, state: State<'_, AppState>, message_id: i64) -> CmdResult<()> {
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .restore_turn(message_id)
+        .map_err(err)?;
+    schedule_flush(&app);
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -1515,11 +1707,23 @@ pub fn run() {
             clear_brand_logos,
             cases,
             set_case_status,
+            auto_mark_read,
+            set_auto_mark_read,
             sources,
             set_source_mode,
             dismiss_source_anomaly,
             remove_source,
+            invoices,
+            invoice_years,
+            set_invoice_paid,
+            set_invoice_kind,
+            account_kinds,
+            set_account_kind,
+            open_invoice_file,
+            export_invoices,
             thread_turns,
+            dismiss_turn,
+            restore_turn,
             mask_message_preview,
             messages_by_ids,
             sent_replies

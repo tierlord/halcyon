@@ -5,4 +5,5 @@
 
 pub mod finance;
 pub mod otp;
+pub mod portal;
 pub mod tracking;

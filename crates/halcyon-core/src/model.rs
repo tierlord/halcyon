@@ -129,6 +129,37 @@ pub fn is_local_host(host: &str) -> bool {
     }
 }
 
+/// Whether mail of an account is private or business, which decides how its
+/// invoices are filed for the tax return.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AccountKind {
+    #[default]
+    Private,
+    Business,
+}
+
+impl fmt::Display for AccountKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            AccountKind::Private => "private",
+            AccountKind::Business => "business",
+        })
+    }
+}
+
+impl FromStr for AccountKind {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "private" => Ok(AccountKind::Private),
+            "business" => Ok(AccountKind::Business),
+            other => Err(Error::Other(format!("unknown account kind {other:?}"))),
+        }
+    }
+}
+
 /// A configured mail account.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Account {
@@ -228,6 +259,9 @@ pub struct Folder {
     pub last_seen_uid: u32,
     /// CONDSTORE state after the last flag sync (RFC 7162).
     pub highest_modseq: Option<u64>,
+    /// The server accepts client-defined keywords here (`PERMANENTFLAGS`
+    /// contains `\*`). Unknown until the folder was selected once.
+    pub keywords: bool,
 }
 
 /// A local change that still has to reach the server. Changes are applied
@@ -247,6 +281,13 @@ pub enum PendingChange {
     /// Delete every message of the folder up to the op's UID for good
     /// (emptying spam or trash). Mail that arrived later is kept.
     EmptyUpTo,
+}
+
+impl PendingChange {
+    /// A keyword (`$Name`) rather than a system flag (`\Name`).
+    pub fn is_keyword(&self) -> bool {
+        matches!(self, PendingChange::AddFlag(f) | PendingChange::RemoveFlag(f) if !f.starts_with('\\'))
+    }
 }
 
 #[derive(Clone, Debug)]

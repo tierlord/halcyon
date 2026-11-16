@@ -60,6 +60,9 @@ pub enum OrderStep {
     Invoice,
     Placed,
     Shipped,
+    /// Declared after `Shipped` and before `Delivered`: `max()` over the
+    /// steps of an order must never move a delivered order backwards.
+    OutForDelivery,
     Delivered,
     Cancelled,
 }
@@ -70,6 +73,7 @@ impl OrderStep {
             OrderStep::Invoice => "order.invoice",
             OrderStep::Placed => "order.placed",
             OrderStep::Shipped => "order.shipped",
+            OrderStep::OutForDelivery => "order.out_for_delivery",
             OrderStep::Delivered => "order.delivered",
             OrderStep::Cancelled => "order.cancelled",
         }
@@ -80,6 +84,7 @@ impl OrderStep {
             OrderStep::Invoice => "Rechnung",
             OrderStep::Placed => "Bestellt",
             OrderStep::Shipped => "Versandt",
+            OrderStep::OutForDelivery => "In Zustellung",
             OrderStep::Delivered => "Zugestellt",
             OrderStep::Cancelled => "Storniert",
         }
@@ -88,7 +93,9 @@ impl OrderStep {
     fn phase(self) -> CaseEventPhase {
         match self {
             OrderStep::Placed => CaseEventPhase::Start,
-            OrderStep::Invoice | OrderStep::Shipped => CaseEventPhase::Update,
+            OrderStep::Invoice | OrderStep::Shipped | OrderStep::OutForDelivery => {
+                CaseEventPhase::Update
+            }
             OrderStep::Delivered | OrderStep::Cancelled => CaseEventPhase::Done,
         }
     }
@@ -98,6 +105,7 @@ impl OrderStep {
             "order.invoice" => OrderStep::Invoice,
             "order.placed" => OrderStep::Placed,
             "order.shipped" => OrderStep::Shipped,
+            "order.out_for_delivery" => OrderStep::OutForDelivery,
             "order.delivered" => OrderStep::Delivered,
             "order.cancelled" => OrderStep::Cancelled,
             _ => return None,
@@ -111,6 +119,14 @@ static RE_CANCELLED_ORDER: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
+/// Checked before `RE_DELIVERED`: "wird heute zugestellt" contains
+/// "zugestellt" but announces the delivery, it does not report it.
+static RE_OUT_FOR_DELIVERY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\bin zustellung\b|wird (?:heute|gleich|in kürze|im laufe des tages)(?: noch)? (?:zugestellt|geliefert)|\bkommt heute\b|zustellung (?:erfolgt )?heute|heute (?:wird|kommt) (?:ihr|dein|die|das)|\bout for delivery\b|\barriv(?:es|ing) today\b|\bdelivery today\b|\bwill be delivered today\b",
+    )
+    .unwrap()
+});
 static RE_DELIVERED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\bzugestellt\b|\bgeliefert\b|\bdelivered\b|ablageort|wurde geliefert|ist angekommen|has arrived|abholbereit|ready for pickup",
@@ -119,7 +135,7 @@ static RE_DELIVERED: LazyLock<Regex> = LazyLock::new(|| {
 });
 static RE_SHIPPED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)\bversendet\b|\bversandt\b|verschickt|versandbestätigung|\bin zustellung\b|ist unterwegs|auf dem weg zu|\bshipped\b|dispatched|out for delivery|kommt heute|kommt morgen|paketupdate|lieferstatus|sendungsstatus|aktualisierung der lieferung|(?:ihre|deine|amazon)\s+sendung|ihr (?:dhl |dpd |gls |hermes |ups )?paket|bald ist ihr",
+        r"(?i)\bversendet\b|\bversandt\b|verschickt|versandbestätigung|ist unterwegs|auf dem weg zu|\bshipped\b|dispatched|kommt morgen|paketupdate|lieferstatus|sendungsstatus|aktualisierung der lieferung|(?:ihre|deine|amazon)\s+sendung|ihr (?:dhl |dpd |gls |hermes |ups )?paket|bald ist ihr",
     )
     .unwrap()
 });
@@ -190,6 +206,8 @@ pub struct OrderSignal {
 pub fn order_step(subject: &str) -> Option<OrderStep> {
     if RE_CANCELLED_ORDER.is_match(subject) {
         Some(OrderStep::Cancelled)
+    } else if RE_OUT_FOR_DELIVERY.is_match(subject) {
+        Some(OrderStep::OutForDelivery)
     } else if RE_DELIVERED.is_match(subject) {
         Some(OrderStep::Delivered)
     } else if RE_SHIPPED.is_match(subject) {
@@ -296,7 +314,11 @@ pub fn run(store: &mut Store, now: i64) -> Result<LinkReport> {
     let correspondents = store.sent_recipient_addresses()?;
     let mut report = LinkReport::default();
     loop {
-        let batch = store.case_scan_batch(now - SCAN_WINDOW_SECS, BATCH)?;
+        let batch = store.case_scan_batch(
+            now - SCAN_WINDOW_SECS,
+            now - crate::sync::TRASH_PREFETCH_DAYS * 86_400,
+            BATCH,
+        )?;
         if batch.is_empty() {
             break;
         }
@@ -369,12 +391,20 @@ fn link_message(
         return Ok(());
     }
 
+    // Mail in Trash was deleted before Halcyon showed it (typically straight
+    // from a phone notification). It may still tell how a case went on, but
+    // the user already dismissed it: it never starts a case or a source.
+    let in_trash = m.folder_role == Some(FolderRole::Trash);
+
     let before_linked = report.linked;
     if m.list_id.is_none() && dir == EventDirection::In && m.dmarc_pass {
-        link_order(store, m, subject, body, report)?;
+        link_order(store, m, subject, body, in_trash, report)?;
         if report.linked == before_linked {
-            link_invoice_or_contract(store, m, subject, body, report)?;
+            link_invoice_or_contract(store, m, subject, body, in_trash, report)?;
         }
+    }
+    if in_trash {
+        return Ok(());
     }
 
     // Record recurring informational sources only when the message passed DMARC,
@@ -386,6 +416,7 @@ fn link_message(
         Some(
             OrderStep::Placed
                 | OrderStep::Shipped
+                | OrderStep::OutForDelivery
                 | OrderStep::Delivered
                 | OrderStep::Cancelled
         )
@@ -461,6 +492,7 @@ fn link_order(
     m: &ScanMessage,
     subject: &str,
     body: &str,
+    in_trash: bool,
     report: &mut LinkReport,
 ) -> Result<()> {
     let Some(step) = order_step(subject) else {
@@ -487,14 +519,18 @@ fn link_order(
     let case_id = match found {
         Some(id) => id,
         None => {
-            let starts = match step {
-                OrderStep::Placed => true,
-                OrderStep::Shipped => {
-                    !is_carrier(domain.as_deref())
-                        && (!keys.numbers.is_empty() || item_key.is_some())
-                }
-                OrderStep::Delivered | OrderStep::Cancelled | OrderStep::Invoice => false,
-            };
+            let starts = !in_trash
+                && match step {
+                    OrderStep::Placed => true,
+                    OrderStep::Shipped => {
+                        !is_carrier(domain.as_deref())
+                            && (!keys.numbers.is_empty() || item_key.is_some())
+                    }
+                    OrderStep::OutForDelivery
+                    | OrderStep::Delivered
+                    | OrderStep::Cancelled
+                    | OrderStep::Invoice => false,
+                };
             if !starts {
                 return Ok(());
             }
@@ -589,6 +625,7 @@ fn link_invoice_or_contract(
     m: &ScanMessage,
     subject: &str,
     body: &str,
+    in_trash: bool,
     report: &mut LinkReport,
 ) -> Result<()> {
     let bkeys = find_business_keys(subject, body);
@@ -699,6 +736,9 @@ fn link_invoice_or_contract(
     if kind == CaseKind::Invoice && found.is_none() && status == CaseStatus::Done {
         return Ok(());
     }
+    if in_trash && found.is_none() {
+        return Ok(());
+    }
 
     let case_id = match found {
         Some(id) => id,
@@ -770,6 +810,7 @@ fn refresh_order(store: &Store, case_id: i64) -> Result<()> {
     let (status, next) = match furthest {
         Some(OrderStep::Cancelled) => (CaseStatus::Done, "Storniert"),
         Some(OrderStep::Delivered) => (CaseStatus::Done, "Zugestellt"),
+        Some(OrderStep::OutForDelivery) => (CaseStatus::Waiting, "In Zustellung · kommt bald"),
         Some(OrderStep::Shipped) => (CaseStatus::Waiting, "Unterwegs · wartet auf Zustellung"),
         _ => (CaseStatus::Waiting, "Bestellt · wartet auf Versand"),
     };
@@ -810,7 +851,28 @@ mod tests {
             ),
             (
                 "In Zustellung: „CR-10S Pro Hotend CR-10S...“",
-                Some(OrderStep::Shipped),
+                Some(OrderStep::OutForDelivery),
+            ),
+            (
+                "Deine Sendung wird heute zugestellt",
+                Some(OrderStep::OutForDelivery),
+            ),
+            ("Ihr Paket kommt heute", Some(OrderStep::OutForDelivery)),
+            (
+                "Zustellung heute zwischen 10 und 12 Uhr",
+                Some(OrderStep::OutForDelivery),
+            ),
+            (
+                "Your parcel is out for delivery",
+                Some(OrderStep::OutForDelivery),
+            ),
+            (
+                "Arriving today: your order",
+                Some(OrderStep::OutForDelivery),
+            ),
+            (
+                "Ihr Paket wurde heute zugestellt",
+                Some(OrderStep::Delivered),
             ),
             (
                 "Artikel erfolgreich storniert: „Raspberry 4596 Pi -...“",
@@ -1275,5 +1337,295 @@ mod tests {
             .unwrap();
         assert_eq!(delivered.case.status, CaseStatus::Done);
         assert_eq!(delivered.case.next_step, "Zugestellt");
+    }
+    fn trash_folder(store: &Store) -> i64 {
+        let account = store.accounts().unwrap()[0].id;
+        store
+            .upsert_folder(account, "Trash", None, Some(FolderRole::Trash), true)
+            .unwrap()
+            .id
+    }
+
+    /// Gives every stored mail a text, as the body prefetch would.
+    fn set_bodies(store: &Store, body: &str) {
+        store
+            .conn
+            .execute("UPDATE messages SET body_text = ?1", [body])
+            .unwrap();
+    }
+
+    fn order_case(store: &Store) -> crate::cases::CaseView {
+        let cases = store.list_cases(false).unwrap();
+        assert_eq!(cases.len(), 1, "{cases:#?}");
+        cases.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn delivery_found_only_in_trash_closes_the_order() {
+        let (mut store, inbox, _) = store_with_inbox();
+        let trash = trash_folder(&store);
+        store
+            .insert_messages(
+                inbox,
+                &[
+                    mail(
+                        1,
+                        "Bestellung A-123456 bestätigt",
+                        "o@shop.example",
+                        NOW - 5 * DAY,
+                    ),
+                    mail(
+                        2,
+                        "Deine Bestellung A-123456 ist unterwegs",
+                        "o@shop.example",
+                        NOW - 3 * DAY,
+                    ),
+                ],
+            )
+            .unwrap();
+        run(&mut store, NOW).unwrap();
+        assert_eq!(order_case(&store).case.status, CaseStatus::Waiting);
+
+        // Deleted on the phone before it was ever synced to the inbox.
+        store
+            .insert_messages(
+                trash,
+                &[mail(
+                    3,
+                    "Deine Bestellung A-123456 wurde zugestellt",
+                    "o@shop.example",
+                    NOW - DAY,
+                )],
+            )
+            .unwrap();
+        // Without its text nothing can be matched yet.
+        assert_eq!(run(&mut store, NOW).unwrap().linked, 0);
+        set_bodies(&store, "Bestellnummer: A-123456");
+        let report = run(&mut store, NOW).unwrap();
+        assert_eq!(report.linked, 1, "{report:?}");
+        assert_eq!(report.created, 0);
+        let view = order_case(&store);
+        assert_eq!(view.case.status, CaseStatus::Done);
+        assert_eq!(
+            view.events.last().unwrap().kind.as_deref(),
+            Some("order.delivered")
+        );
+    }
+
+    #[test]
+    fn old_trash_is_not_scanned() {
+        let (mut store, inbox, _) = store_with_inbox();
+        let trash = trash_folder(&store);
+        store
+            .insert_messages(
+                inbox,
+                &[mail(
+                    1,
+                    "Bestellung A-123456 bestätigt",
+                    "o@shop.example",
+                    NOW - 60 * DAY,
+                )],
+            )
+            .unwrap();
+        store
+            .insert_messages(
+                trash,
+                &[mail(
+                    2,
+                    "Deine Bestellung A-123456 wurde zugestellt",
+                    "o@shop.example",
+                    NOW - 40 * DAY,
+                )],
+            )
+            .unwrap();
+        set_bodies(&store, "Bestellnummer: A-123456");
+        run(&mut store, NOW - 30 * DAY).unwrap();
+        let report = run(&mut store, NOW).unwrap();
+        assert_eq!(report.linked, 0);
+    }
+
+    #[test]
+    fn mail_in_trash_never_creates_cases_or_sources() {
+        let (mut store, _, _) = store_with_inbox();
+        let trash = trash_folder(&store);
+        store
+            .insert_messages(
+                trash,
+                &[
+                    mail(
+                        1,
+                        "Bestellbestätigung A-123456",
+                        "o@shop.example",
+                        NOW - DAY,
+                    ),
+                    mail(
+                        2,
+                        "Ihre Rechnung RE-2026-441 über 49,90 € – bitte überweisen",
+                        "b@provider.example",
+                        NOW - DAY,
+                    ),
+                    mail(3, "Neues aus dem Shop", "news@shop.example", NOW - DAY),
+                ],
+            )
+            .unwrap();
+        set_bodies(&store, "Bestellnummer: A-123456");
+        let report = run(&mut store, NOW).unwrap();
+        assert_eq!(report.created, 0, "{report:?}");
+        assert!(store.list_cases(false).unwrap().is_empty());
+        assert!(store.list_sources(50).unwrap().is_empty());
+    }
+
+    #[test]
+    fn trash_closes_a_known_invoice_case() {
+        let (mut store, inbox, _) = store_with_inbox();
+        let trash = trash_folder(&store);
+        store
+            .insert_messages(
+                inbox,
+                &[mail(
+                    1,
+                    "Ihre Rechnung RE-2026-441 über 49,90 € – bitte überweisen",
+                    "b@provider.example",
+                    NOW - 2 * DAY,
+                )],
+            )
+            .unwrap();
+        run(&mut store, NOW).unwrap();
+        assert_eq!(order_case(&store).case.status, CaseStatus::NeedsYou);
+        store
+            .insert_messages(
+                trash,
+                &[mail(
+                    2,
+                    "Zahlungsbestätigung Rechnung RE-2026-441",
+                    "b@provider.example",
+                    NOW - DAY,
+                )],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute("UPDATE messages SET body_text = 'Rechnung RE-2026-441 wurde bezahlt. Vielen Dank, der Betrag wurde bereits beglichen.' WHERE uid = 2", [])
+            .unwrap();
+        let report = run(&mut store, NOW).unwrap();
+        assert_eq!(report.created, 0, "{report:?}");
+        assert_eq!(report.linked, 1, "{report:?}");
+        assert_eq!(order_case(&store).case.status, CaseStatus::Done);
+    }
+
+    #[test]
+    fn mail_moved_to_trash_is_counted_once() {
+        let (mut store, inbox, _) = store_with_inbox();
+        let trash = trash_folder(&store);
+        store
+            .insert_messages(
+                inbox,
+                &[
+                    mail(
+                        1,
+                        "Bestellung A-123456 bestätigt",
+                        "o@shop.example",
+                        NOW - 3 * DAY,
+                    ),
+                    mail(
+                        2,
+                        "Deine Bestellung A-123456 wurde zugestellt",
+                        "o@shop.example",
+                        NOW - DAY,
+                    ),
+                ],
+            )
+            .unwrap();
+        set_bodies(&store, "Bestellnummer: A-123456");
+        run(&mut store, NOW).unwrap();
+        let before = order_case(&store).events.len();
+        assert_eq!(before, 2);
+
+        // The sync sees the move as a deletion plus a new row in Trash.
+        store
+            .conn
+            .execute("DELETE FROM messages WHERE uid = 2", [])
+            .unwrap();
+        let mut moved = mail(
+            7,
+            "Deine Bestellung A-123456 wurde zugestellt",
+            "o@shop.example",
+            NOW - DAY,
+        );
+        moved.message_id = Some("m2@example.org".into());
+        store.insert_messages(trash, &[moved]).unwrap();
+        set_bodies(&store, "Bestellnummer: A-123456");
+        let report = run(&mut store, NOW).unwrap();
+        assert_eq!(report.linked, 0, "{report:?}");
+        let view = order_case(&store);
+        assert_eq!(view.events.len(), before);
+        // The event outlives the deleted mail row.
+        assert!(view.events.iter().any(|e| e.message_id.is_none()));
+    }
+
+    #[test]
+    fn out_for_delivery_advances_but_never_starts_or_rewinds() {
+        let (mut store, inbox, _) = store_with_inbox();
+        store
+            .insert_messages(
+                inbox,
+                &[
+                    // No case yet: must not start one.
+                    mail(
+                        1,
+                        "Deine Sendung wird heute zugestellt",
+                        "o@shop.example",
+                        NOW - 9 * DAY,
+                    ),
+                    mail(
+                        2,
+                        "Bestellung A-123456 bestätigt",
+                        "o@shop.example",
+                        NOW - 5 * DAY,
+                    ),
+                ],
+            )
+            .unwrap();
+        run(&mut store, NOW).unwrap();
+        let view = order_case(&store);
+        assert_eq!(view.events.len(), 1);
+
+        store
+            .insert_messages(
+                inbox,
+                &[mail(
+                    3,
+                    "Bestellung A-123456: In Zustellung",
+                    "o@shop.example",
+                    NOW - 2 * DAY,
+                )],
+            )
+            .unwrap();
+        run(&mut store, NOW).unwrap();
+        let view = order_case(&store);
+        assert_eq!(
+            view.events.last().unwrap().kind.as_deref(),
+            Some("order.out_for_delivery")
+        );
+        assert_eq!(view.events.last().unwrap().label, "In Zustellung");
+        assert_eq!(view.events.last().unwrap().phase, CaseEventPhase::Update);
+        assert_eq!(view.case.status, CaseStatus::Waiting);
+
+        store
+            .insert_messages(
+                inbox,
+                &[
+                    mail(
+                        4,
+                        "Bestellung A-123456 wurde zugestellt",
+                        "o@shop.example",
+                        NOW - DAY,
+                    ),
+                    mail(5, "Bestellung A-123456: kommt heute", "o@shop.example", NOW),
+                ],
+            )
+            .unwrap();
+        run(&mut store, NOW).unwrap();
+        assert_eq!(order_case(&store).case.status, CaseStatus::Done);
     }
 }

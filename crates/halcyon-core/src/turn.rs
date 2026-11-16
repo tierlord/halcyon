@@ -171,13 +171,97 @@ fn extract_email(addr_str: &str) -> String {
     addr_str.trim().to_lowercase()
 }
 
+/// Local parts that identify bulk or automatic senders. Matched against whole
+/// tokens (split at `.`, `-`, `_`, `+`) so a person named "Newsom" is not hit.
+const MACHINE_LOCAL_TOKENS: &[&str] = &[
+    "noreply",
+    "donotreply",
+    "newsletter",
+    "news",
+    "mailer",
+    "mailerdaemon",
+    "notification",
+    "notifications",
+    "bounce",
+    "bounces",
+    "marketing",
+    "promo",
+];
+
+/// True when the local part of `email` looks like a no-reply/bulk address.
+fn is_machine_local_part(email: &str) -> bool {
+    let local = email.split('@').next().unwrap_or("");
+    if local.is_empty() {
+        return false;
+    }
+    // "no-reply", "no_reply", "do-not-reply", "mailer-daemon" collapse to the
+    // joined spelling so every separator variant is covered by one entry.
+    let joined: String = local
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    if MACHINE_LOCAL_TOKENS.contains(&joined.as_str()) {
+        return true;
+    }
+    local
+        .split(['.', '-', '_', '+'])
+        .filter(|t| !t.is_empty())
+        .any(|t| MACHINE_LOCAL_TOKENS.contains(&t))
+        || ["noreply", "donotreply", "no-reply", "no_reply"]
+            .iter()
+            .any(|p| local.contains(p))
+}
+
+/// Header-only test for automatic mail (newsletters, notifications).
+pub fn is_machine_mail(header: &MessageHeader, from_email: &str) -> bool {
+    header.list_id.is_some()
+        || !header.list_unsubscribe.is_empty()
+        || is_machine_local_part(from_email)
+}
+
+/// What the store knows about the sender beyond the headers of one mail.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TurnContext {
+    /// The user wrote to this address before, or the mail replies to one of
+    /// the user's mails.
+    pub known_correspondent: bool,
+    /// The sender belongs to a source that sent at least
+    /// [`RECURRING_SOURCE_MIN_MESSAGES`] mails.
+    pub recurring_source: bool,
+}
+
+/// A source with this many mails is a sender pattern, not a conversation.
+pub const RECURRING_SOURCE_MIN_MESSAGES: i64 = 3;
+
+fn machine_assessment() -> TurnAssessment {
+    TurnAssessment {
+        status: TurnStatus::ReadingAlong,
+        confidence: 0.9,
+        reason: "Automatische Nachricht · nur zur Info".to_string(),
+    }
+}
+
 /// Evaluates who is next to act in a conversation based on the latest message's
 /// header, body text, the user's own email addresses, and the current timestamp.
+/// Header-only: without context every sender counts as a possible person.
 pub fn assess_turn(
     last_header: &MessageHeader,
     last_body: &str,
     own_addresses: &[String],
     now: i64,
+) -> TurnAssessment {
+    assess_turn_with_context(last_header, last_body, own_addresses, now, None)
+}
+
+/// Like [`assess_turn`], but with knowledge about the sender from the store.
+/// Without a context the header-only rules apply; with one, unknown senders
+/// need an actual question or request before "needs you" is claimed.
+pub fn assess_turn_with_context(
+    last_header: &MessageHeader,
+    last_body: &str,
+    own_addresses: &[String],
+    now: i64,
+    context: Option<TurnContext>,
 ) -> TurnAssessment {
     let normalized_own: Vec<String> = own_addresses.iter().map(|a| extract_email(a)).collect();
 
@@ -257,6 +341,15 @@ pub fn assess_turn(
             };
         }
 
+        // Machine mail never waits for an answer, however it addresses the user.
+        if is_machine_mail(last_header, &from_email) {
+            return machine_assessment();
+        }
+        let unknown_sender = context.is_some_and(|c| !c.known_correspondent);
+        if unknown_sender && context.is_some_and(|c| c.recurring_source) {
+            return machine_assessment();
+        }
+
         if age_secs > STALE_CONVERSATION_SECS {
             return TurnAssessment {
                 status: TurnStatus::Done,
@@ -268,7 +361,8 @@ pub fn assess_turn(
         if contains_question_or_request(&fresh) || contains_question_or_request(subject) {
             return TurnAssessment {
                 status: TurnStatus::NeedsYou,
-                confidence: 0.9,
+                // A question from someone the user never dealt with is weaker evidence.
+                confidence: if unknown_sender { 0.6 } else { 0.9 },
                 reason: "Du stehst in An, letzte Mail enthält eine Frage oder Bitte".to_string(),
             };
         }
@@ -278,6 +372,14 @@ pub fn assess_turn(
                 status: TurnStatus::Done,
                 confidence: 0.85,
                 reason: "Gespräch mit Dank oder Bestätigung abgeschlossen".to_string(),
+            };
+        }
+
+        if unknown_sender {
+            return TurnAssessment {
+                status: TurnStatus::ReadingAlong,
+                confidence: 0.7,
+                reason: "Kein Austausch mit dir bisher · nur zur Info".to_string(),
             };
         }
 
@@ -292,6 +394,115 @@ pub fn assess_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn inbound(from: &str, body_subject: &str) -> MessageHeader {
+        MessageHeader {
+            from_addr: Some(from.to_string()),
+            to: vec!["me@example.org".to_string()],
+            date: Some(1000),
+            subject: Some(body_subject.to_string()),
+            ..Default::default()
+        }
+    }
+
+    const ME: &str = "me@example.org";
+
+    #[test]
+    fn machine_mail_by_unsubscribe_header() {
+        let mut h = inbound("anna@example.com", "Hallo");
+        h.list_unsubscribe = vec!["<mailto:u@example.com>".to_string()];
+        let a = assess_turn(&h, "Hallo,\n\nneue Angebote.", &[ME.to_string()], 1500);
+        assert_eq!(a.status, TurnStatus::ReadingAlong);
+        assert_eq!(a.reason, "Automatische Nachricht · nur zur Info");
+    }
+
+    #[test]
+    fn machine_mail_by_local_part() {
+        for from in [
+            "noreply@example.com",
+            "no-reply@example.com",
+            "no_reply@example.com",
+            "do-not-reply@example.com",
+            "news@example.com",
+            "newsletter@example.com",
+            "mailer-daemon@example.com",
+            "notifications@example.com",
+            "bounce+abc@example.com",
+            "shop.marketing@example.com",
+        ] {
+            let a = assess_turn(&inbound(from, "x"), "Hallo", &[ME.to_string()], 1500);
+            assert_eq!(a.status, TurnStatus::ReadingAlong, "{from}");
+        }
+    }
+
+    #[test]
+    fn person_local_part_is_not_machine() {
+        for from in [
+            "newsom@example.com",
+            "anna.promoter@example.com",
+            "bob@example.com",
+        ] {
+            let a = assess_turn(&inbound(from, "x"), "Hallo", &[ME.to_string()], 1500);
+            assert_eq!(a.status, TurnStatus::NeedsYou, "{from}");
+        }
+    }
+
+    #[test]
+    fn unknown_recurring_sender_is_machine() {
+        let h = inbound("anna@example.com", "Hallo");
+        let ctx = TurnContext {
+            known_correspondent: false,
+            recurring_source: true,
+        };
+        let a = assess_turn_with_context(&h, "Wie geht's?", &[ME.to_string()], 1500, Some(ctx));
+        assert_eq!(a.status, TurnStatus::ReadingAlong);
+    }
+
+    #[test]
+    fn unknown_sender_without_question_is_not_needs_you() {
+        let h = inbound("anna@example.com", "Info");
+        let ctx = TurnContext::default();
+        let a = assess_turn_with_context(
+            &h,
+            "Hallo Max,\n\nzur Info.",
+            &[ME.to_string()],
+            1500,
+            Some(ctx),
+        );
+        assert_eq!(a.status, TurnStatus::ReadingAlong);
+    }
+
+    #[test]
+    fn unknown_sender_with_question_stays_needs_you_weaker() {
+        let h = inbound("anna@example.com", "Frage");
+        let ctx = TurnContext::default();
+        let a = assess_turn_with_context(
+            &h,
+            "Kannst du mir helfen?",
+            &[ME.to_string()],
+            1500,
+            Some(ctx),
+        );
+        assert_eq!(a.status, TurnStatus::NeedsYou);
+        assert!(a.confidence < 0.7);
+    }
+
+    #[test]
+    fn known_correspondent_without_question_needs_you() {
+        let h = inbound("anna@example.com", "Info");
+        let ctx = TurnContext {
+            known_correspondent: true,
+            recurring_source: true,
+        };
+        let a = assess_turn_with_context(
+            &h,
+            "Hier die Unterlagen.",
+            &[ME.to_string()],
+            1500,
+            Some(ctx),
+        );
+        assert_eq!(a.status, TurnStatus::NeedsYou);
+    }
 
     #[test]
     fn test_strip_quotes_signature_basic() {

@@ -195,9 +195,8 @@ pub fn render(content: &MessageContent, allow_remote: bool, dark: bool) -> Rende
     }
 }
 
-static RE_DARK_SUPPORT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)prefers-color-scheme\s*:\s*dark|light-dark\s*\("#).unwrap()
-});
+static RE_DARK_SUPPORT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?i)prefers-color-scheme\s*:\s*dark|light-dark\s*\("#).unwrap());
 // The `color-scheme` property (not the media feature): a mail declaring
 // `light dark` would otherwise switch `light-dark()` colours to dark.
 static RE_COLOR_SCHEME_PROP: LazyLock<Regex> =
