@@ -34,6 +34,27 @@
   let otpCopied = $state(false)
   let maskedPreview = $state<MaskedPreview | null>(null)
   let maskLoading = $state(false)
+  let imagePreview = $state<{ part: number; name: string; url: string } | null>(null)
+  let imageLoading = $state<number | null>(null)
+
+  const IMAGE_MIMES = new Set([
+    'image/jpeg',
+    'image/jpg',
+    'image/png',
+    'image/gif',
+    'image/webp',
+    'image/bmp',
+    'image/avif',
+  ])
+
+  function isImageAttachment(a: { mime_type: string; name: string }): boolean {
+    const mime = a.mime_type.trim().toLowerCase()
+    if (IMAGE_MIMES.has(mime)) return true
+    if (mime === 'application/octet-stream') {
+      return /\.(jpe?g|png|gif|webp|bmp|avif)$/i.test(a.name.trim())
+    }
+    return false
+  }
 
   const isNewsletter = $derived(!!message && message.header.list_unsubscribe.length > 0)
   const files = $derived(view?.attachments.filter((a) => !a.inline) ?? [])
@@ -69,6 +90,7 @@
     const mine = ++seq
     loading = true
     error = ''
+    imagePreview = null
     try {
       const result = await api.messageContent(id, remote, appDark)
       if (mine === seq) view = result
@@ -193,6 +215,19 @@
       notice = `Gespeichert: ${path}`
     } catch (e) {
       notice = String(e)
+    }
+  }
+
+  async function openImagePreview(file: { part: number; name: string }) {
+    if (!message || imageLoading !== null) return
+    imageLoading = file.part
+    try {
+      const url = await api.previewImageAttachment(message.id, file.part)
+      imagePreview = { part: file.part, name: file.name, url }
+    } catch (e) {
+      notice = String(e)
+    } finally {
+      imageLoading = null
     }
   }
 
@@ -369,9 +404,23 @@
       {#if files.length}
         <ul class="files" aria-label="Anhänge">
           {#each files as file (file.part)}
+            {@const isImg = isImageAttachment(file)}
             <li>
-              <Icon name="paperclip" size={16} />
-              <span class="file-name" title={file.name}>{file.name}</span>
+              {#if isImg}
+                <button
+                  type="button"
+                  class="file-preview-btn"
+                  onclick={() => openImagePreview(file)}
+                  disabled={imageLoading === file.part}
+                  title="Bild direkt in Halcyon anzeigen"
+                >
+                  <Icon name="image" size={16} />
+                  <span class="file-name">{file.name}</span>
+                </button>
+              {:else}
+                <Icon name="paperclip" size={16} />
+                <span class="file-name" title={file.name}>{file.name}</span>
+              {/if}
               <span class="file-size">{formatSize(file.size)}</span>
               <button type="button" class="small-btn" onclick={() => save(file.part)}>
                 <Icon name="download" size={14} />
@@ -419,6 +468,45 @@
         ></iframe>
       {/if}
     </div>
+
+    {#if imagePreview}
+      <div class="image-backdrop" role="presentation" onclick={() => (imagePreview = null)}>
+        <div
+          class="image-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-label={imagePreview.name}
+          tabindex="-1"
+          onclick={(e) => e.stopPropagation()}
+          onkeydown={(e) => e.key === 'Escape' && (imagePreview = null)}
+        >
+          <div class="image-head">
+            <span class="image-title" title={imagePreview.name}>{imagePreview.name}</span>
+            <div class="image-actions">
+              <button
+                type="button"
+                class="small-btn"
+                onclick={() => imagePreview && save(imagePreview.part)}
+              >
+                <Icon name="download" size={14} />
+                Speichern
+              </button>
+              <button
+                type="button"
+                class="icon-btn"
+                onclick={() => (imagePreview = null)}
+                aria-label="Bildvorschau schließen"
+              >
+                <Icon name="x" size={16} />
+              </button>
+            </div>
+          </div>
+          <div class="image-stage">
+            <img src={imagePreview.url} alt={imagePreview.name} />
+          </div>
+        </div>
+      </div>
+    {/if}
 
     {#if linkWarning}
       <div class="warn-backdrop" role="presentation" onclick={() => (linkWarning = null)}>
@@ -896,9 +984,88 @@
   .embedded .state {
     min-height: 120px;
   }
-  .embedded .warn-backdrop {
+  .embedded .warn-backdrop,
+  .embedded .image-backdrop {
     /* the pane scrolls, so a pane-relative backdrop could end up off screen */
     position: fixed;
     z-index: 30;
+  }
+  .file-preview-btn {
+    flex: 1;
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border: 0;
+    padding: 0;
+    background: none;
+    color: var(--accent-text);
+    text-align: left;
+    cursor: pointer;
+    font-weight: 500;
+  }
+  .file-preview-btn:hover:not(:disabled) .file-name {
+    text-decoration: underline;
+  }
+  .file-preview-btn:disabled {
+    opacity: 0.6;
+    cursor: progress;
+  }
+  .image-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background: color-mix(in srgb, var(--pitch-black) 68%, transparent);
+  }
+  .image-dialog {
+    display: flex;
+    flex-direction: column;
+    max-width: min(92vw, 1100px);
+    max-height: 90vh;
+    min-width: 280px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--surface-raised);
+    box-shadow: 0 18px 50px color-mix(in srgb, var(--pitch-black) 45%, transparent);
+    overflow: hidden;
+  }
+  .image-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .image-title {
+    font-size: 13px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .image-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: none;
+  }
+  .image-stage {
+    padding: 16px;
+    overflow: auto;
+    display: grid;
+    place-items: center;
+    background: color-mix(in srgb, var(--pitch-black) 12%, var(--bg));
+  }
+  .image-stage img {
+    max-width: 100%;
+    max-height: calc(90vh - 90px);
+    object-fit: contain;
+    border-radius: 6px;
   }
 </style>

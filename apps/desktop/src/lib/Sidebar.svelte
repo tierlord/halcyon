@@ -9,8 +9,10 @@
 </script>
 
 <script lang="ts">
+  import { onMount } from 'svelte'
   import { cubicOut } from 'svelte/easing'
   import { fade, slide } from 'svelte/transition'
+  import * as api from './api'
   import Icon from './Icon.svelte'
   import { accountLabel } from './format'
   import { getThemeMode, setThemeMode, type ThemeMode } from './theme.svelte'
@@ -25,6 +27,7 @@
     activeEmails = [],
     onselect,
     onselectsection,
+    onshowcases,
     onmanageaccounts,
     oncontext,
   }: {
@@ -38,6 +41,7 @@
     activeEmails?: string[]
     onselect: (v: View) => void
     onselectsection: (s: 'today' | 'invoices') => void
+    onshowcases?: () => void
     onmanageaccounts: () => void
     /** Right-click or context-menu key on an item; x/y in window coordinates. */
     oncontext: (target: SidebarTarget, x: number, y: number) => void
@@ -67,10 +71,53 @@
   }
 
   const inMail = $derived(section === 'mail')
-  const isUnified = $derived(inMail && view.kind === 'unified')
+  const isUnified = (role: FolderRole) => inMail && view.kind === 'unified' && view.role === role
   let expandedAccountId = $state<number | null>(null)
+  let autoExpandedOnce = false
   let settingsOpen = $state(false)
+  let autoMarkRead = $state(true)
+  let autoMarkReadBusy = $state(false)
   let brandRowEl: HTMLDivElement | undefined = $state()
+
+  onMount(() => {
+    api
+      .autoMarkRead()
+      .then((v) => {
+        autoMarkRead = v
+      })
+      .catch(() => {})
+  })
+
+  $effect(() => {
+    const accounts = overview?.accounts ?? []
+    if (!autoExpandedOnce && accounts.length === 1 && accounts[0].folders.length > 0) {
+      expandedAccountId = accounts[0].id
+      autoExpandedOnce = true
+    }
+  })
+
+  async function toggleAutoMarkRead() {
+    if (autoMarkReadBusy) return
+    const next = !autoMarkRead
+    autoMarkRead = next
+    autoMarkReadBusy = true
+    try {
+      await api.setAutoMarkRead(next)
+    } catch {
+      autoMarkRead = !next
+    } finally {
+      autoMarkReadBusy = false
+    }
+  }
+
+  const unifiedFolders: { role: FolderRole; label: string; icon: ReturnType<typeof folderIcon> }[] = [
+    { role: 'inbox', label: 'Alle Posteingänge', icon: 'inbox' },
+    { role: 'flagged', label: 'Markiert', icon: 'star' },
+    { role: 'sent', label: 'Gesendet', icon: 'send' },
+    { role: 'drafts', label: 'Entwürfe', icon: 'compose' },
+    { role: 'archive', label: 'Archiv', icon: 'archive' },
+    { role: 'trash', label: 'Papierkorb', icon: 'trash' },
+  ]
 
   function onWindowPointerDown(e: PointerEvent) {
     if (!settingsOpen) return
@@ -112,11 +159,6 @@
       default:
         return 'folder' as const
     }
-  }
-
-  function selectUnified() {
-    expandedAccountId = null
-    onselect({ kind: 'unified', role: 'inbox' })
   }
 
   function selectAccount(accountId: number) {
@@ -179,6 +221,25 @@
             </button>
           {/each}
         </div>
+        <div class="settings-sep"></div>
+        <div class="settings-row">
+          <div class="settings-row-text">
+            <span class="settings-row-title" id="auto-read-label">Automatisch als gelesen markieren</span>
+            <span class="settings-row-hint">Verarbeitete Mails in anderen Programmen nicht mehr als neu zeigen</span>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoMarkRead}
+            aria-labelledby="auto-read-label"
+            class="switch-btn"
+            class:on={autoMarkRead}
+            disabled={autoMarkReadBusy}
+            onclick={toggleAutoMarkRead}
+          >
+            <span class="switch-thumb"></span>
+          </button>
+        </div>
       </div>
     {/if}
   </div>
@@ -197,18 +258,35 @@
         <span class="label">Rechnungen</span>
       </button>
     </li>
-    <li>
-      <button
-        class="item"
-        class:active={isUnified}
-        onclick={selectUnified}
-        oncontextmenu={contextMenu({ kind: 'unified' })}
-        onkeydown={contextKey({ kind: 'unified' })}
-      >
-        <Icon name="inbox" />
-        <span class="label">Alle Posteingänge</span>
-      </button>
-    </li>
+    {#if onshowcases}
+      <li>
+        <button class="item" onclick={onshowcases}>
+          <Icon name="folder" />
+          <span class="label">Vorgänge &amp; Quellen</span>
+        </button>
+      </li>
+    {/if}
+  </ul>
+
+  <h2>Postfächer</h2>
+  <ul class="section">
+    {#each unifiedFolders as uf (uf.role)}
+      <li>
+        <button
+          class="item"
+          class:active={isUnified(uf.role)}
+          onclick={() => {
+            expandedAccountId = null
+            onselect({ kind: 'unified', role: uf.role })
+          }}
+          oncontextmenu={uf.role === 'inbox' ? contextMenu({ kind: 'unified' }) : undefined}
+          onkeydown={uf.role === 'inbox' ? contextKey({ kind: 'unified' }) : undefined}
+        >
+          <Icon name={uf.icon} />
+          <span class="label">{uf.label}</span>
+        </button>
+      </li>
+    {/each}
   </ul>
 
   <div class="section-header">
@@ -388,6 +466,63 @@
   .theme-opt.active {
     background: var(--accent-fill);
     color: var(--on-accent-fill);
+  }
+  .settings-sep {
+    height: 1px;
+    background: var(--border);
+    margin: 2px 0;
+  }
+  .settings-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .settings-row-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .settings-row-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    line-height: 1.3;
+  }
+  .settings-row-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.35;
+  }
+  .switch-btn {
+    flex: none;
+    position: relative;
+    width: 34px;
+    height: 20px;
+    padding: 0;
+    border: 0;
+    border-radius: 99px;
+    background: color-mix(in srgb, var(--text) 22%, transparent);
+    transition: background-color 0.16s ease;
+    cursor: pointer;
+  }
+  .switch-btn.on {
+    background: var(--accent-fill);
+  }
+  .switch-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #ffffff;
+    box-shadow: 0 1px 3px color-mix(in srgb, var(--pitch-black) 28%, transparent);
+    transition: left 0.16s ease;
+  }
+  .switch-btn.on .switch-thumb {
+    left: 16px;
   }
   .section-header {
     display: flex;
@@ -569,10 +704,10 @@
     color: var(--sidebar-text-muted);
     font-size: 13px;
   }
-  /* The folders scroll on their own; the freed space below stays empty for now. */
   .accounts-scroll {
-    flex: 0 1 auto;
+    flex: 1 1 auto;
     min-height: 80px;
+    padding-bottom: 14px;
     overflow-y: auto;
     scrollbar-width: thin;
   }

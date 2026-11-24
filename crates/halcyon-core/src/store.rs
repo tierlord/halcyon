@@ -21,9 +21,9 @@ use crate::model::{
 use crate::send::{Built, Draft};
 use crate::sources::{
     AnomalyKind, IncomingSourceMail, MailboxEvalStats, SourceAnomaly, SourceMode, SourceRecord,
-    SourceStats, detect_anomaly, suggest_source_mode,
+    SourceStats, detect_anomaly, suggest_source_mode_with_behavior,
 };
-use crate::turn::{TurnStatus, assess_turn};
+use crate::turn::{SenderBehavior, TurnStatus, assess_turn};
 
 /// Schema migrations, applied in order. The index + 1 is stored in
 /// `PRAGMA user_version`, so new migrations must only ever be appended.
@@ -448,6 +448,26 @@ SELECT rfc, MAX(at) FROM (
     WHERE f.role = 'sent'
 ) WHERE rfc IS NOT NULL AND rfc != '' GROUP BY rfc;
 "#,
+    // 19: learned user behavior per sender (open, reply, delete, ignore).
+    // `message_interactions` deduplicates per message; `sender_behavior`
+    // retains the learned counts even after messages are deleted.
+    r#"
+CREATE TABLE message_interactions (
+    message_id  INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    action      TEXT NOT NULL CHECK (action IN ('open', 'reply', 'delete', 'ignore')),
+    created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (message_id, action)
+);
+
+CREATE TABLE sender_behavior (
+    from_addr      TEXT PRIMARY KEY,
+    opened_count   INTEGER NOT NULL DEFAULT 0,
+    replied_count  INTEGER NOT NULL DEFAULT 0,
+    deleted_count  INTEGER NOT NULL DEFAULT 0,
+    ignored_count  INTEGER NOT NULL DEFAULT 0,
+    last_action_at INTEGER NOT NULL DEFAULT 0
+);
+"#,
 ];
 
 /// Result of looking up a domain in the persistent brand logo cache.
@@ -455,6 +475,85 @@ SELECT rfc, MAX(at) FROM (
 pub enum CachedLogo {
     Hit(BrandLogo),
     Miss,
+}
+
+/// User interaction tracked for learning sender relevance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Interaction {
+    Open,
+    Reply,
+    Delete,
+    Ignore,
+}
+
+impl Interaction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Reply => "reply",
+            Self::Delete => "delete",
+            Self::Ignore => "ignore",
+        }
+    }
+}
+
+impl std::str::FromStr for Interaction {
+    type Err = crate::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "open" => Ok(Self::Open),
+            "reply" => Ok(Self::Reply),
+            "delete" => Ok(Self::Delete),
+            "ignore" => Ok(Self::Ignore),
+            other => Err(crate::Error::Other(format!("unknown interaction: {other}"))),
+        }
+    }
+}
+
+fn record_interaction_conn(
+    conn: &Connection,
+    message_id: i64,
+    action: Interaction,
+    now: i64,
+) -> Result<()> {
+    let from: Option<String> = conn
+        .query_row(
+            "SELECT from_addr FROM messages WHERE id = ?1",
+            [message_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(addr) = from
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(());
+    };
+    let inserted = conn.execute(
+        "INSERT OR IGNORE INTO message_interactions (message_id, action, created_at)
+         VALUES (?1, ?2, ?3)",
+        params![message_id, action.as_str(), now],
+    )?;
+    if inserted == 0 {
+        return Ok(());
+    }
+    let col = match action {
+        Interaction::Open => "opened_count",
+        Interaction::Reply => "replied_count",
+        Interaction::Delete => "deleted_count",
+        Interaction::Ignore => "ignored_count",
+    };
+    let sql = format!(
+        "INSERT INTO sender_behavior (from_addr, {col}, last_action_at)
+         VALUES (?1, 1, ?2)
+         ON CONFLICT(from_addr) DO UPDATE SET
+             {col} = sender_behavior.{col} + 1,
+             last_action_at = MAX(sender_behavior.last_action_at, excluded.last_action_at)"
+    );
+    conn.execute(&sql, params![addr, now])?;
+    Ok(())
 }
 
 /// Failed changes are retried this many times, then kept for inspection.
@@ -1132,6 +1231,11 @@ impl Store {
                  VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
                 params![account_id, path, uid, op, arg],
             )?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            record_interaction_conn(&tx, id, Interaction::Delete, now)?;
             // Pending flag changes for this message are moot now.
             tx.execute("DELETE FROM pending_ops WHERE message_id = ?1", [id])?;
             tx.execute("DELETE FROM messages WHERE id = ?1", [id])?;
@@ -2323,11 +2427,15 @@ impl Store {
         };
         let is_newest = total_messages == 0 || m.date >= last_seen_at;
         let new_last_seen = m.date.max(last_seen_at);
-        let suggested = suggest_source_mode(
+        let behavior = self
+            .sender_behavior(m.from_addr.as_deref().unwrap_or(""))
+            .unwrap_or_default();
+        let suggested = suggest_source_mode_with_behavior(
             new_total,
             new_read,
             stored_newsletter || is_newsletter,
             is_status_update,
+            behavior,
         );
 
         self.conn.execute(
@@ -2727,6 +2835,11 @@ impl Store {
             "INSERT OR IGNORE INTO turn_dismissals (rfc_message_id, from_addr) VALUES (?1, ?2)",
             params![rfc, from.map(|f| f.to_ascii_lowercase())],
         )?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        record_interaction_conn(&self.conn, message_id, Interaction::Ignore, now)?;
         self.queue_flag(&[message_id], crate::filing::KEYWORD_DONE, true)?;
         Ok(())
     }
@@ -2829,10 +2942,12 @@ impl Store {
                     .to_ascii_lowercase();
                 let is_reply =
                     msg.header.in_reply_to.is_some() || !msg.header.references.is_empty();
+                let behavior = self.sender_behavior(&from).unwrap_or_default();
                 let context = crate::turn::TurnContext {
                     known_correspondent: is_reply || correspondents.contains(&from),
                     recurring_source: source_total
                         .is_some_and(|n| n >= crate::turn::RECURRING_SOURCE_MIN_MESSAGES),
+                    behavior,
                 };
                 let turn = crate::turn::assess_turn_with_context(
                     &msg.header,
@@ -2856,6 +2971,38 @@ impl Store {
             .prepare("SELECT rfc_message_id, answered_at FROM answered_mails")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Records a user interaction (open, reply, delete, ignore) for learning.
+    /// Deduplicated per `(message_id, action)` so re-opening the same mail
+    /// does not skew sender statistics.
+    pub fn record_interaction(&self, message_id: i64, action: Interaction, now: i64) -> Result<()> {
+        record_interaction_conn(&self.conn, message_id, action, now)
+    }
+
+    /// Learned interaction counts for `from_addr`.
+    pub fn sender_behavior(&self, from_addr: &str) -> Result<SenderBehavior> {
+        let addr = from_addr.trim().to_ascii_lowercase();
+        if addr.is_empty() {
+            return Ok(SenderBehavior::default());
+        }
+        let row = self
+            .conn
+            .query_row(
+                "SELECT opened_count, replied_count, deleted_count, ignored_count
+                 FROM sender_behavior WHERE from_addr = ?1",
+                [&addr],
+                |r| {
+                    Ok(SenderBehavior {
+                        opened: r.get::<_, i64>(0)?.max(0) as u32,
+                        replied: r.get::<_, i64>(1)?.max(0) as u32,
+                        deleted: r.get::<_, i64>(2)?.max(0) as u32,
+                        ignored: r.get::<_, i64>(3)?.max(0) as u32,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row.unwrap_or_default())
     }
 
     /// Computes privacy-preserving numerical metrics for "Wer ist am Zug?"
@@ -4240,5 +4387,63 @@ mod tests {
         assert!(store.is_remote_sender_trusted("news@shop.example").unwrap());
         store.untrust_remote_sender("NEWS@shop.example").unwrap();
         assert!(!store.is_remote_sender_trusted("news@shop.example").unwrap());
+    }
+
+    #[test]
+    fn sender_behavior_learns_from_interactions_and_survives_delete() {
+        let mut store = Store::open_in_memory().unwrap();
+        let acc = store.add_account(&account("me@example.org")).unwrap();
+        let inbox = store
+            .upsert_folder(acc.id, "INBOX", None, Some(FolderRole::Inbox), true)
+            .unwrap()
+            .id;
+        store
+            .upsert_folder(acc.id, "Trash", None, Some(FolderRole::Trash), true)
+            .unwrap();
+
+        let headers: Vec<MessageHeader> = (1..=4)
+            .map(|uid| MessageHeader {
+                uid,
+                message_id: Some(format!("<msg-{uid}@sender.example>")),
+                from_addr: Some("noisy@sender.example".into()),
+                to: vec!["me@example.org".into()],
+                subject: Some("Kannst du das kurz prüfen?".into()),
+                date: Some(1_700_000_000 + uid as i64 * 100),
+                ..Default::default()
+            })
+            .collect();
+        store.insert_messages(inbox, &headers).unwrap();
+        let id1 = id_of(&store, inbox, 1);
+        let id2 = id_of(&store, inbox, 2);
+        let id3 = id_of(&store, inbox, 3);
+        let id4 = id_of(&store, inbox, 4);
+
+        // Opening the same message twice only counts once.
+        store
+            .record_interaction(id1, Interaction::Open, 100)
+            .unwrap();
+        store
+            .record_interaction(id1, Interaction::Open, 200)
+            .unwrap();
+        assert_eq!(
+            store
+                .sender_behavior("NOISY@sender.example")
+                .unwrap()
+                .opened,
+            1
+        );
+
+        // Dismissing and deleting 3 messages deprioritizes the 4th.
+        store.dismiss_turn(id1).unwrap();
+        store.queue_delete(&[id2, id3]).unwrap();
+
+        let b = store.sender_behavior("noisy@sender.example").unwrap();
+        assert_eq!(b.ignored, 1);
+        assert_eq!(b.deleted, 2);
+        assert!(b.should_deprioritize());
+
+        let turns = store.assess_messages_turns(&[id4], 1_700_001_000).unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].1.status, TurnStatus::ReadingAlong);
     }
 }

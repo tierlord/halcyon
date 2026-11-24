@@ -818,6 +818,7 @@
   )
 
   function markSeenFromToday(id: number) {
+    void api.recordInteraction(id, 'open')
     const m = messagePool.find((x) => x.id === id)
     if (m && !isSeen(m)) setFlag([id], 'seen', true)
   }
@@ -878,6 +879,11 @@
     onselectsection={(s) => {
       selectedCaseId = null
       showSection(s)
+    }}
+    onshowcases={() => {
+      selectedCaseId = null
+      selectedId = null
+      selectView({ kind: 'unified', role: 'inbox' })
     }}
     onmanageaccounts={() => (accountDialogOpen = true)}
     oncontext={openContext}
@@ -1020,7 +1026,10 @@
         chatMode={!!activeCase}
         {sentReplies}
         turns={turnMap}
-        onselect={(id) => (selectedId = id)}
+        onselect={(id) => {
+          selectedId = id
+          void api.recordInteraction(id, 'open')
+        }}
         onclosecase={() => {
           selectedCaseId = null
           selectedId = null

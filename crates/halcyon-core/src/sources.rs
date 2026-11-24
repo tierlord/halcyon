@@ -339,11 +339,37 @@ pub fn suggest_source_mode(
     is_newsletter: bool,
     is_status_update: bool,
 ) -> SourceMode {
+    suggest_source_mode_with_behavior(
+        total_messages,
+        read_messages,
+        is_newsletter,
+        is_status_update,
+        crate::turn::SenderBehavior::default(),
+    )
+}
+
+/// Suggests a [`SourceMode`] incorporating learned user behavior (opens,
+/// replies, deletes, ignores) for the sender.
+pub fn suggest_source_mode_with_behavior(
+    total_messages: u32,
+    read_messages: u32,
+    is_newsletter: bool,
+    is_status_update: bool,
+    behavior: crate::turn::SenderBehavior,
+) -> SourceMode {
+    if behavior.should_deprioritize() && !is_status_update {
+        return SourceMode::Mute;
+    }
     if total_messages < 3 {
         return SourceMode::Show;
     }
     if is_status_update {
         return SourceMode::LatestOnly;
+    }
+    if behavior.replied >= 1
+        || (behavior.opened >= 3 && behavior.deleted == 0 && behavior.ignored == 0)
+    {
+        return SourceMode::Show;
     }
     let read_ratio = read_messages as f32 / total_messages as f32;
     if total_messages >= 10 && read_ratio < 0.05 {

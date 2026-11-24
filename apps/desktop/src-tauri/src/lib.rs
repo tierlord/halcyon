@@ -886,6 +886,13 @@ fn send_message(
     let id = store
         .queue_outgoing(&draft, &built, send_after)
         .map_err(err)?;
+    if let Some(orig_id) = draft.reply_to_local_id {
+        let _ = store.record_interaction(
+            orig_id,
+            halcyon_core::store::Interaction::Reply,
+            outbox::now(),
+        );
+    }
     drop(store);
     state.outbox.wake.notify_one();
     Ok(SendTicket { id, send_after })
@@ -960,6 +967,19 @@ async fn save_attachment(state: State<'_, AppState>, id: i64, part: u32) -> CmdR
     std::fs::write(&path, data).map_err(err)?;
     let _ = tauri_plugin_opener::reveal_item_in_dir(&path);
     Ok(path.display().to_string())
+}
+
+/// Returns a `data:` URL for a safe raster image attachment so it can be
+/// previewed directly inside Halcyon without saving to disk first.
+#[tauri::command]
+async fn preview_image_attachment(
+    state: State<'_, AppState>,
+    id: i64,
+    part: u32,
+) -> CmdResult<String> {
+    let raw = raw_message(&state, id).await?;
+    content::image_attachment_data_url(&raw, part)
+        .ok_or_else(|| "Bildanhang konnte nicht geladen werden.".to_string())
 }
 
 /// `name.pdf`, else `name (2).pdf`, `name (3).pdf`, …
@@ -1359,6 +1379,25 @@ fn set_auto_mark_read(state: State<'_, AppState>, enabled: bool) -> CmdResult<()
 }
 
 #[tauri::command]
+fn record_interaction(
+    state: State<'_, AppState>,
+    message_id: i64,
+    action: String,
+) -> CmdResult<()> {
+    let interaction: halcyon_core::store::Interaction = action.parse().map_err(err)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .record_interaction(message_id, interaction, now)
+        .map_err(err)
+}
+
+#[tauri::command]
 fn sources(state: State<'_, AppState>) -> CmdResult<Vec<halcyon_core::sources::SourceRecord>> {
     state
         .store
@@ -1693,6 +1732,7 @@ pub fn run() {
             trust_remote_sender,
             open_link,
             save_attachment,
+            preview_image_attachment,
             set_flag,
             delete_messages,
             compose_reply,
@@ -1709,6 +1749,7 @@ pub fn run() {
             set_case_status,
             auto_mark_read,
             set_auto_mark_read,
+            record_interaction,
             sources,
             set_source_mode,
             dismiss_source_anomaly,

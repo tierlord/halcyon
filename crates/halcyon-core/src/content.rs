@@ -126,6 +126,44 @@ pub fn attachment_data(raw: &[u8], part: u32) -> Option<Vec<u8>> {
     Some(part.decoded().into_owned())
 }
 
+/// Returns a `data:<mime>;base64,...` URL for a raster image attachment
+/// (JPEG, PNG, GIF, WebP, BMP, AVIF). SVG is excluded so scripts cannot hide
+/// inside an image preview.
+pub fn image_attachment_data_url(raw: &[u8], part: u32) -> Option<String> {
+    let parsed = parse(raw);
+    let info = parsed.attachments.iter().find(|a| a.part == part)?;
+    let mime = safe_raster_image_mime(&info.mime_type, &info.name)?;
+    let bytes = attachment_data(raw, part)?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Some(format!("data:{mime};base64,{encoded}"))
+}
+
+fn safe_raster_image_mime(mime: &str, name: &str) -> Option<&'static str> {
+    match mime.trim().to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        "image/bmp" => Some("image/bmp"),
+        "image/avif" => Some("image/avif"),
+        "application/octet-stream" => {
+            let lower = name.trim().to_ascii_lowercase();
+            if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+                Some("image/jpeg")
+            } else if lower.ends_with(".png") {
+                Some("image/png")
+            } else if lower.ends_with(".gif") {
+                Some("image/gif")
+            } else if lower.ends_with(".webp") {
+                Some("image/webp")
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Makes an attachment name safe to use as a file name: no directories, no
 /// control characters, no hidden or empty names.
 pub fn safe_file_name(name: &str) -> String {

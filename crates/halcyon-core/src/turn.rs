@@ -219,6 +219,30 @@ pub fn is_machine_mail(header: &MessageHeader, from_email: &str) -> bool {
         || is_machine_local_part(from_email)
 }
 
+/// Learned interaction counts for one sender across past messages.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SenderBehavior {
+    pub opened: u32,
+    pub replied: u32,
+    pub deleted: u32,
+    pub ignored: u32,
+}
+
+impl SenderBehavior {
+    /// True when the user regularly opens or replies to this sender.
+    pub fn is_engaged(self) -> bool {
+        self.replied >= 1 || (self.opened >= 2 && self.deleted == 0 && self.ignored == 0)
+    }
+
+    /// True when the user consistently deletes or ignores this sender without engaging.
+    pub fn should_deprioritize(self) -> bool {
+        let negative = self.ignored + self.deleted;
+        let positive = self.opened + self.replied;
+        (negative >= 3 && self.replied == 0 && self.opened <= 1)
+            || (negative >= 5 && negative > positive.saturating_mul(2))
+    }
+}
+
 /// What the store knows about the sender beyond the headers of one mail.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TurnContext {
@@ -228,6 +252,8 @@ pub struct TurnContext {
     /// The sender belongs to a source that sent at least
     /// [`RECURRING_SOURCE_MIN_MESSAGES`] mails.
     pub recurring_source: bool,
+    /// Learned counts of how the user handled past mails from this sender.
+    pub behavior: SenderBehavior,
 }
 
 /// A source with this many mails is a sender pattern, not a conversation.
@@ -345,9 +371,19 @@ pub fn assess_turn_with_context(
         if is_machine_mail(last_header, &from_email) {
             return machine_assessment();
         }
-        let unknown_sender = context.is_some_and(|c| !c.known_correspondent);
+        let behavior = context.map(|c| c.behavior).unwrap_or_default();
+        let known = context.is_some_and(|c| c.known_correspondent || c.behavior.is_engaged());
+        let unknown_sender = context.is_some_and(|_| !known);
         if unknown_sender && context.is_some_and(|c| c.recurring_source) {
             return machine_assessment();
+        }
+        if behavior.should_deprioritize() {
+            return TurnAssessment {
+                status: TurnStatus::ReadingAlong,
+                confidence: 0.85,
+                reason: "Nachrichten dieses Absenders wurden bisher meist ignoriert oder gelöscht"
+                    .to_string(),
+            };
         }
 
         if age_secs > STALE_CONVERSATION_SECS {
@@ -453,6 +489,7 @@ mod tests {
         let ctx = TurnContext {
             known_correspondent: false,
             recurring_source: true,
+            ..Default::default()
         };
         let a = assess_turn_with_context(&h, "Wie geht's?", &[ME.to_string()], 1500, Some(ctx));
         assert_eq!(a.status, TurnStatus::ReadingAlong);
@@ -493,6 +530,7 @@ mod tests {
         let ctx = TurnContext {
             known_correspondent: true,
             recurring_source: true,
+            ..Default::default()
         };
         let a = assess_turn_with_context(
             &h,
@@ -758,5 +796,51 @@ mod tests {
     #[test]
     fn test_extra_10() {
         assert!(contains_question_or_request("Could you please check?"));
+    }
+
+    #[test]
+    fn repeatedly_ignored_or_deleted_sender_is_deprioritized() {
+        let h = inbound("sender@example.org", "Kannst du das kurz prüfen?");
+        let ctx = TurnContext {
+            known_correspondent: false,
+            recurring_source: false,
+            behavior: SenderBehavior {
+                opened: 0,
+                replied: 0,
+                deleted: 2,
+                ignored: 1,
+            },
+        };
+        let a = assess_turn_with_context(
+            &h,
+            "Kannst du das kurz prüfen?",
+            &[ME.to_string()],
+            1500,
+            Some(ctx),
+        );
+        assert_eq!(a.status, TurnStatus::ReadingAlong);
+    }
+
+    #[test]
+    fn regularly_opened_sender_counts_as_engaged() {
+        let h = inbound("friend@example.org", "Kurzes Update");
+        let ctx = TurnContext {
+            known_correspondent: false,
+            recurring_source: false,
+            behavior: SenderBehavior {
+                opened: 3,
+                replied: 0,
+                deleted: 0,
+                ignored: 0,
+            },
+        };
+        let a = assess_turn_with_context(
+            &h,
+            "Ich bin morgen wieder im Büro.",
+            &[ME.to_string()],
+            1500,
+            Some(ctx),
+        );
+        assert_eq!(a.status, TurnStatus::NeedsYou);
     }
 }

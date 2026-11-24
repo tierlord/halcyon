@@ -434,6 +434,11 @@
         </section>
       {/if}
 
+      <div
+        class="today-columns"
+        class:two-col={model.quiet.length > 0 || model.asUsual !== null}
+      >
+        <div class="col-main">
       {#if model.forYou.length === 0}
         <section class="block" aria-labelledby="t-foryou">
           <h2 id="t-foryou">Für dich</h2>
@@ -491,11 +496,11 @@
                   <div class="texts">
                     <p class="headline" title={item.why}>{item.headline}</p>
                     {#if item.sub}<p class="sub">{item.sub}</p>{/if}
-                    {#if item.detail}<p class="detail">{item.detail}</p>{/if}
+                    {#if item.detail && !expanded}<p class="detail">{item.detail}</p>{/if}
                   </div>
                 </div>
                 <div class="actions">
-                  {#if item.replyTo}
+                  {#if item.replyTo && !expanded}
                     <button type="button" class="btn primary" onclick={() => onreply(item.replyTo!)}>
                       <Icon name="reply" size={15} /> Antworten
                     </button>
@@ -541,7 +546,10 @@
           </div>
         </section>
       {/if}
+        </div>
 
+      {#if model.quiet.length > 0 || model.asUsual}
+        <div class="col-side">
       {#if model.quiet.length > 0}
         <section class="block" aria-labelledby="t-quiet">
           <h2 id="t-quiet">Läuft von allein</h2>
@@ -596,6 +604,9 @@
           </div>
         </section>
       {/if}
+        </div>
+      {/if}
+      </div>
     </div>
   </div>
 
@@ -624,10 +635,34 @@
   /* One centred column. Spacing is margin-based so absent sections leave
      no empty grid rows behind. */
   .layout {
-    max-width: 720px;
+    max-width: 820px;
     margin: 0 auto;
     display: flex;
     flex-direction: column;
+  }
+  .today-columns {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .col-main,
+  .col-side {
+    min-width: 0;
+  }
+  @container (min-width: 1060px) {
+    .layout:has(.today-columns.two-col) {
+      max-width: 1160px;
+    }
+    .today-columns.two-col {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.85fr);
+      gap: 40px;
+      align-items: start;
+    }
+    .col-side {
+      position: sticky;
+      top: 0;
+    }
   }
   .block {
     margin-bottom: 40px;

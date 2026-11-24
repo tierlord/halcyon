@@ -348,11 +348,12 @@
     overflow-y: auto;
     background: var(--bg);
     color: var(--text);
+    container-type: inline-size;
   }
   .page {
-    max-width: 720px;
+    max-width: 960px;
     margin: 0 auto;
-    padding: 32px 24px 64px;
+    padding: 32px 28px 64px;
   }
   .head-row {
     display: flex;

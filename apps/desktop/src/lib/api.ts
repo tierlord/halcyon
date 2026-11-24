@@ -127,6 +127,16 @@ export function saveAttachment(id: number, part: number): Promise<string> {
   return native ? invoke('save_attachment', { id, part }) : mock.saveAttachment(id, part)
 }
 
+export function previewImageAttachment(id: number, part: number): Promise<string> {
+  if (!native) {
+    // 1x1 transparent pixel fallback in mock mode
+    return Promise.resolve(
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+    )
+  }
+  return invoke('preview_image_attachment', { id, part })
+}
+
 /** Marks messages read/unread or flagged; synced to the server later. */
 export function setFlag(ids: number[], flag: 'seen' | 'flagged', on: boolean): Promise<number> {
   return native ? invoke('set_flag', { ids, flag, on }) : mock.setFlag(ids, flag, on)
@@ -301,4 +311,38 @@ export function sentReplies(messageIds: string[]): Promise<MessageSummary[]> {
     )
   }
   return invoke('sent_replies', { messageIds })
+}
+
+const MOCK_AUTO_READ_KEY = 'halcyon.mock.autoMarkRead'
+
+/** Whether Halcyon automatically marks processed/filed mails as read on the server. */
+export function autoMarkRead(): Promise<boolean> {
+  if (!native) {
+    try {
+      return Promise.resolve(localStorage.getItem(MOCK_AUTO_READ_KEY) !== '0')
+    } catch {
+      return Promise.resolve(true)
+    }
+  }
+  return invoke('auto_mark_read')
+}
+
+export function setAutoMarkRead(enabled: boolean): Promise<void> {
+  if (!native) {
+    try {
+      localStorage.setItem(MOCK_AUTO_READ_KEY, enabled ? '1' : '0')
+    } catch {
+      // Ignore storage errors in restricted contexts.
+    }
+    return Promise.resolve()
+  }
+  return invoke('set_auto_mark_read', { enabled })
+}
+
+export type InteractionAction = 'open' | 'reply' | 'delete' | 'ignore'
+
+/** Records a user interaction (open, reply, delete, ignore) for sender learning. */
+export function recordInteraction(messageId: number, action: InteractionAction): Promise<void> {
+  if (!native) return Promise.resolve()
+  return invoke('record_interaction', { messageId, action })
 }
