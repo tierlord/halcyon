@@ -603,7 +603,28 @@
     selectedId = messages[next].id
   }
 
+  // Development-only animation test bench (design/interaktion.md):
+  // Ctrl+Shift+B or the address hash #bewegungstest.
+  // Loaded on demand inside DEV-only branches, so release builds drop it.
+  let MotionLab = $state<typeof import('./lib/MotionLab.svelte').default | null>(null)
+  let motionLab = $state(false)
+
+  function toggleMotionLab(on: boolean) {
+    if (!import.meta.env.DEV) return
+    motionLab = on
+    if (on && !MotionLab) {
+      void import('./lib/MotionLab.svelte').then((m) => (MotionLab = m.default))
+    }
+  }
+  if (import.meta.env.DEV && location.hash === '#bewegungstest') toggleMotionLab(true)
+
   function onKeydown(e: KeyboardEvent) {
+    if (import.meta.env.DEV && e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'b') {
+      e.preventDefault()
+      toggleMotionLab(!motionLab)
+      return
+    }
+    if (motionLab) return
     if (accountDialogOpen || composing || menu || confirmEmpty) return
     const typing =
       e.target instanceof HTMLInputElement ||
@@ -1093,6 +1114,10 @@
     {/if}
   </main>
 </div>
+
+{#if motionLab && MotionLab}
+  <MotionLab onclose={() => toggleMotionLab(false)} />
+{/if}
 
 {#if menu}
   <ContextMenu x={menu.x} y={menu.y} items={menu.items} onclose={() => (menu = null)} />

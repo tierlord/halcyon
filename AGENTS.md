@@ -12,6 +12,8 @@ Erst Linux, später Windows, eventuell Android. Ziele und Planung:
 - `apps/desktop` – Tauri-App (`src-tauri/` Rust, `src/` Svelte).
 - `design/palette.md` – Farben und Kontrastregeln. Farben in der Oberfläche
   nur über die CSS-Variablen aus `apps/desktop/src/app.css`.
+- `design/interaktion.md` – Grundsätze für Interaktion und Bewegung,
+  inklusive der Grenzen von WebKitGTK bei Animationen.
 
 ## Regeln
 

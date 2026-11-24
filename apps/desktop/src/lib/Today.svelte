@@ -737,16 +737,22 @@
       linear-gradient(160deg, var(--tint), var(--tint-end) 72%);
     padding: 20px;
     scroll-margin: 12px;
-    /* Motion here never animates `transform`, `opacity` or `filter`. WebKitGTK
-       runs those on the compositor and, when the animation ends, shows the
-       start state again for one frame (a visible flicker, confirmed in a
-       screen recording). `top` and `box-shadow` are painted on the main
-       thread and end cleanly. */
     top: 0;
     transition: top 0.2s ease, box-shadow 0.2s ease;
   }
   .card.can-toggle:not(.expanded) {
     cursor: pointer;
+  }
+  /* The card lifts on hover, but the area under the pointer must not move
+     (design/interaktion.md): this strip covers the gap the lift opens, so a
+     pointer at the bottom edge does not slip off and restart the hover. */
+  .card.can-toggle:not(.expanded)::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -2px;
+    height: 2px;
   }
   .card.can-toggle:not(.expanded):hover,
   .card.can-toggle:not(.expanded):has(.card-body:focus-visible) {
