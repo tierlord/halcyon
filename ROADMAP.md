@@ -60,6 +60,9 @@
       Ähnlichkeitssuche, später lokales LLM, Rechner im Heimnetz oder
       Cloud-KI mit eigenem API-Schlüssel (opt-in, pro Konto, maskiert) –
       siehe [docs/design/klassifizierung.md](docs/design/klassifizierung.md)
+- [ ] **Relevanz lernen** (Konzept: [docs/design/relevanz.md](docs/design/relevanz.md)):
+      Halcyon fragt anfangs mit drei einfachen Antworten, lernt daraus und aus
+      deinem Verhalten und handelt selbst, sobald es sicher ist
 
 ## Plattformen
 
