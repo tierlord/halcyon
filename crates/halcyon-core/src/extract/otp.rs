@@ -87,6 +87,12 @@ static RE_ADDRESS_PLZ: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
+static RE_URL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(?:https?://|www\.)\S+").unwrap());
+
+static RE_EMAIL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b").unwrap());
+
 /// Finds verification / one-time codes in a message.
 ///
 /// Matches 4–8 digit codes (including space/hyphen-grouped digits) and 6–8
@@ -136,8 +142,14 @@ fn scan_block(
             continue;
         }
 
-        let same_line_kw = RE_POSITIVE_KEYWORD.is_match(trimmed);
-        let prev_line_kw = prev_non_empty.is_some_and(|p| RE_POSITIVE_KEYWORD.is_match(p));
+        // Mask URLs before checking keywords so path segments like `/verify` or
+        // `?code=` do not trigger OTP detection for the line or the next line.
+        let line_no_urls = RE_URL.replace_all(trimmed, " ");
+        let same_line_kw = RE_POSITIVE_KEYWORD.is_match(&line_no_urls);
+        let prev_line_kw = prev_non_empty.is_some_and(|p| {
+            let p_no_urls = RE_URL.replace_all(p, " ");
+            RE_POSITIVE_KEYWORD.is_match(&p_no_urls)
+        });
         let standalone_with_subject_kw =
             !is_subject && subject_has_keyword && is_standalone_token_line(trimmed);
 
@@ -219,6 +231,8 @@ fn extract_from_line(
 fn collect_excluded_spans(line: &str) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     for re in [
+        &*RE_URL,
+        &*RE_EMAIL,
         &*RE_TIME,
         &*RE_DATE,
         &*RE_PRICE,
@@ -252,7 +266,12 @@ fn is_excluded(
                 .chars()
                 .next_back()
                 .is_some_and(|c| c.is_ascii_digit());
-        if is_decimal_or_date_prev || matches!(prev, '+' | '/' | ':' | '#' | '€' | '$' | '£') {
+        if is_decimal_or_date_prev
+            || matches!(
+                prev,
+                '+' | '/' | ':' | '#' | '€' | '$' | '£' | '=' | '?' | '&' | '@' | '_'
+            )
+        {
             return true;
         }
     }
@@ -263,7 +282,9 @@ fn is_excluded(
                 .chars()
                 .next()
                 .is_some_and(|c| c.is_ascii_digit());
-        if is_decimal_or_date_next || matches!(next, ':' | '/' | '€' | '$' | '£') {
+        if is_decimal_or_date_next
+            || matches!(next, ':' | '/' | '€' | '$' | '£' | '=' | '&' | '@' | '_')
+        {
             return true;
         }
     }
@@ -533,5 +554,31 @@ mod tests {
     fn detects_sign_in_wording_without_the_word_code() {
         let codes = find_codes("Sign-in attempt", "Use 731940 to sign in.");
         assert_eq!(codes.first().map(|c| c.code.as_str()), Some("731940"));
+    }
+
+    #[test]
+    fn ignores_tokens_inside_urls_and_emails() {
+        assert!(
+            find_codes(
+                "Anmeldung bestätigen",
+                "Klicke auf https://example.org/verify?code=482913&token=AB12CD3\nOder schreibe an support1234@example.org."
+            )
+            .is_empty()
+        );
+        assert!(
+            find_codes(
+                "Dein Konto",
+                "Hier ist dein Link: https://login.example.com/auth/K7Q2MX\n482913"
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn real_code_alongside_url_is_still_detected() {
+        let body = "Dein Code lautet 482913. Mehr Infos unter https://example.org/help?id=998877.";
+        let codes = find_codes("Bestätigungscode", body);
+        assert_eq!(codes.len(), 1);
+        assert_eq!(codes[0].code, "482913");
     }
 }
