@@ -204,6 +204,8 @@ async fn after_sent(app: &AppHandle, store: &mut Store, account: &Account, item:
         let state = app.state::<AppState>();
         if let Ok(mut s) = state.store.lock() {
             let _ = s.queue_flag(&[original], "\\Answered", true);
+            // Counted only now: a send that was undone or failed is no reply.
+            let _ = s.record_interaction(original, halcyon_core::store::Interaction::Reply, now());
         }
         crate::schedule_flush(app);
     }

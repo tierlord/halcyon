@@ -219,32 +219,45 @@ pub fn is_machine_mail(header: &MessageHeader, from_email: &str) -> bool {
         || is_machine_local_part(from_email)
 }
 
-/// Learned interaction counts for one sender across past messages.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Learned interaction counts for one sender. Fractional because they decay
+/// over time (see `Store::sender_behavior`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SenderBehavior {
-    pub opened: u32,
-    pub replied: u32,
-    pub deleted: u32,
-    pub ignored: u32,
+    /// Mails opened and kept (an open followed by a delete is taken back).
+    pub opened: f32,
+    pub replied: f32,
+    pub deleted: f32,
+    pub ignored: f32,
 }
 
+/// A count of one that has decayed a little is still "one". Without this
+/// slack, three deletes spread over a week would stay just below three.
+const COUNT_SLACK: f32 = 0.5;
+
 impl SenderBehavior {
-    /// True when the user regularly opens or replies to this sender.
+    /// True when the user writes back to this sender. Only a reply counts:
+    /// opening is cheap and also happens for banks, shops and other machines
+    /// that must not turn into conversation partners.
     pub fn is_engaged(self) -> bool {
-        self.replied >= 1 || (self.opened >= 2 && self.deleted == 0 && self.ignored == 0)
+        self.replied >= 1.0 - COUNT_SLACK
     }
 
-    /// True when the user consistently deletes or ignores this sender without engaging.
+    /// True when the user consistently deletes or ignores this sender without
+    /// engaging: three or more deletes/ignores with no reply and no kept
+    /// open, or many more negative than positive actions.
     pub fn should_deprioritize(self) -> bool {
+        if self.is_engaged() {
+            return false;
+        }
         let negative = self.ignored + self.deleted;
         let positive = self.opened + self.replied;
-        (negative >= 3 && self.replied == 0 && self.opened <= 1)
-            || (negative >= 5 && negative > positive.saturating_mul(2))
+        (negative >= 3.0 - COUNT_SLACK && self.opened < 1.0 - COUNT_SLACK)
+            || (negative >= 5.0 - COUNT_SLACK && negative > positive * 2.0)
     }
 }
 
 /// What the store knows about the sender beyond the headers of one mail.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TurnContext {
     /// The user wrote to this address before, or the mail replies to one of
     /// the user's mails.
@@ -377,7 +390,9 @@ pub fn assess_turn_with_context(
         if unknown_sender && context.is_some_and(|c| c.recurring_source) {
             return machine_assessment();
         }
-        if behavior.should_deprioritize() {
+        // People the user writes to are never hidden by a habit of deleting
+        // their mail; the rule is for strangers.
+        if !known && behavior.should_deprioritize() {
             return TurnAssessment {
                 status: TurnStatus::ReadingAlong,
                 confidence: 0.85,
@@ -798,49 +813,66 @@ mod tests {
         assert!(contains_question_or_request("Could you please check?"));
     }
 
-    #[test]
-    fn repeatedly_ignored_or_deleted_sender_is_deprioritized() {
+    fn behavior(opened: f32, replied: f32, deleted: f32, ignored: f32) -> SenderBehavior {
+        SenderBehavior {
+            opened,
+            replied,
+            deleted,
+            ignored,
+        }
+    }
+
+    fn assess_with(behavior: SenderBehavior, known: bool, recurring: bool) -> TurnAssessment {
         let h = inbound("sender@example.org", "Kannst du das kurz prüfen?");
         let ctx = TurnContext {
-            known_correspondent: false,
-            recurring_source: false,
-            behavior: SenderBehavior {
-                opened: 0,
-                replied: 0,
-                deleted: 2,
-                ignored: 1,
-            },
+            known_correspondent: known,
+            recurring_source: recurring,
+            behavior,
         };
-        let a = assess_turn_with_context(
+        assess_turn_with_context(
             &h,
             "Kannst du das kurz prüfen?",
             &[ME.to_string()],
             1500,
             Some(ctx),
-        );
+        )
+    }
+
+    #[test]
+    fn repeatedly_ignored_or_deleted_sender_is_deprioritized() {
+        let a = assess_with(behavior(0.0, 0.0, 2.0, 1.0), false, false);
         assert_eq!(a.status, TurnStatus::ReadingAlong);
     }
 
     #[test]
-    fn regularly_opened_sender_counts_as_engaged() {
-        let h = inbound("friend@example.org", "Kurzes Update");
-        let ctx = TurnContext {
-            known_correspondent: false,
-            recurring_source: false,
-            behavior: SenderBehavior {
-                opened: 3,
-                replied: 0,
-                deleted: 0,
-                ignored: 0,
-            },
-        };
-        let a = assess_turn_with_context(
-            &h,
-            "Ich bin morgen wieder im Büro.",
-            &[ME.to_string()],
-            1500,
-            Some(ctx),
-        );
+    fn deprioritizing_never_hides_a_known_correspondent() {
+        let a = assess_with(behavior(0.0, 0.0, 6.0, 4.0), true, false);
         assert_eq!(a.status, TurnStatus::NeedsYou);
+        // A reply makes the sender known, too.
+        let a = assess_with(behavior(0.0, 1.0, 6.0, 4.0), false, false);
+        assert_eq!(a.status, TurnStatus::NeedsYou);
+    }
+
+    #[test]
+    fn opening_does_not_make_a_recurring_sender_a_conversation_partner() {
+        let a = assess_with(behavior(8.0, 0.0, 0.0, 0.0), false, true);
+        assert_eq!(a.status, TurnStatus::ReadingAlong);
+        assert!(!behavior(8.0, 0.0, 0.0, 0.0).is_engaged());
+        // Only a reply does.
+        let a = assess_with(behavior(0.0, 1.0, 0.0, 0.0), false, true);
+        assert_eq!(a.status, TurnStatus::NeedsYou);
+    }
+
+    #[test]
+    fn deprioritize_rules_are_conservative() {
+        assert!(behavior(0.0, 0.0, 3.0, 0.0).should_deprioritize());
+        assert!(behavior(0.0, 0.0, 2.9, 0.0).should_deprioritize());
+        assert!(!behavior(0.0, 0.0, 2.0, 0.0).should_deprioritize());
+        // A kept open or a reply protects the sender.
+        assert!(!behavior(1.0, 0.0, 3.0, 0.0).should_deprioritize());
+        assert!(!behavior(0.0, 1.0, 9.0, 9.0).should_deprioritize());
+        // Many kept opens can still be outweighed by a lot of deletes.
+        assert!(behavior(2.0, 0.0, 5.0, 0.0).should_deprioritize());
+        assert!(!behavior(2.0, 0.0, 4.0, 0.0).should_deprioritize());
     }
 }

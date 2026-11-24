@@ -366,8 +366,10 @@ pub fn suggest_source_mode_with_behavior(
     if is_status_update {
         return SourceMode::LatestOnly;
     }
-    if behavior.replied >= 1
-        || (behavior.opened >= 3 && behavior.deleted == 0 && behavior.ignored == 0)
+    // Opening is only a weak signal, so it needs repetition. The slack in
+    // the thresholds absorbs the decay of counts a few days old.
+    if behavior.is_engaged()
+        || (behavior.opened >= 2.5 && behavior.deleted < 0.5 && behavior.ignored < 0.5)
     {
         return SourceMode::Show;
     }

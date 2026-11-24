@@ -886,13 +886,6 @@ fn send_message(
     let id = store
         .queue_outgoing(&draft, &built, send_after)
         .map_err(err)?;
-    if let Some(orig_id) = draft.reply_to_local_id {
-        let _ = store.record_interaction(
-            orig_id,
-            halcyon_core::store::Interaction::Reply,
-            outbox::now(),
-        );
-    }
     drop(store);
     state.outbox.wake.notify_one();
     Ok(SendTicket { id, send_after })

@@ -28,6 +28,11 @@ pub const KEYWORD_DONE: &str = "$HalcyonDone";
 /// `meta` keys.
 const META_SWITCH: &str = "auto_mark_read";
 const META_STARTED: &str = "auto_mark_read_since";
+/// First run of the ignore pass; older mail is never counted as ignored.
+const META_IGNORE_SINCE: &str = "ignore_tracking_since";
+
+/// Unread this long after arrival, an inbox mail counts as ignored.
+pub const IGNORE_AFTER_SECS: i64 = 14 * 86_400;
 
 /// Mails judged per run; newer mail than the start time is a small set.
 const BATCH: usize = 1000;
@@ -182,12 +187,35 @@ pub struct FilingReport {
     pub marked: usize,
     /// Cases closed because the user settled them on another device.
     pub settled_cases: usize,
+    /// Mails newly counted as ignored (unread for [`IGNORE_AFTER_SECS`]).
+    pub ignored: usize,
 }
 
 impl FilingReport {
     pub fn changed(&self) -> bool {
         self.marked > 0 || self.settled_cases > 0
     }
+}
+
+/// Counts inbox mail that is still unread [`IGNORE_AFTER_SECS`] after it
+/// arrived as ignored, once per mail. Only mail dated after the first run
+/// counts, so the backlog of old unread mail does not teach anything.
+pub fn record_ignored(store: &Store, now: i64) -> Result<usize> {
+    let since = match store
+        .meta(META_IGNORE_SINCE)?
+        .and_then(|v| v.parse::<i64>().ok())
+    {
+        Some(t) => t,
+        None => {
+            store.set_meta(META_IGNORE_SINCE, &now.to_string())?;
+            now
+        }
+    };
+    let ids = store.unread_inbox_ids_to_ignore(since, now - IGNORE_AFTER_SECS, BATCH)?;
+    for &id in &ids {
+        store.record_interaction(id, crate::store::Interaction::Ignore, now)?;
+    }
+    Ok(ids.len())
 }
 
 /// Marks mail Halcyon filed without anything left to do as read, and takes
@@ -197,6 +225,7 @@ impl FilingReport {
 pub fn run(store: &mut Store, now: i64) -> Result<FilingReport> {
     let mut report = FilingReport {
         settled_cases: store.settle_cases_done_by_user()?,
+        ignored: record_ignored(store, now)?,
         ..FilingReport::default()
     };
     if !auto_mark_read(store)? {

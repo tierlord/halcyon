@@ -468,6 +468,46 @@ CREATE TABLE sender_behavior (
     last_action_at INTEGER NOT NULL DEFAULT 0
 );
 "#,
+    // 20: behavior counts decay over time, so they become fractional. The
+    // table is rebuilt because SQLite cannot change a column type in place.
+    // Also backfills `reply` for mails answered before replies were learned
+    // from the answered ledger and the `\Answered` flag (other devices).
+    r#"
+CREATE TABLE sender_behavior_new (
+    from_addr      TEXT PRIMARY KEY,
+    opened_count   REAL NOT NULL DEFAULT 0,
+    replied_count  REAL NOT NULL DEFAULT 0,
+    deleted_count  REAL NOT NULL DEFAULT 0,
+    ignored_count  REAL NOT NULL DEFAULT 0,
+    last_action_at INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO sender_behavior_new
+SELECT from_addr, opened_count, replied_count, deleted_count, ignored_count, last_action_at
+FROM sender_behavior;
+DROP TABLE sender_behavior;
+ALTER TABLE sender_behavior_new RENAME TO sender_behavior;
+
+INSERT OR IGNORE INTO message_interactions (message_id, action, created_at)
+SELECT m.id, 'reply', COALESCE(am.answered_at, m.date, 0)
+FROM messages m
+JOIN folders f ON f.id = m.folder_id
+LEFT JOIN answered_mails am
+       ON am.rfc_message_id = m.message_id AND am.answered_at >= COALESCE(m.date, 0)
+WHERE COALESCE(f.role, '') NOT IN ('sent', 'drafts', 'trash', 'junk')
+  AND m.from_addr IS NOT NULL AND m.from_addr != ''
+  AND lower(trim(m.from_addr)) NOT IN (SELECT lower(email) FROM accounts)
+  AND (am.rfc_message_id IS NOT NULL
+       OR EXISTS (SELECT 1 FROM json_each(m.flags) WHERE value = '\Answered'));
+
+INSERT INTO sender_behavior (from_addr, replied_count, last_action_at)
+SELECT lower(trim(m.from_addr)), COUNT(*), MAX(i.created_at)
+FROM message_interactions i JOIN messages m ON m.id = i.message_id
+WHERE i.action = 'reply'
+GROUP BY lower(trim(m.from_addr))
+ON CONFLICT (from_addr) DO UPDATE SET
+    replied_count = MAX(sender_behavior.replied_count, excluded.replied_count),
+    last_action_at = MAX(sender_behavior.last_action_at, excluded.last_action_at);
+"#,
 ];
 
 /// Result of looking up a domain in the persistent brand logo cache.
@@ -511,6 +551,28 @@ impl std::str::FromStr for Interaction {
     }
 }
 
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Behavior counts lose half their weight after this long, so what a sender
+/// did years ago does not outweigh what they do now.
+const BEHAVIOR_HALF_LIFE_SECS: f64 = 120.0 * 86_400.0;
+
+fn decay_factor(elapsed_secs: i64) -> f64 {
+    // Clock skew must not inflate counts.
+    0.5_f64.powf(elapsed_secs.max(0) as f64 / BEHAVIOR_HALF_LIFE_SECS)
+}
+
+/// Mail a user receives from others; sent mail, drafts and discarded mail
+/// say nothing about how the user treats the sender.
+fn is_incoming_role(role: Option<&str>) -> bool {
+    !matches!(role, Some("sent" | "drafts" | "trash" | "junk"))
+}
+
 fn record_interaction_conn(
     conn: &Connection,
     message_id: i64,
@@ -531,6 +593,15 @@ fn record_interaction_conn(
     else {
         return Ok(());
     };
+    // Mail the user wrote (or sent to themselves) is not a sender signal.
+    let own: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM accounts WHERE lower(email) = ?1)",
+        [&addr],
+        |r| r.get(0),
+    )?;
+    if own {
+        return Ok(());
+    }
     let inserted = conn.execute(
         "INSERT OR IGNORE INTO message_interactions (message_id, action, created_at)
          VALUES (?1, ?2, ?3)",
@@ -539,20 +610,91 @@ fn record_interaction_conn(
     if inserted == 0 {
         return Ok(());
     }
-    let col = match action {
-        Interaction::Open => "opened_count",
-        Interaction::Reply => "replied_count",
-        Interaction::Delete => "deleted_count",
-        Interaction::Ignore => "ignored_count",
-    };
-    let sql = format!(
-        "INSERT INTO sender_behavior (from_addr, {col}, last_action_at)
-         VALUES (?1, 1, ?2)
-         ON CONFLICT(from_addr) DO UPDATE SET
-             {col} = sender_behavior.{col} + 1,
-             last_action_at = MAX(sender_behavior.last_action_at, excluded.last_action_at)"
-    );
-    conn.execute(&sql, params![addr, now])?;
+    // Opening a mail only counts while the user keeps it: open-then-delete
+    // is how ads get handled, so the delete takes the open back.
+    let take_back_open = action == Interaction::Delete
+        && conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM message_interactions
+                            WHERE message_id = ?1 AND action = 'open')",
+            [message_id],
+            |r| r.get::<_, bool>(0),
+        )?;
+
+    let (mut counts, last) = conn
+        .query_row(
+            "SELECT opened_count, replied_count, deleted_count, ignored_count, last_action_at
+             FROM sender_behavior WHERE from_addr = ?1",
+            [&addr],
+            |r| {
+                Ok((
+                    [r.get::<_, f64>(0)?, r.get(1)?, r.get(2)?, r.get(3)?],
+                    r.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()?
+        .unwrap_or(([0.0; 4], now));
+    let factor = decay_factor(now - last);
+    for c in &mut counts {
+        *c *= factor;
+    }
+    match action {
+        Interaction::Open => counts[0] += 1.0,
+        Interaction::Reply => counts[1] += 1.0,
+        Interaction::Delete => {
+            counts[2] += 1.0;
+            if take_back_open {
+                counts[0] = (counts[0] - 1.0).max(0.0);
+            }
+        }
+        Interaction::Ignore => counts[3] += 1.0,
+    }
+    conn.execute(
+        "INSERT INTO sender_behavior
+            (from_addr, opened_count, replied_count, deleted_count, ignored_count, last_action_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT (from_addr) DO UPDATE SET
+            opened_count = excluded.opened_count,
+            replied_count = excluded.replied_count,
+            deleted_count = excluded.deleted_count,
+            ignored_count = excluded.ignored_count,
+            last_action_at = excluded.last_action_at",
+        params![
+            addr,
+            counts[0],
+            counts[1],
+            counts[2],
+            counts[3],
+            last.max(now)
+        ],
+    )?;
+    Ok(())
+}
+
+/// Records `reply` for every received copy of the mails with these RFC
+/// `Message-ID`s, e.g. because a sent mail answers them.
+fn record_replies_to_conn(conn: &Connection, rfcs: &[&str], now: i64) -> Result<()> {
+    let mut ids = Vec::new();
+    {
+        let mut stmt = conn.prepare_cached(
+            "SELECT m.id, f.role FROM messages m JOIN folders f ON f.id = m.folder_id
+             WHERE m.message_id = ?1",
+        )?;
+        for rfc in rfcs {
+            let rows = stmt.query_map([rfc], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+            })?;
+            for row in rows {
+                let (id, role) = row?;
+                if is_incoming_role(role.as_deref()) {
+                    ids.push(id);
+                }
+            }
+        }
+    }
+    for id in ids {
+        record_interaction_conn(conn, id, Interaction::Reply, now)?;
+    }
     Ok(())
 }
 
@@ -839,24 +981,62 @@ impl Store {
                     h.dmarc_pass,
                 ])?;
             }
-            let sent: bool = tx.query_row(
-                "SELECT COALESCE(role, '') = 'sent' FROM folders WHERE id = ?1",
-                [folder_id],
-                |r| r.get(0),
-            )?;
+            let role: Option<String> =
+                tx.query_row("SELECT role FROM folders WHERE id = ?1", [folder_id], |r| {
+                    r.get(0)
+                })?;
+            let sent = role.as_deref() == Some("sent");
+            let now = unix_now();
             if sent {
                 let mut answered = tx.prepare_cached(
                     "INSERT INTO answered_mails (rfc_message_id, answered_at) VALUES (?1, ?2)
                      ON CONFLICT (rfc_message_id) DO UPDATE SET
                         answered_at = MAX(answered_at, excluded.answered_at)",
                 )?;
+                let mut replied_to: Vec<&str> = Vec::new();
                 for h in headers {
                     let at = h.date.unwrap_or(0);
                     for rfc in h.in_reply_to.iter().chain(&h.references) {
                         if !rfc.is_empty() {
                             answered.execute(params![rfc, at])?;
+                            replied_to.push(rfc);
                         }
                     }
+                }
+                // Replies written on another device never pass through the
+                // outbox; their sent copy is the only trace.
+                record_replies_to_conn(&tx, &replied_to, now)?;
+            } else if is_incoming_role(role.as_deref()) {
+                // The same two traces seen from the other side: the answered
+                // ledger (sent copy synced first) or the server's flag.
+                let mut ledger = tx.prepare_cached(
+                    "SELECT 1 FROM answered_mails WHERE rfc_message_id = ?1 AND answered_at >= ?2",
+                )?;
+                let mut id_of =
+                    tx.prepare_cached("SELECT id FROM messages WHERE folder_id = ?1 AND uid = ?2")?;
+                let mut replied: Vec<i64> = Vec::new();
+                for h in headers {
+                    let flagged = h.flags.iter().any(|f| f == "\\Answered");
+                    let in_ledger = match h.message_id.as_deref().filter(|m| !m.is_empty()) {
+                        Some(rfc) => ledger
+                            .query_row(params![rfc, h.date.unwrap_or(0)], |_| Ok(()))
+                            .optional()?
+                            .is_some(),
+                        None => false,
+                    };
+                    if !(flagged || in_ledger) {
+                        continue;
+                    }
+                    if let Some(id) = id_of
+                        .query_row(params![folder_id, h.uid], |r| r.get::<_, i64>(0))
+                        .optional()?
+                    {
+                        replied.push(id);
+                    }
+                }
+                drop((ledger, id_of));
+                for id in replied {
+                    record_interaction_conn(&tx, id, Interaction::Reply, now)?;
                 }
             }
         }
@@ -890,6 +1070,9 @@ impl Store {
         role: Option<FolderRole>,
         limit: usize,
     ) -> Result<Vec<MessageSummary>> {
+        if role == Some(FolderRole::Flagged) {
+            return self.flagged_messages(account_id, limit);
+        }
         let sql = format!(
             "{SUMMARY_SELECT}
              WHERE (?1 IS NULL OR f.account_id = ?1)
@@ -901,6 +1084,38 @@ impl Store {
             params![account_id, role.map(FolderRole::as_str), limit as i64],
             summary_from_row,
         )?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Mail carrying `\Flagged` in any folder but trash and junk. Only
+    /// some servers have a flagged folder, so the flag is the source of
+    /// truth. A mail filed in several folders (an "All Mail" copy next to the
+    /// inbox) shows once, preferring the inbox copy.
+    fn flagged_messages(
+        &self,
+        account_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<MessageSummary>> {
+        let sql = format!(
+            "{SUMMARY_SELECT}
+             WHERE (?1 IS NULL OR f.account_id = ?1)
+               AND COALESCE(f.role, '') NOT IN ('trash', 'junk')
+               AND EXISTS (SELECT 1 FROM json_each(m.flags) WHERE value = '\\Flagged')
+               AND m.id = CASE
+                   WHEN m.message_id IS NULL OR m.message_id = '' THEN m.id
+                   ELSE (SELECT m2.id FROM messages m2
+                         JOIN folders f2 ON f2.id = m2.folder_id
+                         WHERE m2.message_id = m.message_id
+                           AND f2.account_id = f.account_id
+                           AND COALESCE(f2.role, '') NOT IN ('trash', 'junk')
+                           AND EXISTS (SELECT 1 FROM json_each(m2.flags) WHERE value = '\\Flagged')
+                         ORDER BY (f2.role = 'inbox') DESC, m2.id
+                         LIMIT 1)
+                   END
+             ORDER BY m.date DESC LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![account_id, limit as i64], summary_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -1231,11 +1446,7 @@ impl Store {
                  VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
                 params![account_id, path, uid, op, arg],
             )?;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            record_interaction_conn(&tx, id, Interaction::Delete, now)?;
+            record_interaction_conn(&tx, id, Interaction::Delete, unix_now())?;
             // Pending flag changes for this message are moot now.
             tx.execute("DELETE FROM pending_ops WHERE message_id = ?1", [id])?;
             tx.execute("DELETE FROM messages WHERE id = ?1", [id])?;
@@ -2428,7 +2639,7 @@ impl Store {
         let is_newest = total_messages == 0 || m.date >= last_seen_at;
         let new_last_seen = m.date.max(last_seen_at);
         let behavior = self
-            .sender_behavior(m.from_addr.as_deref().unwrap_or(""))
+            .sender_behavior(m.from_addr.as_deref().unwrap_or(""), unix_now())
             .unwrap_or_default();
         let suggested = suggest_source_mode_with_behavior(
             new_total,
@@ -2835,11 +3046,8 @@ impl Store {
             "INSERT OR IGNORE INTO turn_dismissals (rfc_message_id, from_addr) VALUES (?1, ?2)",
             params![rfc, from.map(|f| f.to_ascii_lowercase())],
         )?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        record_interaction_conn(&self.conn, message_id, Interaction::Ignore, now)?;
+        // Dismissing says "settled", not "not interested", so it is no
+        // `ignore`; that one is only recorded for mail that stays unread.
         self.queue_flag(&[message_id], crate::filing::KEYWORD_DONE, true)?;
         Ok(())
     }
@@ -2942,7 +3150,7 @@ impl Store {
                     .to_ascii_lowercase();
                 let is_reply =
                     msg.header.in_reply_to.is_some() || !msg.header.references.is_empty();
-                let behavior = self.sender_behavior(&from).unwrap_or_default();
+                let behavior = self.sender_behavior(&from, now).unwrap_or_default();
                 let context = crate::turn::TurnContext {
                     known_correspondent: is_reply || correspondents.contains(&from),
                     recurring_source: source_total
@@ -2980,8 +3188,8 @@ impl Store {
         record_interaction_conn(&self.conn, message_id, action, now)
     }
 
-    /// Learned interaction counts for `from_addr`.
-    pub fn sender_behavior(&self, from_addr: &str) -> Result<SenderBehavior> {
+    /// Learned interaction counts for `from_addr`, decayed to `now`.
+    pub fn sender_behavior(&self, from_addr: &str, now: i64) -> Result<SenderBehavior> {
         let addr = from_addr.trim().to_ascii_lowercase();
         if addr.is_empty() {
             return Ok(SenderBehavior::default());
@@ -2989,20 +3197,52 @@ impl Store {
         let row = self
             .conn
             .query_row(
-                "SELECT opened_count, replied_count, deleted_count, ignored_count
+                "SELECT opened_count, replied_count, deleted_count, ignored_count, last_action_at
                  FROM sender_behavior WHERE from_addr = ?1",
                 [&addr],
                 |r| {
+                    let f = decay_factor(now - r.get::<_, i64>(4)?);
+                    let c = |i: usize| -> rusqlite::Result<f32> {
+                        Ok((r.get::<_, f64>(i)?.max(0.0) * f) as f32)
+                    };
                     Ok(SenderBehavior {
-                        opened: r.get::<_, i64>(0)?.max(0) as u32,
-                        replied: r.get::<_, i64>(1)?.max(0) as u32,
-                        deleted: r.get::<_, i64>(2)?.max(0) as u32,
-                        ignored: r.get::<_, i64>(3)?.max(0) as u32,
+                        opened: c(0)?,
+                        replied: c(1)?,
+                        deleted: c(2)?,
+                        ignored: c(3)?,
                     })
                 },
             )
             .optional()?;
         Ok(row.unwrap_or_default())
+    }
+
+    /// Ids of inbox mail that arrived in `[since, before]` and is still
+    /// unread, untouched and not yet counted as ignored. Mail the user
+    /// deleted or moved is gone from the inbox, so it never shows up here.
+    pub fn unread_inbox_ids_to_ignore(
+        &self,
+        since: i64,
+        before: i64,
+        limit: usize,
+    ) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id FROM messages m JOIN folders f ON f.id = m.folder_id
+             WHERE f.role = 'inbox'
+               AND m.date IS NOT NULL AND m.date >= ?1 AND m.date <= ?2
+               AND NOT EXISTS (SELECT 1 FROM json_each(m.flags)
+                               WHERE value IN ('\\Seen', '\\Answered', ?4))
+               AND NOT EXISTS (SELECT 1 FROM message_interactions i
+                               WHERE i.message_id = m.id AND i.action = 'ignore')
+               AND NOT EXISTS (SELECT 1 FROM turn_dismissals d
+                               WHERE d.rfc_message_id = m.message_id)
+             ORDER BY m.date LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            params![since, before, limit as i64, crate::filing::KEYWORD_DONE],
+            |r| r.get(0),
+        )?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
     /// Computes privacy-preserving numerical metrics for "Wer ist am Zug?"
@@ -4389,61 +4629,483 @@ mod tests {
         assert!(!store.is_remote_sender_trusted("news@shop.example").unwrap());
     }
 
-    #[test]
-    fn sender_behavior_learns_from_interactions_and_survives_delete() {
-        let mut store = Store::open_in_memory().unwrap();
-        let acc = store.add_account(&account("me@example.org")).unwrap();
-        let inbox = store
-            .upsert_folder(acc.id, "INBOX", None, Some(FolderRole::Inbox), true)
-            .unwrap()
-            .id;
-        store
-            .upsert_folder(acc.id, "Trash", None, Some(FolderRole::Trash), true)
-            .unwrap();
+    use crate::filing;
 
-        let headers: Vec<MessageHeader> = (1..=4)
+    const DAY: i64 = 86_400;
+
+    fn near(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.01
+    }
+
+    /// `n` question mails from `from` in the inbox.
+    fn inbox_mails(store: &mut Store, inbox: i64, from: &str, n: u32, date: i64) -> Vec<i64> {
+        // Distinct uids per sender, so several senders can share one folder.
+        let base = from.len() as u32 * 100;
+        let headers: Vec<MessageHeader> = (base + 1..=base + n)
             .map(|uid| MessageHeader {
                 uid,
-                message_id: Some(format!("<msg-{uid}@sender.example>")),
-                from_addr: Some("noisy@sender.example".into()),
+                message_id: Some(format!("<{from}-{uid}@sender.example>")),
+                from_addr: Some(from.into()),
                 to: vec!["me@example.org".into()],
                 subject: Some("Kannst du das kurz prüfen?".into()),
-                date: Some(1_700_000_000 + uid as i64 * 100),
+                date: Some(date + uid as i64),
                 ..Default::default()
             })
             .collect();
         store.insert_messages(inbox, &headers).unwrap();
-        let id1 = id_of(&store, inbox, 1);
-        let id2 = id_of(&store, inbox, 2);
-        let id3 = id_of(&store, inbox, 3);
-        let id4 = id_of(&store, inbox, 4);
+        (base + 1..=base + n)
+            .map(|uid| id_of(store, inbox, uid))
+            .collect()
+    }
+
+    #[test]
+    fn sender_behavior_learns_from_interactions_and_survives_delete() {
+        let (mut store, inbox, a) = turn_store();
+        store
+            .upsert_folder(a, "Trash", None, Some(FolderRole::Trash), true)
+            .unwrap();
+        let ids = inbox_mails(&mut store, inbox, "noisy@sender.example", 4, 100);
 
         // Opening the same message twice only counts once.
         store
-            .record_interaction(id1, Interaction::Open, 100)
+            .record_interaction(ids[0], Interaction::Open, 100)
             .unwrap();
         store
-            .record_interaction(id1, Interaction::Open, 200)
+            .record_interaction(ids[0], Interaction::Open, 200)
             .unwrap();
+        let b = store.sender_behavior("NOISY@sender.example", 200).unwrap();
+        assert!(near(b.opened, 1.0));
+
+        // Deleting messages teaches even though the local copies are gone.
+        store.queue_delete(&[ids[1], ids[2]]).unwrap();
+        let now = unix_now();
+        let b = store.sender_behavior("noisy@sender.example", now).unwrap();
+        assert!(near(b.deleted, 2.0), "{b:?}");
+        // The ignore that makes it three is recorded by the unread pass.
+        store
+            .record_interaction(ids[3], Interaction::Ignore, now)
+            .unwrap();
+        let b = store.sender_behavior("noisy@sender.example", now).unwrap();
+        assert!(b.should_deprioritize(), "{b:?}");
+    }
+
+    #[test]
+    fn dismissing_a_card_records_no_ignore() {
+        let (mut store, inbox, _) = turn_store();
+        store
+            .insert_messages(inbox, &[question_mail(20, "<q1@example.net>")])
+            .unwrap();
+        let id = id_of(&store, inbox, 20);
+        store.dismiss_turn(id).unwrap();
+        let b = store
+            .sender_behavior("bob@example.net", unix_now())
+            .unwrap();
+        assert_eq!(b, SenderBehavior::default());
+        let rows: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM message_interactions", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn unread_mail_is_ignored_after_14_days_once_and_only_after_start() {
+        let (mut store, inbox, a) = turn_store();
+        let junk = store
+            .upsert_folder(a, "Junk", None, Some(FolderRole::Junk), true)
+            .unwrap()
+            .id;
+        store
+            .upsert_folder(a, "Trash", None, Some(FolderRole::Trash), true)
+            .unwrap();
+        let t0 = 1_800_000_000;
+        let from = "ads@sender.example";
+        // Old backlog: dated before the first run.
+        inbox_mails(&mut store, inbox, from, 1, t0 - 30 * DAY);
+        assert_eq!(filing::record_ignored(&store, t0).unwrap(), 0);
+
+        let fresh = |uid: u32, flags: Vec<String>| MessageHeader {
+            uid,
+            message_id: Some(format!("<fresh-{uid}@sender.example>")),
+            from_addr: Some(from.into()),
+            to: vec!["me@example.org".into()],
+            date: Some(t0 + DAY),
+            flags,
+            ..Default::default()
+        };
+        store
+            .insert_messages(
+                inbox,
+                &[
+                    fresh(10, vec![]),
+                    fresh(11, vec!["\\Seen".into()]),
+                    fresh(12, vec![]),
+                ],
+            )
+            .unwrap();
+        store.insert_messages(junk, &[fresh(13, vec![])]).unwrap();
+        // The user deletes one of them before the deadline.
+        let gone = id_of(&store, inbox, 12);
+        store.queue_delete(&[gone]).unwrap();
+
+        // Not yet 14 days old.
+        assert_eq!(filing::record_ignored(&store, t0 + 10 * DAY).unwrap(), 0);
+        let late = t0 + 16 * DAY;
+        assert_eq!(filing::record_ignored(&store, late).unwrap(), 1);
+        // Once per mail.
+        assert_eq!(filing::record_ignored(&store, late + DAY).unwrap(), 0);
+        let b = store.sender_behavior(from, late).unwrap();
+        assert!(near(b.ignored, 1.0), "{b:?}");
+    }
+
+    #[test]
+    fn opened_then_deleted_does_not_count_as_opened() {
+        let (mut store, inbox, _) = turn_store();
+        let ids = inbox_mails(&mut store, inbox, "ads@sender.example", 2, 100);
+        let t = 1000;
+        for id in &ids {
+            store.record_interaction(*id, Interaction::Open, t).unwrap();
+        }
+        store
+            .record_interaction(ids[0], Interaction::Delete, t)
+            .unwrap();
+        let b = store.sender_behavior("ads@sender.example", t).unwrap();
+        assert!(near(b.opened, 1.0), "{b:?}");
+        assert!(near(b.deleted, 1.0));
+        // Never below zero, also when the open was never recorded.
+        store
+            .record_interaction(ids[1], Interaction::Delete, t)
+            .unwrap();
+        let b = store.sender_behavior("ads@sender.example", t).unwrap();
+        assert!(near(b.opened, 0.0) && b.opened >= 0.0, "{b:?}");
+        let (mut store, inbox, _) = turn_store();
+        let ids = inbox_mails(&mut store, inbox, "ads@sender.example", 1, 100);
+        store
+            .record_interaction(ids[0], Interaction::Delete, t)
+            .unwrap();
+        let b = store.sender_behavior("ads@sender.example", t).unwrap();
+        assert!(near(b.opened, 0.0) && b.opened >= 0.0);
+    }
+
+    #[test]
+    fn opening_alone_does_not_engage_a_sender() {
+        let (mut store, inbox, _) = turn_store();
+        let ids = inbox_mails(&mut store, inbox, "bank@sender.example", 5, 100);
+        for id in &ids {
+            store
+                .record_interaction(*id, Interaction::Open, 900)
+                .unwrap();
+        }
+        let b = store.sender_behavior("bank@sender.example", 1000).unwrap();
+        assert!(near(b.opened, 5.0));
+        assert!(!b.is_engaged());
+    }
+
+    #[test]
+    fn deprioritizing_spares_people_the_user_writes_to() {
+        let (mut store, inbox, _) = turn_store();
+        // `anna@example.com` is a sent recipient (see `turn_store`).
+        let mut anna = inbox_mails(&mut store, inbox, "anna@example.com", 4, 100);
+        let mut stranger = inbox_mails(&mut store, inbox, "stranger@sender.example", 4, 200);
+        // uids collide between the two batches, so refetch by sender.
+        for (list, from) in [
+            (&mut anna, "anna@example.com"),
+            (&mut stranger, "stranger@sender.example"),
+        ] {
+            *list = store
+                .folder_messages(inbox, 100)
+                .unwrap()
+                .iter()
+                .filter(|m| m.header.from_addr.as_deref() == Some(from))
+                .map(|m| m.id)
+                .collect();
+        }
+        for list in [&anna, &stranger] {
+            for id in &list[..3] {
+                store
+                    .record_interaction(*id, Interaction::Delete, 900)
+                    .unwrap();
+            }
+            store
+                .conn
+                .execute(
+                    "UPDATE messages SET preview = 'Hast du Zeit für einen Anruf?' WHERE id = ?1",
+                    [list[3]],
+                )
+                .unwrap();
+        }
+        let t = |id: i64| {
+            store
+                .assess_messages_turns(&[id], 1000)
+                .unwrap()
+                .remove(0)
+                .1
+        };
+        assert_eq!(t(anna[3]).status, TurnStatus::NeedsYou);
+        assert_eq!(t(stranger[3]).status, TurnStatus::ReadingAlong);
+    }
+
+    #[test]
+    fn reply_is_counted_only_when_recorded_after_the_send() {
+        let (mut store, inbox, _) = turn_store();
+        store
+            .insert_messages(inbox, &[question_mail(20, "<q1@example.net>")])
+            .unwrap();
+        let id = id_of(&store, inbox, 20);
+        // Queued or undone sends record nothing; only the outbox does, once
+        // the mail has actually left.
+        let b = store.sender_behavior("bob@example.net", 1000).unwrap();
+        assert!(near(b.replied, 0.0));
+        store
+            .record_interaction(id, Interaction::Reply, 1000)
+            .unwrap();
+        store
+            .record_interaction(id, Interaction::Reply, 1001)
+            .unwrap();
+        let b = store.sender_behavior("bob@example.net", 1001).unwrap();
+        assert!(near(b.replied, 1.0));
+        assert!(b.is_engaged());
+    }
+
+    fn sent_reply(uid: u32, to_rfc: &str, date: i64) -> MessageHeader {
+        MessageHeader {
+            to: vec!["bob@example.net".into()],
+            in_reply_to: Some(to_rfc.into()),
+            references: vec![to_rfc.into()],
+            ..header(uid, "Re: Frage", "me@example.org", date)
+        }
+    }
+
+    #[test]
+    fn replies_from_other_devices_are_counted() {
+        let now = unix_now();
+        // Sent copy arrives after the incoming mail.
+        let (mut store, inbox, a) = turn_store();
+        let sent = store
+            .upsert_folder(a, "Sent", None, Some(FolderRole::Sent), true)
+            .unwrap()
+            .id;
+        store
+            .insert_messages(inbox, &[question_mail(20, "<q1@example.net>")])
+            .unwrap();
+        assert!(near(
+            store
+                .sender_behavior("bob@example.net", now)
+                .unwrap()
+                .replied,
+            0.0
+        ));
+        store
+            .insert_messages(sent, &[sent_reply(5, "<q1@example.net>", 500)])
+            .unwrap();
+        let b = store.sender_behavior("bob@example.net", now).unwrap();
+        assert!(near(b.replied, 1.0), "{b:?}");
+        // Syncing the same sent mail again does not count twice.
+        store
+            .insert_messages(sent, &[sent_reply(5, "<q1@example.net>", 500)])
+            .unwrap();
+        assert!(near(
+            store
+                .sender_behavior("bob@example.net", now)
+                .unwrap()
+                .replied,
+            1.0
+        ));
+
+        // Sent copy arrives before the incoming mail (folders sync in any order).
+        let (mut store, inbox, a) = turn_store();
+        let sent = store
+            .upsert_folder(a, "Sent", None, Some(FolderRole::Sent), true)
+            .unwrap()
+            .id;
+        store
+            .insert_messages(sent, &[sent_reply(5, "<q1@example.net>", 500)])
+            .unwrap();
+        store
+            .insert_messages(inbox, &[question_mail(20, "<q1@example.net>")])
+            .unwrap();
+        assert!(near(
+            store
+                .sender_behavior("bob@example.net", now)
+                .unwrap()
+                .replied,
+            1.0
+        ));
+        // A mail that arrives after the reply is a new one.
+        store
+            .insert_messages(inbox, &[question_mail(900, "<q2@example.net>")])
+            .unwrap();
+        assert!(near(
+            store
+                .sender_behavior("bob@example.net", now)
+                .unwrap()
+                .replied,
+            1.0
+        ));
+    }
+
+    #[test]
+    fn answered_flag_counts_as_reply_once() {
+        let (mut store, inbox, _) = turn_store();
+        store
+            .insert_messages(inbox, &[question_mail(20, "<q1@example.net>")])
+            .unwrap();
+        // The flag arrives with a later flag sync of the known mail.
+        let flagged = MessageHeader {
+            flags: vec!["\\Answered".into()],
+            ..question_mail(20, "<q1@example.net>")
+        };
+        for _ in 0..2 {
+            store
+                .insert_messages(inbox, std::slice::from_ref(&flagged))
+                .unwrap();
+        }
+        let b = store
+            .sender_behavior("bob@example.net", unix_now())
+            .unwrap();
+        assert!(near(b.replied, 1.0), "{b:?}");
+    }
+
+    #[test]
+    fn migration_backfills_replies_of_answered_mails() {
+        let (mut store, inbox, a) = turn_store();
+        let sent = store
+            .upsert_folder(a, "Sent", None, Some(FolderRole::Sent), true)
+            .unwrap()
+            .id;
+        store
+            .insert_messages(
+                inbox,
+                &[
+                    question_mail(20, "<q1@example.net>"),
+                    MessageHeader {
+                        flags: vec!["\\Answered".into()],
+                        ..header(21, "Hallo", "carol@example.net", 130)
+                    },
+                ],
+            )
+            .unwrap();
+        store
+            .insert_messages(sent, &[sent_reply(5, "<q1@example.net>", 500)])
+            .unwrap();
+        // Forget what the live paths learned, as on a database from before.
+        store
+            .conn
+            .execute_batch("DELETE FROM message_interactions; DELETE FROM sender_behavior;")
+            .unwrap();
+        store.conn.execute_batch(MIGRATIONS[19]).unwrap();
+        for who in ["bob@example.net", "carol@example.net"] {
+            let b = store.sender_behavior(who, 1000).unwrap();
+            assert!(near(b.replied, 1.0), "{who}: {b:?}");
+        }
+    }
+
+    #[test]
+    fn behavior_counts_halve_after_one_half_life() {
+        let (mut store, inbox, _) = turn_store();
+        let ids = inbox_mails(&mut store, inbox, "ads@sender.example", 2, 100);
+        let t = 1_800_000_000;
+        let half_life = 120 * DAY;
+        store
+            .record_interaction(ids[0], Interaction::Delete, t)
+            .unwrap();
+        let b = store.sender_behavior("ads@sender.example", t).unwrap();
+        assert!(near(b.deleted, 1.0));
+        // Reading decays to the given time.
+        let b = store
+            .sender_behavior("ads@sender.example", t + half_life)
+            .unwrap();
+        assert!(near(b.deleted, 0.5), "{b:?}");
+        // Updating decays the stored count first, then adds one.
+        store
+            .record_interaction(ids[1], Interaction::Delete, t + half_life)
+            .unwrap();
+        let b = store
+            .sender_behavior("ads@sender.example", t + half_life)
+            .unwrap();
+        assert!(near(b.deleted, 1.5), "{b:?}");
+    }
+
+    #[test]
+    fn flagged_view_spans_folders_without_trash_junk_or_duplicates() {
+        let (mut store, inbox, a) = turn_store();
+        let all = store
+            .upsert_folder(a, "All", None, Some(FolderRole::All), true)
+            .unwrap()
+            .id;
+        let trash = store
+            .upsert_folder(a, "Trash", None, Some(FolderRole::Trash), true)
+            .unwrap()
+            .id;
+        let junk = store
+            .upsert_folder(a, "Junk", None, Some(FolderRole::Junk), true)
+            .unwrap()
+            .id;
+        let flagged = |uid: u32, rfc: &str, date: i64, on: bool| MessageHeader {
+            message_id: Some(rfc.into()),
+            flags: if on { vec!["\\Flagged".into()] } else { vec![] },
+            ..header(uid, "Wichtig", "bob@example.net", date)
+        };
+        store
+            .insert_messages(
+                inbox,
+                &[
+                    flagged(1, "<a@example.net>", 300, true),
+                    flagged(2, "<plain@example.net>", 900, false),
+                    flagged(3, "<dup@example.net>", 200, true),
+                ],
+            )
+            .unwrap();
+        store
+            .insert_messages(
+                all,
+                &[
+                    flagged(1, "<dup@example.net>", 200, true),
+                    flagged(2, "<archived@example.net>", 400, true),
+                ],
+            )
+            .unwrap();
+        store
+            .insert_messages(trash, &[flagged(1, "<t@example.net>", 800, true)])
+            .unwrap();
+        store
+            .insert_messages(junk, &[flagged(1, "<j@example.net>", 700, true)])
+            .unwrap();
+
+        for view in [
+            store.messages(None, Some(FolderRole::Flagged), 50).unwrap(),
+            store
+                .messages(Some(a), Some(FolderRole::Flagged), 50)
+                .unwrap(),
+        ] {
+            let ids: Vec<&str> = view
+                .iter()
+                .map(|m| m.header.message_id.as_deref().unwrap())
+                .collect();
+            assert_eq!(
+                ids,
+                [
+                    "<archived@example.net>",
+                    "<a@example.net>",
+                    "<dup@example.net>"
+                ]
+            );
+            // The inbox copy wins over the All Mail copy.
+            let dup = view
+                .iter()
+                .find(|m| m.header.message_id.as_deref() == Some("<dup@example.net>"))
+                .unwrap();
+            assert_eq!(dup.folder_id, inbox);
+        }
+        // Folder views stay as they are.
         assert_eq!(
             store
-                .sender_behavior("NOISY@sender.example")
+                .messages(None, Some(FolderRole::Inbox), 50)
                 .unwrap()
-                .opened,
-            1
+                .len(),
+            3
         );
-
-        // Dismissing and deleting 3 messages deprioritizes the 4th.
-        store.dismiss_turn(id1).unwrap();
-        store.queue_delete(&[id2, id3]).unwrap();
-
-        let b = store.sender_behavior("noisy@sender.example").unwrap();
-        assert_eq!(b.ignored, 1);
-        assert_eq!(b.deleted, 2);
-        assert!(b.should_deprioritize());
-
-        let turns = store.assess_messages_turns(&[id4], 1_700_001_000).unwrap();
-        assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0].1.status, TurnStatus::ReadingAlong);
     }
 }

@@ -255,6 +255,35 @@ export function messages(
   if (folderId !== null) {
     return delay(all.filter((m) => m.folder_id === folderId))
   }
+  if (role === 'flagged') {
+    // Like the backend: the flag decides, not a folder, and one mail in
+    // several folders shows once (inbox copy preferred).
+    const flagged = all.filter(
+      (m) =>
+        (accountId === null || m.account_id === accountId) &&
+        m.header.flags.includes('\\Flagged') &&
+        m.folder_role !== 'trash' &&
+        m.folder_role !== 'junk',
+    )
+    const byRfc = new Map<string, MessageSummary>()
+    const unique: MessageSummary[] = []
+    for (const m of flagged) {
+      const rfc = m.header.message_id
+      if (!rfc) {
+        unique.push(m)
+        continue
+      }
+      const seen = byRfc.get(rfc)
+      if (!seen) {
+        byRfc.set(rfc, m)
+        unique.push(m)
+      } else if (seen.folder_role !== 'inbox' && m.folder_role === 'inbox') {
+        unique[unique.indexOf(seen)] = m
+        byRfc.set(rfc, m)
+      }
+    }
+    return delay(unique.sort((a, b) => (b.header.date ?? 0) - (a.header.date ?? 0)))
+  }
   return delay(
     all.filter(
       (m) =>
