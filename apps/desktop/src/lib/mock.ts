@@ -263,6 +263,48 @@ const all: MessageSummary[] = [
       },
     },
   ),
+
+  // --- Sample mail for the bundles on "Heute" (assignments and previews) ---
+  // A marketplace-like sender: many offers, two shipping mails with tracking
+  // numbers (protected in a preview) and one message from a buyer.
+  ...[
+    ['Kopfhörer Aurelia mit Rauschunterdrückung', 4 * hour],
+    ['Akkuschrauber-Set 18 V', 9 * hour],
+    ['Gartenstuhl klappbar, 2er-Set', 20 * hour],
+    ['Espressomaschine Vento', 30 * hour],
+    ['Fahrradhelm Sirius', 45 * hour],
+    ['Bluetooth-Lautsprecher Delta', 60 * hour],
+    ['Wanderrucksack 40 l', 5 * day],
+    ['Schreibtischlampe Lumo', 12 * day],
+  ].map(([product, ago]) =>
+    msg(3, ['Marktplatz Nordhof', 'angebote@marktplatz.example'], `Angebot: ${product}`, ago as number, {
+      seen: (ago as number) > 2 * day,
+    }),
+  ),
+  msg(3, ['Marktplatz Nordhof', 'angebote@marktplatz.example'], 'Versandbestätigung: Dein Paket ist unterwegs (Sendungsnummer 00340434161094032451)', 18 * hour),
+  msg(3, ['Marktplatz Nordhof', 'angebote@marktplatz.example'], 'Versandbestätigung: Dein Paket wurde zugestellt (Sendungsnummer 00340434161094019012)', 8 * day, { seen: true }),
+  msg(3, ['Marktplatz Nordhof', 'angebote@marktplatz.example'], 'Nachricht von Lena Brandt zu „Gartenstuhl“', 6 * hour, {
+    preview: 'Hallo, ist der Gartenstuhl noch zu haben? Ich könnte ihn morgen abholen.',
+  }),
+  // Statements (shelf "Übersichten"): one sender with several months, one weekly.
+  msg(1, ['Online-Banking', 'kontoauszug@bank.example'], 'Kontoauszug November', 2 * day, { dmarcPass: true }),
+  msg(1, ['Online-Banking', 'kontoauszug@bank.example'], 'Kontoauszug Oktober', 33 * day, { seen: true, dmarcPass: true }),
+  msg(1, ['Online-Banking', 'kontoauszug@bank.example'], 'Kontoauszug September', 63 * day, { seen: true, dmarcPass: true }),
+  msg(3, ['Anzeigenmarkt', 'wochenbericht@anzeigenmarkt.example'], 'Deine Anzeigen: Wochenübersicht', 1 * day),
+  msg(3, ['Anzeigenmarkt', 'wochenbericht@anzeigenmarkt.example'], 'Deine Anzeigen: Wochenübersicht', 8 * day, { seen: true }),
+  msg(3, ['Anzeigenmarkt', 'wochenbericht@anzeigenmarkt.example'], 'Deine Anzeigen: Wochenübersicht', 15 * day, { seen: true }),
+  // Newsletters
+  msg(3, ['Kochkurier', 'post@kochkurier.example'], 'Rezepte der Woche: Kürbissuppe und mehr', 5 * hour, { list: true }),
+  msg(3, ['Technikblick', 'redaktion@technikblick.example'], 'Technikblick Nr. 212: Neue Laptops im Test', 20 * hour, { list: true }),
+  msg(3, ['Gartenfreunde', 'hallo@gartenfreunde.example'], 'Winterschutz für deinen Garten', 28 * hour, { list: true }),
+  msg(3, ['Stadtteilblatt', 'info@stadtteilblatt.example'], 'Neues aus deinem Viertel', 50 * hour, { list: true }),
+  // Promotions
+  msg(3, ['Beispielshop', 'aktion@beispielshop.example'], 'Black Week: 30 % Rabatt auf alles', 2 * hour),
+  msg(3, ['Möbelhaus Eiche', 'angebote@moebel-eiche.example'], 'Gutschein: 15 € für deine nächste Bestellung', 26 * hour),
+  msg(3, ['Reisewelt', 'sale@reisewelt.example'], 'Last-Minute-Deals ab 199 €', 40 * hour),
+  // Account notices
+  msg(3, ['Cloudspeicher', 'sicherheit@cloudspeicher.example'], 'Neue Anmeldung auf deinem Konto', 7 * hour),
+  msg(3, ['Mitgliederportal', 'konto@mitglieder.example'], 'Wir haben unsere Nutzungsbedingungen aktualisiert', 35 * hour),
 ]
 
 const delay = <T>(value: T, ms = 120) => new Promise<T>((r) => setTimeout(() => r(value), ms))
@@ -675,6 +717,28 @@ const mockBrandStore = new Map<string, BrandLogo>([
     {
       data_url: svgDataUrl(
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect x="10" y="14" width="44" height="36" rx="10" fill="#6D28D9"/><polygon fill="#ffffff" points="26,23 44,32 26,41"/></svg>',
+      ),
+      bg: null,
+      padded: true,
+      scale: 1,
+    },
+  ],
+  [
+    'marktplatz.example',
+    {
+      data_url: svgDataUrl(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="#D1495B" d="M12 26l4-12h32l4 12v4a6 6 0 0 1-10 4 6 6 0 0 1-10 0 6 6 0 0 1-10 0 6 6 0 0 1-10-4v-4zM14 38h36v12H14z"/></svg>',
+      ),
+      bg: null,
+      padded: true,
+      scale: 1,
+    },
+  ],
+  [
+    'anzeigenmarkt.example',
+    {
+      data_url: svgDataUrl(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect x="12" y="12" width="40" height="40" rx="8" fill="#0F766E"/><path fill="#ffffff" d="M20 24h24v4H20zM20 32h24v4H20zM20 40h14v4H20z"/></svg>',
       ),
       bg: null,
       padded: true,

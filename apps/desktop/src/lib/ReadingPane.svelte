@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte'
+  import { onDestroy, untrack } from 'svelte'
   import * as api from './api'
   import { getBrandLogo, subscribeLogos } from './brandLogos'
   import Icon from './Icon.svelte'
@@ -47,6 +47,11 @@
     heldMail: boolean
   } | null>(null)
   let frame: HTMLIFrameElement | undefined = $state()
+  /** Full view: height of the message document, so the pane scrolls and the frame does not. */
+  let frameHeight = $state(0)
+  let frameObserver: ResizeObserver | undefined
+  /** The pane has scrolled: the sticky toolbar gets an edge. */
+  let stuck = $state(false)
   let otpCopied = $state(false)
   let maskedPreview = $state<MaskedPreview | null>(null)
   let maskLoading = $state(false)
@@ -135,6 +140,7 @@
     notice = ''
     linkWarning = null
     view = null
+    frameHeight = 0
     otpCopied = false
     maskedPreview = null
     if (id != null) load(id, false)
@@ -194,6 +200,7 @@
   function onFrameLoad() {
     const doc = frame?.contentDocument
     if (!doc) return
+    if (!embedded) fitFrame(doc)
     doc.addEventListener('click', (e) => {
       const a = (e.target as Element | null)?.closest?.('a')
       if (!a) return
@@ -211,6 +218,42 @@
       openLink(href)
     })
   }
+
+  // The frame is as tall as its document (same-origin srcdoc, so the document
+  // can be measured). The root element is measured, not the viewport: its
+  // height is the content's, whatever size the frame has now. Later changes
+  // (width, images) arrive through the observer; no re-measure after "Bilder
+  // laden" is needed beyond that, as that reloads the frame.
+  function fitFrame(doc: Document) {
+    frameObserver?.disconnect()
+    const win = doc.defaultView
+    const measure = () => {
+      const body = doc.body
+      if (!body || !win) return
+      const cs = win.getComputedStyle(body)
+      const margins = (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0)
+      const h = Math.max(doc.documentElement.getBoundingClientRect().height, body.scrollHeight + margins)
+      // +2: the frame's own border. A document that follows the viewport
+      // height (100vh) would otherwise grow by a pixel per round, forever.
+      const next = Math.ceil(h) + 2
+      if (frameHeight === 0 || Math.abs(next - frameHeight) > 2) frameHeight = next
+    }
+    measure()
+    frameObserver = new ResizeObserver(measure)
+    frameObserver.observe(doc.documentElement)
+    if (doc.body) frameObserver.observe(doc.body)
+    // The frame's own width decides the line breaks; images report when they arrive.
+    if (frame) frameObserver.observe(frame)
+    doc.addEventListener('load', measure, true)
+  }
+
+  function onPaneScroll(e: Event) {
+    if (embedded) return
+    const top = (e.currentTarget as HTMLElement).scrollTop > 2
+    if (top !== stuck) stuck = top
+  }
+
+  onDestroy(() => frameObserver?.disconnect())
 
   async function save(part: number) {
     if (!message) return
@@ -242,78 +285,78 @@
   }
 </script>
 
-<article class="pane" class:embedded>
+<article class="pane" class:embedded onscroll={onPaneScroll}>
   {#if message}
     {@const h = message.header}
+    <div class="actions" class:stuck role="toolbar" aria-label="Aktionen">
+      <button type="button" class="action" onclick={() => onreply(message, 'reply')} title="Antworten (R)">
+        <Icon name="reply" size={16} />
+        <span>Antworten</span>
+      </button>
+      {#if canReplyAll}
+        <button
+          type="button"
+          class="action icon-only"
+          onclick={() => onreply(message, 'reply_all')}
+          title="Allen antworten (A)"
+          aria-label="Allen antworten"
+        >
+          <Icon name="replyall" size={16} />
+        </button>
+      {/if}
+      <button
+        type="button"
+        class="action icon-only"
+        onclick={() => onreply(message, 'forward')}
+        title="Weiterleiten (F)"
+        aria-label="Weiterleiten"
+      >
+        <Icon name="forward" size={16} />
+      </button>
+      <span class="sep" aria-hidden="true"></span>
+      <button
+        type="button"
+        class="action"
+        onclick={() => ontoggleread(message)}
+        title={isSeen(message) ? 'Als ungelesen markieren (U)' : 'Als gelesen markieren (U)'}
+      >
+        <Icon name={isSeen(message) ? 'mail' : 'mailopen'} size={16} />
+        <span>{isSeen(message) ? 'Ungelesen' : 'Gelesen'}</span>
+      </button>
+      <button
+        type="button"
+        class="action icon-only"
+        class:on={isFlagged(message)}
+        onclick={() => ontoggleflag(message)}
+        title="Markieren (S)"
+        aria-label="Markieren"
+        aria-pressed={isFlagged(message)}
+      >
+        <Icon name="star" size={16} filled={isFlagged(message)} />
+      </button>
+      <button
+        type="button"
+        class="action icon-only"
+        onclick={() => ondelete(message)}
+        title={message.folder_role === 'trash' ? 'Endgültig löschen (Entf)' : 'In den Papierkorb (Entf)'}
+        aria-label={message.folder_role === 'trash' ? 'Endgültig löschen' : 'Löschen'}
+      >
+        <Icon name="trash" size={16} />
+      </button>
+      <span class="sep" aria-hidden="true"></span>
+      <button
+        type="button"
+        class="action"
+        class:on={maskedPreview !== null}
+        onclick={toggleMaskPreview}
+        disabled={maskLoading}
+        title="Lokale PII-Maskierung und Vertraulichkeitsprüfung anzeigen"
+      >
+        <Icon name="shield" size={16} />
+        <span>Maskiert</span>
+      </button>
+    </div>
     <header class="head">
-      <div class="actions" role="toolbar" aria-label="Aktionen">
-        <button type="button" class="action" onclick={() => onreply(message, 'reply')} title="Antworten (R)">
-          <Icon name="reply" size={16} />
-          <span>Antworten</span>
-        </button>
-        {#if canReplyAll}
-          <button
-            type="button"
-            class="action icon-only"
-            onclick={() => onreply(message, 'reply_all')}
-            title="Allen antworten (A)"
-            aria-label="Allen antworten"
-          >
-            <Icon name="replyall" size={16} />
-          </button>
-        {/if}
-        <button
-          type="button"
-          class="action icon-only"
-          onclick={() => onreply(message, 'forward')}
-          title="Weiterleiten (F)"
-          aria-label="Weiterleiten"
-        >
-          <Icon name="forward" size={16} />
-        </button>
-        <span class="sep" aria-hidden="true"></span>
-        <button
-          type="button"
-          class="action"
-          onclick={() => ontoggleread(message)}
-          title={isSeen(message) ? 'Als ungelesen markieren (U)' : 'Als gelesen markieren (U)'}
-        >
-          <Icon name={isSeen(message) ? 'mail' : 'mailopen'} size={16} />
-          <span>{isSeen(message) ? 'Ungelesen' : 'Gelesen'}</span>
-        </button>
-        <button
-          type="button"
-          class="action icon-only"
-          class:on={isFlagged(message)}
-          onclick={() => ontoggleflag(message)}
-          title="Markieren (S)"
-          aria-label="Markieren"
-          aria-pressed={isFlagged(message)}
-        >
-          <Icon name="star" size={16} filled={isFlagged(message)} />
-        </button>
-        <button
-          type="button"
-          class="action icon-only"
-          onclick={() => ondelete(message)}
-          title={message.folder_role === 'trash' ? 'Endgültig löschen (Entf)' : 'In den Papierkorb (Entf)'}
-          aria-label={message.folder_role === 'trash' ? 'Endgültig löschen' : 'Löschen'}
-        >
-          <Icon name="trash" size={16} />
-        </button>
-        <span class="sep" aria-hidden="true"></span>
-        <button
-          type="button"
-          class="action"
-          class:on={maskedPreview !== null}
-          onclick={toggleMaskPreview}
-          disabled={maskLoading}
-          title="Lokale PII-Maskierung und Vertraulichkeitsprüfung anzeigen"
-        >
-          <Icon name="shield" size={16} />
-          <span>Maskiert</span>
-        </button>
-      </div>
       {#if flagged}
         {#if message.phishing.acknowledged}
           <div class="phish phish-note" role="note">
@@ -434,8 +477,8 @@
         <div class="hint images">
           <Icon name="image" />
           <span>
-            {view.rendered.remote_blocked} externe
-            {view.rendered.remote_blocked === 1 ? 'Inhalt' : 'Inhalte'} blockiert – sie würden dem
+            {view.rendered.remote_blocked}
+            {view.rendered.remote_blocked === 1 ? 'externer Inhalt' : 'externe Inhalte'} blockiert – sie würden dem
             Absender verraten, wann du die Mail liest.
           </span>
           <div class="hint-actions">
@@ -512,6 +555,7 @@
           referrerpolicy="no-referrer"
           srcdoc={view.rendered.document}
           class:dark={view.rendered.dark}
+          style:height={!embedded ? `${frameHeight || 240}px` : undefined}
           onload={onFrameLoad}
         ></iframe>
       {/if}
@@ -637,6 +681,25 @@
     background: var(--surface-raised);
     position: relative;
   }
+  /* Full view: the whole pane scrolls; the message frame has its content's height. */
+  .pane:not(.embedded) {
+    overflow-y: auto;
+  }
+  /* The toolbar stays while the header (subject, sender, banners) scrolls away. */
+  .pane:not(.embedded) > .actions {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    margin: 0;
+    padding: 10px 28px;
+    background: var(--surface-raised);
+    transition: box-shadow 0.16s ease;
+  }
+  .pane:not(.embedded) > .actions.stuck {
+    box-shadow:
+      0 1px 0 var(--border),
+      0 8px 14px -10px color-mix(in srgb, var(--pitch-black) 35%, transparent);
+  }
   .sep {
     width: 1px;
     align-self: stretch;
@@ -675,10 +738,8 @@
     color: var(--ochre);
   }
   .head {
-    padding: 16px 28px 12px;
+    padding: 8px 28px 12px;
     flex: none;
-    overflow-y: auto;
-    max-height: 55%;
   }
   h1 {
     margin: 0 0 16px;
@@ -850,14 +911,16 @@
     padding: 2px;
   }
   .body {
-    flex: 1;
-    min-height: 0;
+    flex: none;
     padding: 0 20px 20px;
     display: flex;
   }
   iframe {
     flex: 1;
     width: 100%;
+    box-sizing: content-box;
+    /* border-box would make the 1px borders eat into the measured height */
+    max-width: calc(100% - 2px);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     /* Mails without their own dark design stay on a light page. */
@@ -870,6 +933,7 @@
   }
   .state {
     flex: 1;
+    min-height: 160px;
     display: grid;
     place-items: center;
     color: var(--text-muted);
@@ -882,7 +946,9 @@
     text-align: center;
   }
   .warn-backdrop {
-    position: absolute;
+    /* the pane scrolls, so a pane-relative backdrop could end up off screen */
+    position: fixed;
+    z-index: 30;
     inset: 0;
     background: color-mix(in srgb, var(--pitch-black) 40%, transparent);
     display: grid;
@@ -1089,8 +1155,6 @@
   }
   .embedded .head {
     padding: 0 0 8px;
-    max-height: none;
-    overflow: visible;
   }
   .embedded .actions {
     gap: 4px;

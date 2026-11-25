@@ -23,6 +23,15 @@ import type {
   View,
 } from './types'
 import * as mock from './mock'
+import * as bundlesMock from './bundlesMock'
+import type {
+  Assignment,
+  AssignmentPreview,
+  Bundle,
+  BundlePatch,
+  Placement,
+  Target,
+} from './bundles'
 import { createMockCases, fromCaseView, type AsideCategory, type CaseItem, type CaseStatus, type CaseView } from './cases'
 
 const native = isTauri()
@@ -295,6 +304,12 @@ export function maskMessagePreview(id: number): Promise<MaskedPreview> {
   return invoke('mask_message_preview', { id })
 }
 
+/** Inbox mail dated `sinceSec` (unix seconds) or later, newest first, up to 3000. */
+export function inboxSince(sinceSec: number): Promise<MessageSummary[]> {
+  // The browser preview's sample data is already complete (see `allMockMessages`).
+  return native ? invoke('inbox_since', { since: sinceSec }) : Promise.resolve([])
+}
+
 /** Messages by id, wherever they are stored (the mail of a case). */
 export function messagesByIds(ids: number[]): Promise<MessageSummary[]> {
   if (!native) {
@@ -355,4 +370,66 @@ export type InteractionAction = 'open' | 'reply' | 'delete' | 'ignore'
 export function recordInteraction(messageId: number, action: InteractionAction): Promise<void> {
   if (!native) return Promise.resolve()
   return invoke('record_interaction', { messageId, action })
+}
+
+// ----- bundles and assignments ("Wohin gehört das?") -----------------------------
+
+/** Where each mail belongs; one call for all mail shown on "Heute". */
+export function placements(messageIds: number[]): Promise<Placement[]> {
+  if (messageIds.length === 0) return Promise.resolve([])
+  return native ? invoke('placements', { messageIds }) : bundlesMock.placements(messageIds)
+}
+
+/** All mail of the sender grouped by kind: what "alle dieser Art" would take along. */
+export function assignmentPreview(messageId: number, target: Target): Promise<AssignmentPreview> {
+  return native
+    ? invoke('assignment_preview', { messageId, target })
+    : bundlesMock.assignmentPreview(messageId, target)
+}
+
+/** Without `kindKeys` for this mail alone; returns the ids for "Rückgängig". */
+export function applyAssignment(
+  messageId: number,
+  target: Target,
+  kindKeys: string[],
+  excludedMessageIds: number[],
+): Promise<number[]> {
+  return native
+    ? invoke('apply_assignment', { messageId, target, kindKeys, excludedMessageIds })
+    : bundlesMock.applyAssignment(messageId, target, kindKeys, excludedMessageIds)
+}
+
+export function removeAssignment(id: number): Promise<void> {
+  return native ? invoke('remove_assignment', { id }) : bundlesMock.removeAssignment(id)
+}
+
+export function assignments(): Promise<Assignment[]> {
+  return native ? invoke('assignments') : bundlesMock.assignments()
+}
+
+/** All bundles in display order, `other` last. */
+export function bundles(): Promise<Bundle[]> {
+  return native ? invoke('bundles') : bundlesMock.bundles()
+}
+
+export function createBundle(name: string): Promise<Bundle> {
+  return native ? invoke('create_bundle', { name }) : bundlesMock.createBundle(name)
+}
+
+export function updateBundle(key: string, patch: BundlePatch): Promise<Bundle> {
+  return native
+    ? invoke('update_bundle', {
+        key,
+        name: patch.name ?? null,
+        enabled: patch.enabled ?? null,
+        presentation: patch.presentation ?? null,
+        markRead: patch.markRead ?? null,
+        position: patch.position ?? null,
+      })
+    : bundlesMock.updateBundle(key, patch)
+}
+
+/** Custom bundles only; what the user put into it moves to "Weitere Mails". */
+export function deleteBundle(key: string): Promise<void> {
+  return native ? invoke('delete_bundle', { key }) : bundlesMock.deleteBundle(key)
 }

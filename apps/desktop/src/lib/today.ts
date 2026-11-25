@@ -3,6 +3,7 @@
 
 import type { CaseItem, CaseEvent, CaseStatus } from './cases'
 import { holdsBack } from './phishing'
+import { groupBundles, type Bundle, type BundleRow, type BundleSectionModel, type Placement } from './bundles'
 import type {
   MessageSummary,
   MessageTurnInfo,
@@ -132,6 +133,9 @@ export interface TodayInput {
   /** Unix seconds. */
   since: number
   firstName: string | null
+  /** Bundles and where each mail belongs (see bundles.ts); empty until loaded. */
+  bundles: Bundle[]
+  placements: Map<number, Placement>
   now?: Date
 }
 
@@ -140,10 +144,12 @@ export type Dismissal =
   | { kind: 'case'; caseId: number; previous: CaseStatus }
   | { kind: 'anomaly'; sourceId: number }
   | { kind: 'turn'; messageId: number }
+  /** A mail the user put under "Für dich" by hand. */
+  | { kind: 'placed'; messageId: number }
 
 export interface ForYouItem {
   key: string
-  kind: 'case' | 'anomaly' | 'turn'
+  kind: 'case' | 'anomaly' | 'turn' | 'placed'
   headline: string
   sub: string | null
   /** Second quiet line, e.g. the message preview. */
@@ -213,11 +219,6 @@ export interface QuietItem {
   dismissal: Dismissal
 }
 
-export interface AsUsualGroup {
-  label: string
-  count: number
-}
-
 export interface AsUsualRow {
   message: MessageSummary
   sender: string
@@ -239,7 +240,8 @@ export interface TodayModel {
   orders: OrderItem[]
   orderGroups: OrderGroup[]
   quiet: QuietItem[]
-  asUsual: { summary: string; rows: AsUsualRow[] } | null
+  /** One section per non-empty bundle, in bundle order (replaces "Wie immer"). */
+  bundles: BundleSectionModel[]
   /** One quiet line at the very end; null when nothing is held back. */
   held: HeldBack | null
 }
@@ -369,36 +371,19 @@ function isActiveOrder(c: CaseItem) {
   return c.kind === 'order' && c.status !== 'done' && c.status !== 'rejected' && c.status !== 'aside'
 }
 
-const LOGIN_RE = /anmeldung|sign-?in|log-?in|code|passwort|password|verif|bestätigung/i
-const PROMO_RE = /%|angebot|rabatt|sale|gutschein|nur heute|aktion|deal/i
-
 function plural(n: number, one: string, many: string) {
   return n === 1 ? one : many
 }
 
-function joinWords(parts: string[]): string {
-  if (parts.length <= 1) return parts.join('')
-  return `${parts.slice(0, -1).join(', ')} und ${parts.at(-1)}`
-}
-
-function sourceFor(m: MessageSummary, sources: SourceRecord[]): SourceRecord | null {
-  const addr = m.header.from_addr?.toLowerCase() ?? ''
-  const host = addr.split('@')[1] ?? ''
-  if (!host) return null
-  return (
-    sources.find((s) => s.source_key.toLowerCase() === addr) ??
-    sources.find((s) => s.domain && (host === s.domain || host.endsWith(`.${s.domain}`))) ??
-    null
-  )
-}
-
 export function buildToday(input: TodayInput): TodayModel {
   const now = input.now ?? new Date()
-  const { cases, sources, turns, pool, since } = input
+  const { cases, sources, turns, pool, since, placements } = input
   const byId = new Map(pool.map((m) => [m.id, m]))
   const msg = (id: number | null) => (id != null ? (byId.get(id) ?? null) : null)
 
   const shown = new Set<number>() // mail already represented by a card or line
+  // Mail the user put into a bundle leaves "Für dich" and "Läuft von allein".
+  const inBundle = (id: number | null) => id != null && placements.get(id)?.target?.kind === 'bundle'
 
   // --- Für dich ---
   const forYou: ForYouItem[] = []
@@ -409,6 +394,7 @@ export function buildToday(input: TodayInput): TodayModel {
     // A lure can look like an invoice or a deadline and make its own case;
     // that is no task for the user.
     if (m && holdsBack(m)) continue
+    if (inBundle(incoming)) continue
     let headline: string
     let sub: string | null = c.title
     if (c.amount && (c.kind === 'invoice' || c.kind === 'contract')) {
@@ -484,6 +470,7 @@ export function buildToday(input: TodayInput): TodayModel {
     }
     if (t.status !== 'needs_you' || m.folder_role === 'sent') continue
     if (holdsBack(m)) continue
+    if (inBundle(m.id)) continue
     if (caseMsgIds.has(m.id)) continue // the case card already covers it
     const thread = `${m.header.from_addr}|${normalizedSubject(m)}`
     if (seenThreads.has(thread) || newestOfThread.get(thread)?.id !== m.id) continue
@@ -503,6 +490,42 @@ export function buildToday(input: TodayInput): TodayModel {
       caseId: null,
       sourceId: null,
       dismissal: { kind: 'turn', messageId: m.id },
+    })
+  }
+
+  // Mail the user put under "Für dich" by hand: a card of its own, unless an
+  // existing builder already covers it.
+  const placedHere = pool
+    .filter((m) => {
+      const p = placements.get(m.id)
+      return (
+        p?.target?.kind === 'for_you' &&
+        (p.origin === 'mail' || p.origin === 'kind') &&
+        m.folder_role === 'inbox' &&
+        (m.header.date ?? 0) >= since &&
+        !shown.has(m.id) &&
+        !holdsBack(m)
+      )
+    })
+    .sort((a, b) => (b.header.date ?? 0) - (a.header.date ?? 0))
+    .slice(0, 8)
+  for (const m of placedHere) {
+    const c = cases.find((x) => x.messageIds.includes(m.id))
+    shown.add(m.id)
+    forYou.push({
+      key: `placed-${m.id}`,
+      kind: 'placed',
+      headline: c ? `${c.counterparty}: ${c.title}` : `${senderName(m)}: ${visible(m.header.subject ?? '(kein Betreff)')}`,
+      sub: c ? c.nextStep : null,
+      detail: m.preview,
+      why: placements.get(m.id)?.reason ?? 'Von dir hierher gelegt',
+      brandEmail: m.header.from_addr,
+      name: senderName(m),
+      openId: m.id,
+      replyTo: m,
+      caseId: null,
+      sourceId: null,
+      dismissal: { kind: 'placed', messageId: m.id },
     })
   }
 
@@ -528,6 +551,7 @@ export function buildToday(input: TodayInput): TodayModel {
   // --- Läuft von allein ---
   const quiet: QuietItem[] = []
   for (const c of cases.filter((c) => c.kind !== 'order' && c.status === 'waiting')) {
+    if (inBundle(latestMessageId(c, false))) continue
     c.messageIds.forEach((id) => shown.add(id))
     quiet.push({
       key: `case-${c.id}`,
@@ -588,37 +612,32 @@ export function buildToday(input: TodayInput): TodayModel {
           })),
         }
       : null
-  const rest = fresh.filter((m) => !shown.has(m.id))
-  const counts = new Map<string, number>()
-  const bump = (k: string) => counts.set(k, (counts.get(k) ?? 0) + 1)
-  for (const m of rest) {
-    const src = sourceFor(m, sources)
-    const subject = m.header.subject ?? ''
-    const newsletter = src?.is_newsletter ?? (m.header.list_id != null || m.header.list_unsubscribe.length > 0)
-    if (newsletter) bump(PROMO_RE.test(subject) ? 'promo' : 'newsletter')
-    else if (LOGIN_RE.test(subject)) bump('login')
-    else if (src && src.mode !== 'show') bump('notice')
-    else bump('other')
-  }
-  const labelFor: Record<string, (n: number) => string> = {
-    newsletter: (n) => `${n} Newsletter`,
-    promo: (n) => `${n} ${plural(n, 'Werbemail', 'Werbemails')}`,
-    login: (n) => `${n} ${plural(n, 'Login-Hinweis', 'Login-Hinweise')}`,
-    notice: (n) => `${n} ${plural(n, 'automatischer Hinweis', 'automatische Hinweise')}`,
-    other: (n) => `${n} ${plural(n, 'weitere Mail', 'weitere Mails')}`,
-  }
-  const groups = [...counts.entries()].sort((a, b) => b[1] - a[1])
-  const asUsual =
-    rest.length > 0
-      ? {
-          summary: `Wie immer: ${joinWords(groups.map(([k, n]) => labelFor[k](n)))}`,
-          rows: rest.map((m) => ({
-            message: m,
-            sender: senderName(m),
-            subject: visible(m.header.subject ?? '(kein Betreff)'),
-          })),
-        }
-      : null
+  // Everything not shown above lives in a bundle. A bundle lists its recent
+  // content whatever the last visit (cut in groupBundles); `since` only marks news.
+  const rows: BundleRow[] = pool
+    .filter(
+      (m) =>
+        m.folder_role === 'inbox' &&
+        !holdsBack(m) &&
+        !shown.has(m.id) &&
+        placements.get(m.id)?.target?.kind !== 'for_you',
+    )
+    .map((m) => ({
+      message: m,
+      sender: senderName(m),
+      subject: visible(m.header.subject ?? '(kein Betreff)'),
+      date: m.header.date ?? 0,
+      brandEmail: m.header.from_addr,
+      isNew: (m.header.date ?? 0) >= since,
+    }))
+  const bundleSections = groupBundles({
+    bundles: input.bundles,
+    placements,
+    rows,
+    since,
+    sinceLabel: sinceLabel(since, now),
+    now,
+  })
 
   // --- Greeting ---
   const n = fresh.length
@@ -643,7 +662,7 @@ export function buildToday(input: TodayInput): TodayModel {
     orders,
     orderGroups: groupOrders(orders),
     quiet,
-    asUsual,
+    bundles: bundleSections,
     held,
   }
 }

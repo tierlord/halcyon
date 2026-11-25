@@ -74,6 +74,16 @@
   -webkit-font-smoothing: antialiased;
 }
 
+/* Native controls (select menus, scrollbars) follow the theme chosen in the
+   app, not only the system setting; otherwise WebKitGTK draws a dark GTK
+   control inside the light theme. */
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+:root[data-theme='dark'] {
+  color-scheme: dark;
+}
+
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
     --bg: var(--pitch-black);

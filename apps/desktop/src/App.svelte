@@ -20,6 +20,8 @@
   import ReadingPane from './lib/ReadingPane.svelte'
   import Sidebar from './lib/Sidebar.svelte'
   import Today from './lib/Today.svelte'
+  import { BundleStore } from './lib/bundleStore.svelte'
+  import { FOR_YOU, bundleTarget } from './lib/bundles'
   import { buildToday, loadSince, saveSince, type Dismissal } from './lib/today'
   import { accountLabel } from './lib/format'
   import {
@@ -49,6 +51,10 @@
   let todayExpanded: string | null = $state(null)
   let messages: MessageSummary[] = $state([])
   let loading = $state(true)
+  /** First results of the three sources "Heute" draws its mail from (gates the placements call). */
+  let messagesLoaded = $state(false)
+  let casesLoaded = $state(false)
+  let recentLoaded = $state(false)
   let selectedId: number | null = $state(null)
   let caseItems = $state<CaseItem[]>([])
   let asideCategories = $state<AsideCategory[]>([])
@@ -58,6 +64,8 @@
   let hoveredCaseId = $state<number | null>(null)
   /** The mail of all cases, wherever it is stored (not only the visible list). */
   let caseMessages = $state<MessageSummary[]>([])
+  /** Inbox mail of the last days for "Heute", independent of the list's cap. */
+  let recentMessages = $state<MessageSummary[]>([])
   /** Your own replies to the listed mail, from the Sent folders. */
   let replyMessages = $state<MessageSummary[]>([])
   let query = $state('')
@@ -187,7 +195,7 @@
       return mock.allMockMessages()
     }
     const byId = new Map(messages.map((m) => [m.id, m]))
-    for (const m of [...caseMessages, ...replyMessages]) if (!byId.has(m.id)) byId.set(m.id, m)
+    for (const m of [...caseMessages, ...replyMessages, ...recentMessages]) if (!byId.has(m.id)) byId.set(m.id, m)
     return [...byId.values()]
   })
   const selected = $derived(messagePool.find((m) => m.id === selectedId) ?? null)
@@ -241,6 +249,27 @@
       errors = [...errors, String(e)]
     } finally {
       if (seq === requestSeq) loading = false
+      messagesLoaded = true
+      if (!searching || !recentLoaded) void loadRecent()
+    }
+  }
+
+  /** Bundles list 14 days of mail; the last visit may reach further back. */
+  const BUNDLE_WINDOW_S = 14 * 86_400
+  let recentSeq = 0
+  async function loadRecent() {
+    if (api.isMock) return
+    const seq = ++recentSeq
+    const since = Math.min(todaySince, Math.floor(Date.now() / 1000) - BUNDLE_WINDOW_S)
+    try {
+      const list = await api.inboxSince(since)
+      if (seq === recentSeq) {
+        recentMessages = list
+        recentLoaded = true
+      }
+    } catch (e) {
+      console.warn('Mails der letzten Tage nicht geladen', e)
+      recentLoaded = true
     }
   }
 
@@ -423,6 +452,7 @@
       await api.moveToJunk([m.id])
       messages = messages.filter((x) => x.id !== m.id)
       caseMessages = caseMessages.filter((x) => x.id !== m.id)
+      recentMessages = recentMessages.filter((x) => x.id !== m.id)
       if (selectedId === m.id) {
         selectedId = messages[Math.min(index, messages.length - 1)]?.id ?? null
       }
@@ -439,7 +469,7 @@
   async function acknowledgePhishing(m: MessageSummary, on: boolean) {
     try {
       await api.acknowledgePhishing(m.id, on)
-      for (const list of [messages, caseMessages, replyMessages]) {
+      for (const list of [messages, caseMessages, replyMessages, recentMessages]) {
         for (const x of list) {
           if (x.id === m.id) x.phishing = { ...x.phishing, acknowledged: on }
         }
@@ -736,6 +766,8 @@
       }
     } catch (e) {
       console.warn('Vorgänge konnten nicht geladen werden', e)
+    } finally {
+      casesLoaded = true
     }
   }
 
@@ -822,6 +854,45 @@
     p?.undo()
   }
 
+  /**
+   * Mail deleted from "Heute": hidden at once, moved to the trash when the undo
+   * window ends (or the next undoable action starts). The core cannot bring a
+   * deleted mail back, so the deletion itself waits.
+   */
+  let hiddenMails = $state<Set<number>>(new Set())
+
+  function setHiddenMails(ids: number[], hide: boolean) {
+    const next = new Set(hiddenMails)
+    for (const id of ids) {
+      if (hide) next.add(id)
+      else next.delete(id)
+    }
+    hiddenMails = next
+  }
+
+  function deleteFromToday(ids: number[], label: string) {
+    if (ids.length === 0) return
+    setHiddenMails(ids, true)
+    offerUndo({
+      label,
+      undo: () => setHiddenMails(ids, false),
+      commit: async () => {
+        try {
+          await api.deleteMessages(ids)
+          const gone = new Set(ids)
+          messages = messages.filter((x) => !gone.has(x.id))
+          if (selectedId != null && gone.has(selectedId)) selectedId = null
+          if (api.isMock) mockRev += 1
+          refreshOverview()
+          // Stays hidden: the pool may still hold the mail until the next load.
+        } catch (e) {
+          setHiddenMails(ids, false)
+          errors = [...errors, String(e)]
+        }
+      },
+    })
+  }
+
   function setTurnStatus(messageId: number, info: MessageTurnInfo | undefined) {
     const next = new Map(turnMap)
     if (info) next.set(messageId, info)
@@ -847,6 +918,10 @@
           void dismissAnomaly(d.sourceId).then(show)
         },
       })
+    } else if (d.kind === 'placed') {
+      // Taking it from "Für dich" puts it with the other mails; undo puts it back.
+      void bundleStore.apply(d.messageId, bundleTarget('other'), [], [])
+      offerUndo({ label, undo: () => void bundleStore.apply(d.messageId, FOR_YOU, [], []) })
     } else {
       const before = turnMap.get(d.messageId)
       if (before) setTurnStatus(d.messageId, { ...before, status: 'done', follow_up_due: false })
@@ -870,14 +945,39 @@
       ?.display_name?.trim()
       .split(/\s+/)[0] ?? null,
   )
+  const bundleStore = new BundleStore()
+  // One batched call for all mail "Heute" may show (newest first, capped; the
+  // cap covers the 3000 mails of `inbox_since`).
+  const PLACEMENT_CAP = 3_000
+  const placementIds = $derived.by(() => {
+    const ids = new Set<number>()
+    for (const m of messagePool) if (m.folder_role === 'inbox') ids.add(m.id)
+    for (const c of caseItems) for (const id of c.messageIds) ids.add(id)
+    for (const id of turnMap.keys()) ids.add(id)
+    return [...ids].sort((a, b) => b - a).slice(0, PLACEMENT_CAP)
+  })
+  const placementKey = $derived(placementIds.join(','))
+  const poolSettled = $derived(api.isMock || (messagesLoaded && casesLoaded && recentLoaded))
+  // The mail arrives from several sources one after the other, each changing
+  // the id set; asking at every step would run the (slow) call several times
+  // and show every intermediate result. Wait for the first complete set, then
+  // coalesce changes that follow each other closely.
+  $effect(() => {
+    void placementKey
+    if (!poolSettled) return
+    const t = setTimeout(() => untrack(() => void bundleStore.loadPlacements(placementIds)), 150)
+    return () => clearTimeout(t)
+  })
   const todayModel = $derived(
     buildToday({
       cases: caseItems,
       sources: sourceItems.filter((s) => !hiddenAnomalies.has(s.id)),
       turns: turnMap,
-      pool: messagePool,
+      pool: messagePool.filter((m) => !hiddenMails.has(m.id)),
       since: todaySince,
       firstName,
+      bundles: bundleStore.bundles,
+      placements: bundleStore.placements,
     }),
   )
   const todayOpen = $derived(
@@ -905,8 +1005,12 @@
     refreshOverview()
     load()
     loadCases()
+    void bundleStore.loadBundles()
     const unlisteners = [
-      api.onCasesChanged(loadCases),
+      api.onCasesChanged(() => {
+        loadCases()
+        void bundleStore.reload()
+      }),
       api.onSync(handleSync),
       api.onLive((s) => (live = { ...live, [s.email]: s })),
       api.onOutbox(handleOutbox),
@@ -1071,6 +1175,9 @@
             undo={pendingUndo}
             ondismiss={dismissFromToday}
             onundo={undoLast}
+            {bundleStore}
+            onofferundo={(label, undo) => offerUndo({ label, undo })}
+            ondeletemails={deleteFromToday}
           />
         {/if}
         {#if composing}

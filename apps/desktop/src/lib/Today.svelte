@@ -3,6 +3,13 @@
   // from a ready-made model (see today.ts); actions go back to App.svelte.
   import { onMount, tick } from 'svelte'
   import { slide } from 'svelte/transition'
+  import AssignLayer, { type AssignRequest } from './AssignLayer.svelte'
+  import AssignMenu from './AssignMenu.svelte'
+  import { HANDLE_HINT, assignable, dropTarget, selectedTextIn, type AssignChoice } from './assignDrag.svelte'
+  import type { BundleStore } from './bundleStore.svelte'
+  import BundleArea from './BundleArea.svelte'
+  import { FOR_YOU, bundleTarget, OTHER_KEY } from './bundles'
+  import DragGrip from './DragGrip.svelte'
   import Icon from './Icon.svelte'
   import ReadingPane from './ReadingPane.svelte'
   import { brandStyle, logoColor } from './brandColor'
@@ -25,6 +32,9 @@
     onreply,
     ondismiss,
     onundo,
+    bundleStore,
+    onofferundo,
+    ondeletemails,
   }: {
     model: TodayModel
     /** The pending "Entfernt · Rückgängig" bar; null when nothing can be undone. */
@@ -45,10 +55,15 @@
     /** Removes an item; `label` overrides the text of the undo bar. */
     ondismiss: (d: Dismissal, label?: string) => void
     onundo: () => void
+    /** Bundles and where mail belongs ("Wohin gehört das?"). */
+    bundleStore: BundleStore
+    /** Offers "Rückgängig" for a change made here. */
+    onofferundo: (label: string, undo: () => void) => void
+    /** Moves mail to the trash; the parent shows "Gelöscht · Rückgängig" and defers the deletion. */
+    ondeletemails: (ids: number[], label: string) => void
   } = $props()
 
   let logoVersion = $state(0)
-  let asUsualOpen = $state(false)
   let heldOpen = $state(false)
   let root: HTMLElement | undefined = $state()
   /** Company key of the order group whose details are open below the strip. */
@@ -86,6 +101,60 @@
     return brandStyle(sampled ?? logo?.bg ?? null, extractBrandDomain(email) ?? name)
   }
 
+  // ----- "Wohin gehört das?" ----------------------------------------------------
+
+  let layer: AssignLayer | undefined = $state()
+
+  function assign(req: AssignRequest) {
+    void layer?.start(req)
+  }
+
+  /** What dragging a "Für dich" card carries; null when the card has no mail of its own. */
+  function dragSpec(item: ForYouItem) {
+    if (item.openId == null) return null
+    return {
+      messageId: item.openId,
+      current: FOR_YOU,
+      label: item.headline,
+      brandEmail: item.brandEmail,
+      name: item.name,
+      style: brandFor(item.brandEmail, item.name),
+    }
+  }
+
+  function chooseFor(item: ForYouItem, target: AssignChoice, button: HTMLElement) {
+    if (item.openId == null) return
+    assign({
+      messageId: item.openId,
+      target,
+      current: FOR_YOU,
+      sourceEl: button.closest<HTMLElement>('[data-assignable]'),
+      button,
+      name: item.name,
+      brandEmail: item.brandEmail,
+      style: brandFor(item.brandEmail, item.name),
+    })
+  }
+
+  function chooseHeld(
+    messageId: number,
+    name: string,
+    brandEmail: string | null,
+    target: AssignChoice,
+    button: HTMLElement,
+  ) {
+    assign({
+      messageId,
+      target,
+      current: bundleTarget(OTHER_KEY),
+      sourceEl: button.closest<HTMLElement>('[data-assignable]'),
+      button,
+      name,
+      brandEmail,
+      style: brandFor(brandEmail, name),
+    })
+  }
+
   function orderBrand(o: OrderItem) {
     return o.caseItem.domain ? `info@${o.caseItem.domain}` : null
   }
@@ -119,6 +188,8 @@
   /** The whole card is the click target, except real controls and the mail itself. */
   function onCardClick(e: MouseEvent, item: ForYouItem) {
     if ((e.target as Element).closest('button, a, input, iframe, .mail')) return
+    // The end of a text selection inside the card is not a click on it.
+    if (selectedTextIn(e.currentTarget as Element)) return
     void toggleCard(item)
   }
 
@@ -225,9 +296,17 @@
 
 <svelte:window onkeydown={onWindowKey} />
 
-{#snippet avatar(email: string | null, name: string)}
+{#snippet avatar(email: string | null, name: string, handle = false)}
   {@const logo = logoFor(email)}
-  <span class="avatar" class:has-logo={!!logo} style:--logo-bg={logo?.bg ?? 'transparent'} aria-hidden="true">
+  <span
+    class="avatar"
+    class:has-logo={!!logo}
+    class:handle
+    style:--logo-bg={logo?.bg ?? 'transparent'}
+    aria-hidden="true"
+    data-drag-handle={handle ? '' : undefined}
+    title={handle ? HANDLE_HINT : undefined}
+  >
     {#if logo}
       <img src={logo.dataUrl} alt="" class:opaque={!logo.padded} />
     {:else}
@@ -437,12 +516,12 @@
 
       <div
         class="today-columns"
-        class:two-col={model.quiet.length > 0 || model.asUsual !== null}
+        class:two-col={model.quiet.length > 0 || model.bundles.length > 0 || !bundleStore.ready}
       >
         <div class="col-main">
       {#if model.forYou.length === 0}
         <section class="block" aria-labelledby="t-foryou">
-          <h2 id="t-foryou">Für dich</h2>
+          <div class="block-head" use:dropTarget={FOR_YOU}><h2 id="t-foryou">Für dich</h2></div>
           <div class="caught-up">
             <span class="cu-icon" aria-hidden="true"><Icon name="check" size={22} /></span>
             <p>Alles erledigt. Halcyon meldet sich, wenn etwas Neues für dich da ist.</p>
@@ -450,7 +529,7 @@
         </section>
       {:else}
         <section class="block" aria-labelledby="t-foryou">
-          <h2 id="t-foryou">Für dich</h2>
+          <div class="block-head" use:dropTarget={FOR_YOU}><h2 id="t-foryou">Für dich</h2></div>
           <div class="cards">
             {#each model.forYou as item, idx (item.key)}
               {@const expanded = expandedKey === item.key}
@@ -463,6 +542,8 @@
                 class:expanded
                 class:can-toggle={canToggle}
                 data-card={item.key}
+                data-assignable={item.openId != null ? '' : undefined}
+                use:assignable={dragSpec(item)}
                 style={`${brandFor(item.brandEmail, item.name)};--i:${Math.min(idx, 6)}`}
                 onclick={(e) => onCardClick(e, item)}
                 out:slide={{ duration: COLLAPSE_MS }}
@@ -479,6 +560,14 @@
                       <span class="fs-icon"><Icon name="forward" size={15} /></span>
                     </button>
                   {/if}
+                  {#if item.openId != null}
+                    <AssignMenu
+                      current={FOR_YOU}
+                      bundles={bundleStore.bundles}
+                      label={`Wohin gehört „${item.headline}“?`}
+                      onchoose={(t, b) => chooseFor(item, t, b)}
+                    />
+                  {/if}
                   <button type="button" class="dismiss" aria-label="Entfernen" onclick={() => dismissCard(item)}>
                     <Icon name="x" size={15} />
                   </button>
@@ -493,7 +582,7 @@
                   aria-controls={canToggle && expanded ? `mail-${item.key}` : undefined}
                   onkeydown={canToggle ? (e) => onHeadKey(e, item) : undefined}
                 >
-                  {@render avatar(item.brandEmail, item.name)}
+                  {@render avatar(item.brandEmail, item.name, item.openId != null)}
                   <div class="texts">
                     <p class="headline" title={item.why}>{item.headline}</p>
                     {#if item.sub}<p class="sub">{item.sub}</p>{/if}
@@ -549,7 +638,7 @@
       {/if}
         </div>
 
-      {#if model.quiet.length > 0 || model.asUsual}
+      {#if model.quiet.length > 0 || model.bundles.length > 0 || !bundleStore.ready}
         <div class="col-side">
       {#if model.quiet.length > 0}
         <section class="block" aria-labelledby="t-quiet">
@@ -577,34 +666,16 @@
         </section>
       {/if}
 
-      {#if model.asUsual}
-        <section class="block as-usual" aria-label="Wie immer">
-          <div class="usual-card">
-          <button
-            type="button"
-            class="usual-toggle"
-            aria-expanded={asUsualOpen}
-            onclick={() => (asUsualOpen = !asUsualOpen)}
-          >
-            <span class="chev"><Icon name={asUsualOpen ? 'chevronDown' : 'chevronRight'} size={16} /></span>
-            <span>{model.asUsual.summary}</span>
-          </button>
-          {#if asUsualOpen}
-            <ul class="usual-list" transition:slide={{ duration: EXPAND_MS }}>
-              {#each model.asUsual.rows as r (r.message.id)}
-                <li>
-                  <button type="button" class="usual-row" onclick={() => onopen(r.message.id)}>
-                    <span class="u-sender">{r.sender}</span>
-                    <span class="u-dot" aria-hidden="true">·</span>
-                    <span class="u-subject">{r.subject}</span>
-                  </button>
-                </li>
-              {/each}
-            </ul>
-          {/if}
-          </div>
-        </section>
-      {/if}
+      <section class="block bundles-block" aria-label="Bündel">
+        <BundleArea
+          sections={model.bundles}
+          store={bundleStore}
+          ready={bundleStore.ready}
+          onopen={onopen}
+          {assign}
+          ondelete={ondeletemails}
+        />
+      </section>
         </div>
       {/if}
       </div>
@@ -624,12 +695,32 @@
           {#if heldOpen}
             <ul class="held-list" transition:slide={{ duration: EXPAND_MS }}>
               {#each model.held.rows as r (r.message.id)}
-                <li>
+                {@const style = brandFor(r.message.header.from_addr, r.sender)}
+                <li
+                  class="held-item brand-scope"
+                  {style}
+                  data-assignable
+                  use:assignable={{
+                    messageId: r.message.id,
+                    current: bundleTarget(OTHER_KEY),
+                    label: `${r.sender}: ${r.subject}`,
+                    brandEmail: r.message.header.from_addr,
+                    name: r.sender,
+                    style,
+                  }}
+                >
+                  <DragGrip />
                   <button type="button" class="usual-row" onclick={() => onopen(r.message.id)}>
                     <span class="u-sender">{r.sender}</span>
                     <span class="u-dot" aria-hidden="true">·</span>
                     <span class="u-subject">{r.subject}</span>
                   </button>
+                  <AssignMenu
+                    current={bundleTarget(OTHER_KEY)}
+                    bundles={bundleStore.bundles}
+                    label={`Wohin gehört „${r.subject}“?`}
+                    onchoose={(t, b) => chooseHeld(r.message.id, r.sender, r.message.header.from_addr, t, b)}
+                  />
                 </li>
               {/each}
             </ul>
@@ -638,6 +729,8 @@
       {/if}
     </div>
   </div>
+
+  <AssignLayer bind:this={layer} store={bundleStore} {onofferundo} ondelete={ondeletemails} />
 
   {#if undo}
     <div class="undo-bar" role="status">
@@ -725,6 +818,16 @@
     line-height: 1.6;
     color: var(--text);
     max-width: 34em;
+  }
+
+  /* The "Für dich" heading is also a drop target while a mail is dragged. */
+  .block-head {
+    margin: -4px -10px 0;
+    padding: 4px 10px 0;
+    border-radius: 14px;
+  }
+  .bundles-block {
+    margin-bottom: 24px;
   }
 
   section h2 {
@@ -866,6 +969,22 @@
   }
   .avatar.has-logo {
     background: var(--logo-bg, white);
+  }
+  /* The tile is the drag handle. Raised by shadow only: it must not move. */
+  .avatar.handle {
+    cursor: grab;
+    user-select: none;
+    -webkit-user-select: none;
+    transition: box-shadow 0.16s ease;
+  }
+  .avatar.handle:hover {
+    box-shadow:
+      var(--tile-shadow),
+      0 4px 10px -2px color-mix(in srgb, var(--pitch-black) 32%, transparent),
+      0 0 0 2px color-mix(in srgb, var(--brand-acc, var(--highlight)) 55%, transparent);
+  }
+  .avatar.handle img {
+    pointer-events: none;
   }
   .avatar img {
     width: 70%;
@@ -1434,9 +1553,8 @@
     background: var(--hover);
   }
 
-  /* Quiet list and "Wie immer": one soft card each, comfortable rows */
-  .quiet-list,
-  .usual-card {
+  /* Quiet list: one soft card, comfortable rows */
+  .quiet-list {
     list-style: none;
     margin: 0;
     padding: 6px;
@@ -1499,26 +1617,6 @@
     white-space: nowrap;
   }
 
-  .usual-toggle {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    min-height: 48px;
-    padding: 10px 12px;
-    border: 0;
-    border-radius: 12px;
-    background: none;
-    text-align: left;
-    font-size: 15px;
-    line-height: 1.45;
-    color: var(--text-soft);
-    transition: background 0.16s ease, color 0.16s ease;
-  }
-  .usual-toggle:hover {
-    background: color-mix(in srgb, var(--text) 6%, transparent);
-    color: var(--text);
-  }
   .chev {
     display: inline-flex;
     flex: none;
@@ -1552,10 +1650,15 @@
   .held-list .usual-row {
     padding-left: 32px;
   }
-  .usual-list {
-    list-style: none;
-    margin: 2px 0 0;
-    padding: 0;
+  .held-item {
+    position: relative;
+    display: flex;
+    align-items: center;
+    padding-right: 6px;
+  }
+  .held-item .usual-row {
+    flex: 1;
+    width: auto;
   }
   .usual-row {
     display: flex;
@@ -1605,7 +1708,6 @@
     .dismiss,
     .fill,
     .quiet-list li,
-    .usual-toggle,
     .held-toggle,
     .usual-row {
       transition: none;

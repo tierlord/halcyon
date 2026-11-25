@@ -410,6 +410,35 @@
   .btn:active:not(:disabled) {
     transform: scale(0.98);
   }
+  /* Drawn by Halcyon instead of the toolkit, so it matches the pill buttons
+     in both themes. */
+  select {
+    -webkit-appearance: none;
+    appearance: none;
+    padding-right: 34px;
+  }
+  select option {
+    color: var(--text);
+    background: var(--surface-raised);
+  }
+  .year {
+    position: relative;
+    display: inline-flex;
+  }
+  .year::after {
+    content: '';
+    position: absolute;
+    right: 15px;
+    top: 50%;
+    width: 7px;
+    height: 7px;
+    margin-top: -5px;
+    border-right: 2px solid currentColor;
+    border-bottom: 2px solid currentColor;
+    transform: rotate(45deg);
+    color: var(--text-muted, var(--text));
+    pointer-events: none;
+  }
   @media (prefers-reduced-motion: reduce) {
     select,
     .btn {
