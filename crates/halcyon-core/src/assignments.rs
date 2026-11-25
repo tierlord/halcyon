@@ -329,6 +329,38 @@ struct Ctx<'a> {
     kind_index: HashMap<(String, String), usize>,
     exceptions: HashMap<i64, HashSet<String>>,
     bundles: HashMap<String, Bundle>,
+    /// Mail (by id and by Message-ID) that has any case event; lets `probe`
+    /// skip two queries per mail for the vast majority that has none.
+    linked: Linked,
+    /// The same for invoices that were read from a mail (not order placeholders).
+    invoiced: Linked,
+}
+
+/// A set of mail identified by database id or by Message-ID header.
+#[derive(Default)]
+struct Linked {
+    ids: HashSet<i64>,
+    rfcs: HashSet<String>,
+}
+
+impl Linked {
+    fn load(store: &Store, sql: &str) -> Result<Self> {
+        let mut out = Linked::default();
+        let mut stmt = store.conn.prepare(sql)?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        for row in rows {
+            let (id, rfc) = row?;
+            out.ids.extend(id);
+            out.rfcs.extend(rfc);
+        }
+        Ok(out)
+    }
+
+    fn contains(&self, row: &MailRow) -> bool {
+        self.ids.contains(&row.id) || row.rfc.as_ref().is_some_and(|r| self.rfcs.contains(r))
+    }
 }
 
 impl<'a> Ctx<'a> {
@@ -360,6 +392,14 @@ impl<'a> Ctx<'a> {
             .into_iter()
             .map(|b| (b.key.clone(), b))
             .collect();
+        let linked = Linked::load(
+            store,
+            "SELECT DISTINCT message_id, rfc_message_id FROM case_events",
+        )?;
+        let invoiced = Linked::load(
+            store,
+            "SELECT message_id, rfc_message_id FROM invoices WHERE from_order = 0",
+        )?;
         Ok(Ctx {
             env,
             now,
@@ -368,6 +408,8 @@ impl<'a> Ctx<'a> {
             kind_index,
             exceptions,
             bundles,
+            linked,
+            invoiced,
         })
     }
 
@@ -470,6 +512,101 @@ struct SourceInfo {
     mostly_promo: bool,
 }
 
+/// What a probe learns from the database (see `Store::link_facts`).
+#[derive(Clone, Copy, Default)]
+struct LinkFacts {
+    order_case: bool,
+    invoice_case: bool,
+    invoice_open: bool,
+    has_invoice_row: bool,
+}
+
+/// Probes and groups the rows of one sender. Pure (no database), so several
+/// senders can be done on different threads.
+fn group_sender(rows: Vec<MailRow>, facts: Vec<LinkFacts>, ctx: &Ctx<'_>) -> SenderKinds {
+    let probes: Vec<Probe> = rows
+        .iter()
+        .zip(facts)
+        .map(|(row, f)| Store::build_probe(row, f, ctx))
+        .collect();
+    let input: Vec<KindMail<'_>> = rows
+        .iter()
+        .zip(&probes)
+        .map(|(row, p)| KindMail {
+            subject: &row.subject,
+            features: p.features,
+        })
+        .collect();
+    let kinds = kinds::group_mails(&input);
+    let mut kind_of = vec![0; rows.len()];
+    for (k, kind) in kinds.iter().enumerate() {
+        for &m in &kind.members {
+            kind_of[m] = k;
+        }
+    }
+    let by_id = rows.iter().enumerate().map(|(i, r)| (r.id, i)).collect();
+    let by_rfc = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| r.rfc.clone().map(|rfc| (rfc, i)))
+        .collect();
+    drop(input);
+    SenderKinds {
+        rows,
+        probes,
+        kinds,
+        kind_of,
+        by_id,
+        by_rfc,
+    }
+}
+
+/// A sender with its loaded mail and the database facts per mail.
+type LoadedSender<'s> = (&'s str, Vec<MailRow>, Vec<LinkFacts>);
+
+/// `group_sender` for many senders at once, biggest first on a few threads.
+fn group_senders<'s>(
+    mut loaded: Vec<LoadedSender<'s>>,
+    ctx: &Ctx<'_>,
+) -> HashMap<&'s str, SenderKinds> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(8);
+    let total: usize = loaded.iter().map(|(_, rows, _)| rows.len()).sum();
+    // Threads cost more than they save for a small job.
+    if threads < 2 || total < 2_000 {
+        return loaded
+            .into_iter()
+            .map(|(s, rows, facts)| (s, group_sender(rows, facts, ctx)))
+            .collect();
+    }
+    loaded.sort_by_key(|(_, rows, _)| std::cmp::Reverse(rows.len()));
+    let mut buckets: Vec<Vec<LoadedSender<'s>>> = (0..threads).map(|_| Vec::new()).collect();
+    let mut load = vec![0usize; threads];
+    for item in loaded {
+        let lightest = (0..threads).min_by_key(|&t| load[t]).unwrap_or(0);
+        load[lightest] += item.1.len();
+        buckets[lightest].push(item);
+    }
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = buckets
+            .into_iter()
+            .map(|bucket| {
+                scope.spawn(move || {
+                    bucket
+                        .into_iter()
+                        .map(|(s, rows, facts)| (s, group_sender(rows, facts, ctx)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("grouping thread panicked"))
+            .collect()
+    })
+}
+
 impl Store {
     // ----- reading -----------------------------------------------------------
 
@@ -528,34 +665,53 @@ impl Store {
     }
 
     fn probe(&self, row: &MailRow, ctx: &Ctx<'_>) -> Result<Probe> {
+        Ok(Self::build_probe(row, self.link_facts(row, ctx)?, ctx))
+    }
+
+    /// The part of a probe that needs the database. Most mail has no case
+    /// event and no invoice, which `ctx` knows from two scans, so the queries
+    /// run only for the few that do.
+    fn link_facts(&self, row: &MailRow, ctx: &Ctx<'_>) -> Result<LinkFacts> {
+        let mut facts = LinkFacts::default();
+        if ctx.linked.contains(row) {
+            let links = self.case_links_of(row.id, row.rfc.as_deref())?;
+            let live = |kind: &str| {
+                links
+                    .iter()
+                    .any(|(k, status, _)| k == kind && status != "rejected")
+            };
+            facts.order_case = live("order");
+            facts.invoice_case = live("invoice");
+        }
+        if ctx.invoiced.contains(row) {
+            // Placeholder rows (`from_order`) stand for an order without invoice.
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT paid FROM invoices
+                 WHERE from_order = 0 AND (message_id = ?1 OR (?2 IS NOT NULL AND rfc_message_id = ?2))",
+            )?;
+            let paid: Vec<bool> = stmt
+                .query_map(params![row.id, row.rfc], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            facts.has_invoice_row = !paid.is_empty();
+            facts.invoice_open = paid.contains(&false);
+        }
+        Ok(facts)
+    }
+
+    /// Pure part of a probe (text analysis), safe to run on any thread.
+    fn build_probe(row: &MailRow, facts: LinkFacts, ctx: &Ctx<'_>) -> Probe {
         let mut features = KindFeatures::detect(&row.subject, row.body.as_deref());
-        let links = self.case_links_of(row.id, row.rfc.as_deref())?;
-        let live = |kind: &str| {
-            links
-                .iter()
-                .any(|(k, status, _)| k == kind && status != "rejected")
-        };
-        let order_case = live("order");
-        let invoice_case = live("invoice");
-        // Placeholder rows (`from_order`) stand for an order without invoice.
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT paid FROM invoices
-             WHERE from_order = 0 AND (message_id = ?1 OR (?2 IS NOT NULL AND rfc_message_id = ?2))",
-        )?;
-        let paid: Vec<bool> = stmt
-            .query_map(params![row.id, row.rfc], |r| r.get(0))?
-            .collect::<std::result::Result<_, _>>()?;
         let answered = ctx.is_answered(row);
-        features.has_invoice |= !paid.is_empty();
-        features.in_order_case = order_case;
+        features.has_invoice |= facts.has_invoice_row;
+        features.in_order_case = facts.order_case;
         features.is_reply = row.is_reply || answered;
-        Ok(Probe {
+        Probe {
             features,
-            order_case,
-            invoice_case,
-            invoice_open: paid.contains(&false),
+            order_case: facts.order_case,
+            invoice_case: facts.invoice_case,
+            invoice_open: facts.invoice_open,
             answered,
-        })
+        }
     }
 
     /// Groups the mail of `sender`; `extra` mails (the ones asked about) join
@@ -567,6 +723,13 @@ impl Store {
         extra: &[&MailRow],
         ctx: &Ctx<'_>,
     ) -> Result<SenderKinds> {
+        let rows = self.sender_mail(sender, since, extra)?;
+        let facts = self.sender_facts(&rows, ctx)?;
+        Ok(group_sender(rows, facts, ctx))
+    }
+
+    /// The mail of a sender plus the `extra` ones, one row per Message-ID.
+    fn sender_mail(&self, sender: &str, since: i64, extra: &[&MailRow]) -> Result<Vec<MailRow>> {
         let mut rows: Vec<MailRow> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         let mut ids: HashSet<i64> = HashSet::new();
@@ -590,39 +753,11 @@ impl Store {
             ids.insert(row.id);
             rows.push(row.clone());
         }
-        let mut probes = Vec::with_capacity(rows.len());
-        for row in &rows {
-            probes.push(self.probe(row, ctx)?);
-        }
-        let input: Vec<KindMail<'_>> = rows
-            .iter()
-            .zip(&probes)
-            .map(|(row, p)| KindMail {
-                subject: &row.subject,
-                features: p.features,
-            })
-            .collect();
-        let kinds = kinds::group_mails(&input);
-        let mut kind_of = vec![0; rows.len()];
-        for (k, kind) in kinds.iter().enumerate() {
-            for &m in &kind.members {
-                kind_of[m] = k;
-            }
-        }
-        let by_id = rows.iter().enumerate().map(|(i, r)| (r.id, i)).collect();
-        let by_rfc = rows
-            .iter()
-            .enumerate()
-            .filter_map(|(i, r)| r.rfc.clone().map(|rfc| (rfc, i)))
-            .collect();
-        Ok(SenderKinds {
-            rows,
-            probes,
-            kinds,
-            kind_of,
-            by_id,
-            by_rfc,
-        })
+        Ok(rows)
+    }
+
+    fn sender_facts(&self, rows: &[MailRow], ctx: &Ctx<'_>) -> Result<Vec<LinkFacts>> {
+        rows.iter().map(|row| self.link_facts(row, ctx)).collect()
     }
 
     /// Whether the sender is someone the user deals with: a thread
@@ -809,14 +944,23 @@ impl Store {
         let since = ctx.now - WINDOW_SECS;
         let mut sources: HashMap<i64, Option<SourceInfo>> = HashMap::new();
         let mut out: Vec<Option<Placement>> = vec![None; rows.len()];
-        for (sender, idxs) in by_sender {
-            let asked: Vec<&MailRow> = idxs.iter().map(|&i| &rows[i]).collect();
+        // Loading is sequential (one connection); the text analysis and the
+        // grouping of a sender's whole history, which dominate for senders
+        // with thousands of mails, run on all cores.
+        let mut loaded: Vec<LoadedSender<'_>> = Vec::new();
+        for (sender, idxs) in &by_sender {
             // Without a sender there is nothing to compare with.
-            let kinds = if sender.is_empty() {
-                None
-            } else {
-                Some(self.sender_kinds(sender, since, &asked, ctx)?)
-            };
+            if sender.is_empty() {
+                continue;
+            }
+            let asked: Vec<&MailRow> = idxs.iter().map(|&i| &rows[i]).collect();
+            let mail = self.sender_mail(sender, since, &asked)?;
+            let facts = self.sender_facts(&mail, ctx)?;
+            loaded.push((sender, mail, facts));
+        }
+        let mut grouped = group_senders(loaded, ctx);
+        for (sender, idxs) in by_sender {
+            let kinds = grouped.remove(sender);
             for &i in &idxs {
                 let row = &rows[i];
                 if let Some(p) = self.held_back_placement(row, ctx) {
@@ -1603,6 +1747,58 @@ mod tests {
     /// Assignments are made at this time; fixtures sit before or after it.
     const ASSIGNED_AT: i64 = 2_000_000;
     const NOW: i64 = 3_000_000;
+
+    /// Timing of `placements` for the newest 800 and 3000 mail of a large synthetic
+    /// mailbox. Run with `cargo test -p halcyon-core --release -- --ignored
+    /// --nocapture placements_bench`.
+    #[test]
+    #[ignore]
+    fn placements_bench() {
+        let mut fx = Fx::new();
+        let now = 1_700_000_000_i64;
+        let mut batch = Vec::new();
+        for (uid, n) in (1u32..).zip(0..30_000u32) {
+            // Five heavy senders hold half of the mail; the rest is spread.
+            let s = if n % 2 == 0 {
+                n / 2 % 5
+            } else {
+                5 + (n / 2) % 295
+            };
+            batch.push(MessageHeader {
+                uid,
+                message_id: Some(format!("<b{uid}@example.net>")),
+                subject: Some(format!("Angebot Nummer {} für dich", n % 40)),
+                from_addr: Some(format!("sender{s}@example.com")),
+                to: vec![ME.into()],
+                date: Some(now - i64::from(30_000 - n) * 120),
+                dmarc_pass: true,
+                ..Default::default()
+            });
+        }
+        fx.store.insert_messages(fx.inbox, &batch).unwrap();
+        let ids: Vec<i64> = {
+            let mut stmt = fx
+                .store
+                .conn
+                .prepare("SELECT id FROM messages ORDER BY date DESC LIMIT 3000")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        for n in [800, 3000] {
+            for run in 0..3 {
+                let t = std::time::Instant::now();
+                let out = fx.store.placements(&ids[..n], now).unwrap();
+                eprintln!(
+                    "placements({n}) run {run}: {:?} ({} placements)",
+                    t.elapsed(),
+                    out.len()
+                );
+            }
+        }
+    }
 
     struct Fx {
         store: Store,

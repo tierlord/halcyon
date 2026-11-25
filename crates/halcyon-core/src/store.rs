@@ -1250,6 +1250,20 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Inbox mail of all accounts dated `since` or later, newest first. "Heute"
+    /// needs a whole time window, which the capped list of a view may not
+    /// reach into on a busy mailbox.
+    pub fn inbox_since(&self, since: i64, limit: usize) -> Result<Vec<MessageSummary>> {
+        let sql = format!(
+            "{SUMMARY_SELECT}
+             WHERE f.role = 'inbox' AND COALESCE(m.date, 0) >= ?1
+             ORDER BY m.date DESC LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![since, limit as i64], summary_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Mail carrying `\Flagged` in any folder but trash and junk. Only
     /// some servers have a flagged folder, so the flag is the source of
     /// truth. A mail filed in several folders (an "All Mail" copy next to the

@@ -229,6 +229,17 @@ fn messages(
     store.messages(account_id, role, LIST_LIMIT).map_err(err)
 }
 
+/// Inbox mail since a time, for the window "Heute" shows (see `Store::inbox_since`).
+#[tauri::command]
+fn inbox_since(state: State<'_, AppState>, since: i64) -> CmdResult<Vec<MessageSummary>> {
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .inbox_since(since, 3_000)
+        .map_err(err)
+}
+
 #[tauri::command]
 fn search(state: State<'_, AppState>, query: String) -> CmdResult<Vec<MessageSummary>> {
     state
@@ -1977,6 +1988,7 @@ pub fn run() {
             restore_turn,
             mask_message_preview,
             messages_by_ids,
+            inbox_since,
             sent_replies,
             placements,
             assignment_preview,
