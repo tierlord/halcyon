@@ -508,6 +508,139 @@ ON CONFLICT (from_addr) DO UPDATE SET
     replied_count = MAX(sender_behavior.replied_count, excluded.replied_count),
     last_action_at = MAX(sender_behavior.last_action_at, excluded.last_action_at);
 "#,
+    // 21: what the user assigned to a mail or a kind of mail ("Will ich
+    // sehen", "Nebenbei", "Brauche ich nicht"; see `assignments`). Mails are
+    // keyed by RFC `Message-ID` so an assignment survives moves between
+    // folders; a kind is keyed by sender address and `kind_key`. `created_at`
+    // matters: "never" only acts on mail that arrives after it. Exceptions
+    // are the mails the user took out of a kind assignment.
+    r#"
+CREATE TABLE assignments (
+    id             INTEGER PRIMARY KEY,
+    scope          TEXT NOT NULL CHECK (scope IN ('mail', 'kind')),
+    rfc_message_id TEXT,
+    sender         TEXT,
+    kind_key       TEXT,
+    target         TEXT NOT NULL CHECK (target IN ('want', 'side', 'never')),
+    created_at     INTEGER NOT NULL,
+    CHECK ((scope = 'mail' AND rfc_message_id IS NOT NULL)
+        OR (scope = 'kind' AND sender IS NOT NULL AND kind_key IS NOT NULL))
+);
+CREATE UNIQUE INDEX assignments_mail ON assignments(rfc_message_id) WHERE scope = 'mail';
+CREATE UNIQUE INDEX assignments_kind ON assignments(sender, kind_key) WHERE scope = 'kind';
+
+-- Looking up all mail of a sender (previews, grouping) must not scan the
+-- table; the query uses exactly this expression.
+CREATE INDEX messages_from_norm ON messages(lower(trim(COALESCE(from_addr, ''))));
+
+CREATE TABLE assignment_exceptions (
+    assignment_id  INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    rfc_message_id TEXT NOT NULL,
+    PRIMARY KEY (assignment_id, rfc_message_id)
+);
+"#,
+    // 22: bundles ("Übersichten", "Werbung", ...; see `bundles`). The user
+    // answers "Wohin gehört das?" with "Für dich" or a bundle, so the
+    // targets `want` / `side` / `never` of migration 21 become `for_you` /
+    // `bundle:<key>`. Old rows map to what they did: `want` -> `for_you`,
+    // `side` -> `bundle:other` (quiet, no extra effect), `never` ->
+    // `bundle:promo` (quiet and marked read).
+    //
+    // SQLite cannot alter a CHECK constraint, so `assignments` is rebuilt
+    // with its ids. Dropping it would cascade into `assignment_exceptions`
+    // (foreign keys are on), hence the exceptions are parked and restored.
+    // `mark_read_since` makes a later switch of `mark_read` act only on mail
+    // that arrives afterwards.
+    r#"
+CREATE TABLE bundles (
+    id              INTEGER PRIMARY KEY,
+    key             TEXT NOT NULL UNIQUE,
+    name            TEXT NOT NULL,
+    builtin         INTEGER NOT NULL DEFAULT 0,
+    position        INTEGER NOT NULL,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    presentation    TEXT NOT NULL DEFAULT 'collapsed'
+                    CHECK (presentation IN ('shelf', 'collapsed')),
+    mark_read       INTEGER NOT NULL DEFAULT 0,
+    mark_read_since INTEGER NOT NULL DEFAULT 0,
+    created_at      INTEGER NOT NULL
+);
+INSERT INTO bundles (key, name, builtin, position, enabled, presentation, mark_read, created_at)
+VALUES
+    ('overviews',  'Übersichten',           1,    0, 1, 'shelf',     0, CAST(strftime('%s', 'now') AS INTEGER)),
+    ('account',    'Konto & Hinweise',      1,    1, 1, 'collapsed', 0, CAST(strftime('%s', 'now') AS INTEGER)),
+    ('newsletter', 'Newsletter & Aktuelles', 1,   2, 1, 'collapsed', 0, CAST(strftime('%s', 'now') AS INTEGER)),
+    ('promo',      'Werbung',               1,    3, 1, 'collapsed', 1, CAST(strftime('%s', 'now') AS INTEGER)),
+    ('social',     'Soziales',              1,    4, 0, 'collapsed', 0, CAST(strftime('%s', 'now') AS INTEGER)),
+    ('other',      'Weitere Mails',         1, 1000, 1, 'collapsed', 0, CAST(strftime('%s', 'now') AS INTEGER));
+
+CREATE TABLE assignment_exceptions_parked AS SELECT assignment_id, rfc_message_id FROM assignment_exceptions;
+DROP TABLE assignment_exceptions;
+
+CREATE TABLE assignments_new (
+    id             INTEGER PRIMARY KEY,
+    scope          TEXT NOT NULL CHECK (scope IN ('mail', 'kind')),
+    rfc_message_id TEXT,
+    sender         TEXT,
+    kind_key       TEXT,
+    target         TEXT NOT NULL CHECK (target = 'for_you' OR target LIKE 'bundle:_%'),
+    created_at     INTEGER NOT NULL,
+    CHECK ((scope = 'mail' AND rfc_message_id IS NOT NULL)
+        OR (scope = 'kind' AND sender IS NOT NULL AND kind_key IS NOT NULL))
+);
+INSERT INTO assignments_new (id, scope, rfc_message_id, sender, kind_key, target, created_at)
+SELECT id, scope, rfc_message_id, sender, kind_key,
+       CASE target
+           WHEN 'want' THEN 'for_you'
+           WHEN 'side' THEN 'bundle:other'
+           ELSE 'bundle:promo'
+       END,
+       created_at
+FROM assignments;
+DROP TABLE assignments;
+ALTER TABLE assignments_new RENAME TO assignments;
+CREATE UNIQUE INDEX assignments_mail ON assignments(rfc_message_id) WHERE scope = 'mail';
+CREATE UNIQUE INDEX assignments_kind ON assignments(sender, kind_key) WHERE scope = 'kind';
+
+CREATE TABLE assignment_exceptions (
+    assignment_id  INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+    rfc_message_id TEXT NOT NULL,
+    PRIMARY KEY (assignment_id, rfc_message_id)
+);
+INSERT INTO assignment_exceptions SELECT assignment_id, rfc_message_id FROM assignment_exceptions_parked;
+DROP TABLE assignment_exceptions_parked;
+"#,
+    // 23: phishing check (see `phishing`, `phishing_store`). The verdict is
+    // kept on the message: `phishing_level` 0 none, 1 suspicious, 2 phishing;
+    // `phishing_reasons` is the JSON list of what fired (NULL when clean).
+    // `name_history` counts how often a display-name word came from a
+    // DMARC-verified sender of a base domain; `name_learned` makes sure a
+    // mail counts once even if it is moved to another folder (a new row).
+    // `phishing_acknowledged` is the local "Ich kenne den Absender", keyed
+    // like `name_learned` (RFC `Message-ID`, else folder and UID). Nothing
+    // here ever reaches the server.
+    r#"
+ALTER TABLE messages ADD COLUMN phishing_level INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN phishing_score INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN phishing_reasons TEXT;
+CREATE INDEX messages_phishing ON messages(date DESC) WHERE phishing_level > 0;
+
+CREATE TABLE name_history (
+    token       TEXT NOT NULL,
+    base_domain TEXT NOT NULL,
+    count       INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (token, base_domain)
+);
+
+CREATE TABLE name_learned (
+    key TEXT PRIMARY KEY
+);
+
+CREATE TABLE phishing_acknowledged (
+    key        TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+"#,
 ];
 
 /// Result of looking up a domain in the persistent brand logo cache.
@@ -551,7 +684,7 @@ impl std::str::FromStr for Interaction {
     }
 }
 
-fn unix_now() -> i64 {
+pub(crate) fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -707,6 +840,16 @@ const ZSTD_LEVEL: i32 = 3;
 
 /// Characters of text kept as list preview.
 const PREVIEW_CHARS: usize = 180;
+
+/// What the turn assessment needs to know about the user.
+pub(crate) struct TurnEnv {
+    /// Addresses of the user's accounts, lowercase.
+    pub own: Vec<String>,
+    /// Addresses the user has written to.
+    pub correspondents: std::collections::HashSet<String>,
+    /// `Message-ID`s the user answered, with the date of the latest answer.
+    pub answered: std::collections::HashMap<String, i64>,
+}
 
 pub struct Store {
     /// Shared with the other store-backed modules (`invoices`).
@@ -959,7 +1102,19 @@ impl Store {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
                  ON CONFLICT (folder_id, uid) DO UPDATE SET flags = excluded.flags, dmarc_pass = excluded.dmarc_pass",
             )?;
+            let mut exists =
+                tx.prepare_cached("SELECT 1 FROM messages WHERE folder_id = ?1 AND uid = ?2")?;
+            // Only rows that are new get a phishing verdict from their
+            // headers; for known ones the verdict (maybe from the body) stays.
+            let mut new_uids: Vec<u32> = Vec::new();
             for h in headers {
+                if exists
+                    .query_row(params![folder_id, h.uid], |_| Ok(()))
+                    .optional()?
+                    .is_none()
+                {
+                    new_uids.push(h.uid);
+                }
                 stmt.execute(params![
                     folder_id,
                     h.uid,
@@ -985,6 +1140,14 @@ impl Store {
                 tx.query_row("SELECT role FROM folders WHERE id = ?1", [folder_id], |r| {
                     r.get(0)
                 })?;
+            for uid in new_uids {
+                let id: i64 = tx.query_row(
+                    "SELECT id FROM messages WHERE folder_id = ?1 AND uid = ?2",
+                    params![folder_id, uid],
+                    |r| r.get(0),
+                )?;
+                crate::phishing_store::assess_headers(&tx, id)?;
+            }
             let sent = role.as_deref() == Some("sent");
             let now = unix_now();
             if sent {
@@ -1181,7 +1344,7 @@ impl Store {
     /// Stores the raw message and the text extracted from it.
     pub fn store_body(&self, message_id: i64, raw: &[u8]) -> Result<()> {
         let content = crate::content::parse(raw);
-        let text = content.text.unwrap_or_default();
+        let text = content.text.clone().unwrap_or_default();
         let preview = make_preview(&text);
         let has_attachments = content.attachments.iter().any(|a| !a.inline);
         // The full original has every header, also those the header-only
@@ -1202,6 +1365,14 @@ impl Store {
             params![message_id, text, preview, has_attachments, dmarc_pass],
         )?;
         tx.commit()?;
+        // The body shows what headers cannot: hidden characters in the text,
+        // links, the shape of a lure.
+        crate::phishing_store::assess_with_body(
+            &self.conn,
+            message_id,
+            Some(&text),
+            content.html.as_deref(),
+        )?;
         Ok(())
     }
 
@@ -2024,7 +2195,8 @@ impl Store {
                     COALESCE(m.subject, ''), m.body_text, m.in_reply_to, m.refs,
                     m.message_id, m.source_id,
                     EXISTS (SELECT 1 FROM case_scan cs
-                            WHERE cs.message_id = m.id AND cs.with_body = 1)
+                            WHERE cs.message_id = m.id AND cs.with_body = 1),
+                    m.phishing_level
              FROM messages m JOIN folders f ON f.id = m.folder_id
              WHERE f.role = 'inbox' AND m.date >= ?1
                AND NOT EXISTS (SELECT 1 FROM filing_scan fs WHERE fs.message_id = m.id)
@@ -2046,6 +2218,7 @@ impl Store {
                 rfc_message_id: r.get(8)?,
                 source_id: r.get(9)?,
                 linked: r.get(10)?,
+                phishing_level: r.get(11)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -3063,7 +3236,10 @@ impl Store {
         Ok(())
     }
 
-    /// Evaluates conversation turn status ("Wer ist am Zug?") for a batch of message IDs.
+    /// Evaluates conversation turn status ("Wer ist am Zug?") for a batch of
+    /// message IDs. What the user assigned (see `assignments`) is applied on
+    /// top: mail put on "Nebenbei" or "Brauche ich nicht" no longer asks for
+    /// an answer, unless it is protected.
     pub fn assess_messages_turns(
         &self,
         message_ids: &[i64],
@@ -3072,108 +3248,132 @@ impl Store {
         if message_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let own: Vec<String> = self
-            .accounts()?
-            .into_iter()
-            .map(|a| a.email.to_ascii_lowercase())
-            .collect();
-        // Once per call: the sent folder can hold thousands of recipients.
-        let correspondents = self.sent_recipient_addresses()?;
-        let answered = self.answered_message_ids()?;
+        let env = self.turn_env()?;
         let mut out = Vec::with_capacity(message_ids.len());
         for &id in message_ids.iter().take(500) {
-            if let Some(msg) = self.message(id)? {
-                // A mail is judged on its own, so without this an answered
-                // question would keep asking for an answer.
-                let from_me = msg
-                    .header
-                    .from_addr
-                    .as_deref()
-                    .is_some_and(|a| own.contains(&a.trim().to_ascii_lowercase()));
-                let answered_at = msg
-                    .header
-                    .message_id
-                    .as_deref()
-                    .and_then(|rfc| answered.get(rfc).copied());
-                // `\\Answered` is set by the replying client on the original,
-                // so it also covers replies whose sent copy never reached us.
-                let flagged = msg.header.flags.iter().any(|f| f == "\\Answered");
-                if !from_me
-                    && msg.folder_role != Some(FolderRole::Sent)
-                    && (flagged || answered_at.is_some_and(|at| at >= msg.header.date.unwrap_or(0)))
-                {
-                    out.push((
-                        id,
-                        crate::turn::TurnAssessment {
-                            status: crate::turn::TurnStatus::Done,
-                            confidence: 0.95,
-                            reason: "Du hast schon geantwortet".into(),
-                        },
-                    ));
-                    continue;
-                }
-                // `$HalcyonDone` from the server is the same decision made on
-                // another device.
-                if msg
-                    .header
-                    .flags
-                    .iter()
-                    .any(|f| f == crate::filing::KEYWORD_DONE)
-                    || self.is_turn_dismissed(msg.header.message_id.as_deref())?
-                {
-                    out.push((
-                        id,
-                        crate::turn::TurnAssessment {
-                            status: crate::turn::TurnStatus::Done,
-                            confidence: 1.0,
-                            reason: "Von dir als erledigt entfernt".into(),
-                        },
-                    ));
-                    continue;
-                }
-                let (body, source_total): (String, Option<i64>) = self
-                    .conn
-                    .query_row(
-                        "SELECT COALESCE(m.body_text, m.preview, ''), s.total_messages
-                         FROM messages m LEFT JOIN sources s ON s.id = m.source_id
-                         WHERE m.id = ?1",
-                        [id],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )
-                    .unwrap_or_default();
-                let from = msg
-                    .header
-                    .from_addr
-                    .as_deref()
-                    .unwrap_or("")
-                    .trim()
-                    .to_ascii_lowercase();
-                let is_reply =
-                    msg.header.in_reply_to.is_some() || !msg.header.references.is_empty();
-                let behavior = self.sender_behavior(&from, now).unwrap_or_default();
-                let context = crate::turn::TurnContext {
-                    known_correspondent: is_reply || correspondents.contains(&from),
-                    recurring_source: source_total
-                        .is_some_and(|n| n >= crate::turn::RECURRING_SOURCE_MIN_MESSAGES),
-                    behavior,
-                };
-                let turn = crate::turn::assess_turn_with_context(
-                    &msg.header,
-                    &body,
-                    &own,
-                    now,
-                    Some(context),
-                );
+            if let Some(turn) = self.assess_turn_raw(id, &env, now)? {
                 out.push((id, turn));
             }
         }
+        self.apply_assignments_to_turns(&mut out, &env, now)?;
         Ok(out)
+    }
+
+    /// What every turn assessment needs to know about the user. Loaded once
+    /// per call: the sent folder can hold thousands of recipients.
+    pub(crate) fn turn_env(&self) -> Result<TurnEnv> {
+        Ok(TurnEnv {
+            own: self
+                .accounts()?
+                .into_iter()
+                .map(|a| a.email.to_ascii_lowercase())
+                .collect(),
+            correspondents: self.sent_recipient_addresses()?,
+            answered: self.answered_message_ids()?,
+        })
+    }
+
+    /// Turn assessment of one stored mail by the rules alone; `None` if the
+    /// mail does not exist.
+    pub(crate) fn assess_turn_raw(
+        &self,
+        id: i64,
+        env: &TurnEnv,
+        now: i64,
+    ) -> Result<Option<crate::turn::TurnAssessment>> {
+        let own = &env.own;
+        let Some(msg) = self.message(id)? else {
+            return Ok(None);
+        };
+        // A mail is judged on its own, so without this an answered
+        // question would keep asking for an answer.
+        let from_me = msg
+            .header
+            .from_addr
+            .as_deref()
+            .is_some_and(|a| own.contains(&a.trim().to_ascii_lowercase()));
+        let answered_at = msg
+            .header
+            .message_id
+            .as_deref()
+            .and_then(|rfc| env.answered.get(rfc).copied());
+        // `\\Answered` is set by the replying client on the original,
+        // so it also covers replies whose sent copy never reached us.
+        let flagged = msg.header.flags.iter().any(|f| f == "\\Answered");
+        if !from_me
+            && msg.folder_role != Some(FolderRole::Sent)
+            && (flagged || answered_at.is_some_and(|at| at >= msg.header.date.unwrap_or(0)))
+        {
+            return Ok(Some(crate::turn::TurnAssessment {
+                status: crate::turn::TurnStatus::Done,
+                confidence: 0.95,
+                reason: "Du hast schon geantwortet".into(),
+            }));
+        }
+        // `$HalcyonDone` from the server is the same decision made on
+        // another device.
+        if msg
+            .header
+            .flags
+            .iter()
+            .any(|f| f == crate::filing::KEYWORD_DONE)
+            || self.is_turn_dismissed(msg.header.message_id.as_deref())?
+        {
+            return Ok(Some(crate::turn::TurnAssessment {
+                status: crate::turn::TurnStatus::Done,
+                confidence: 1.0,
+                reason: "Von dir als erledigt entfernt".into(),
+            }));
+        }
+        // Mail that tries to look like someone else asks for nothing: the
+        // honest answer to "Wer ist am Zug?" is that nobody should answer
+        // yet. Without this, a lure's "act now" wording would put it on top
+        // of "Heute".
+        if msg.phishing.holds_back() {
+            return Ok(Some(crate::turn::TurnAssessment {
+                status: crate::turn::TurnStatus::ReadingAlong,
+                confidence: 1.0,
+                reason: "Wirkt verdächtig; wird nicht als Aufgabe gezeigt".into(),
+            }));
+        }
+        let (body, source_total): (String, Option<i64>) = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(m.body_text, m.preview, ''), s.total_messages
+                 FROM messages m LEFT JOIN sources s ON s.id = m.source_id
+                 WHERE m.id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or_default();
+        let from = msg
+            .header
+            .from_addr
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let is_reply = msg.header.in_reply_to.is_some() || !msg.header.references.is_empty();
+        let behavior = self.sender_behavior(&from, now).unwrap_or_default();
+        let context = crate::turn::TurnContext {
+            known_correspondent: is_reply || env.correspondents.contains(&from),
+            recurring_source: source_total
+                .is_some_and(|n| n >= crate::turn::RECURRING_SOURCE_MIN_MESSAGES),
+            behavior,
+        };
+        Ok(Some(crate::turn::assess_turn_with_context(
+            &msg.header,
+            &body,
+            own,
+            now,
+            Some(context),
+        )))
     }
 
     /// `Message-ID`s the user has replied to, with the date of the latest
     /// reply. Recorded when a sent mail is stored and kept after that mail
     /// is gone; every mail of the thread up to the reply counts as answered.
-    fn answered_message_ids(&self) -> Result<std::collections::HashMap<String, i64>> {
+    pub(crate) fn answered_message_ids(&self) -> Result<std::collections::HashMap<String, i64>> {
         let mut stmt = self
             .conn
             .prepare("SELECT rfc_message_id, answered_at FROM answered_mails")?;
@@ -3410,11 +3610,16 @@ impl Store {
 }
 
 // Lists the columns instead of `m.*` so lists never load the full body text.
-const SUMMARY_SELECT: &str = "
+pub(crate) const SUMMARY_SELECT: &str = "
     SELECT m.id, m.folder_id, m.uid, m.message_id, m.in_reply_to, m.refs, m.subject,
            m.from_name, m.from_addr, m.reply_to, m.to_addrs, m.cc_addrs, m.date, m.size,
            m.flags, m.list_id, m.list_unsubscribe, m.list_unsubscribe_post, m.dmarc_pass,
            m.preview, m.has_attachments,
+           m.phishing_level, m.phishing_reasons,
+           (m.phishing_level > 0 AND EXISTS (
+               SELECT 1 FROM phishing_acknowledged pa
+               WHERE pa.key = COALESCE(NULLIF(m.message_id, ''), 'f' || m.folder_id || ':' || m.uid)
+           )) AS phishing_ack,
            EXISTS (SELECT 1 FROM message_bodies b WHERE b.message_id = m.id) AS has_body,
            f.account_id AS account_id, f.path AS folder_path, f.role AS folder_role,
            a.email AS account_email
@@ -3573,7 +3778,7 @@ fn folder_from_row(row: &Row<'_>) -> rusqlite::Result<Folder> {
     })
 }
 
-fn summary_from_row(row: &Row<'_>) -> rusqlite::Result<MessageSummary> {
+pub(crate) fn summary_from_row(row: &Row<'_>) -> rusqlite::Result<MessageSummary> {
     Ok(MessageSummary {
         id: row.get("id")?,
         account_id: row.get("account_id")?,
@@ -3588,6 +3793,14 @@ fn summary_from_row(row: &Row<'_>) -> rusqlite::Result<MessageSummary> {
         preview: row.get("preview")?,
         has_attachments: row.get("has_attachments")?,
         has_body: row.get("has_body")?,
+        phishing: crate::phishing::PhishingInfo {
+            level: crate::phishing::Level::from_db(row.get("phishing_level")?),
+            reasons: row
+                .get::<_, Option<String>>("phishing_reasons")?
+                .and_then(|j| serde_json::from_str(&j).ok())
+                .unwrap_or_default(),
+            acknowledged: row.get("phishing_ack")?,
+        },
         header: MessageHeader {
             uid: row.get("uid")?,
             message_id: row.get("message_id")?,
@@ -3719,6 +3932,95 @@ fn case_key_from_row(row: &Row<'_>) -> rusqlite::Result<CaseKey> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn migration_22_maps_old_targets_and_keeps_exceptions() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        for sql in &MIGRATIONS[..21] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 21).unwrap();
+        conn.execute_batch(
+            "INSERT INTO assignments (id, scope, rfc_message_id, sender, kind_key, target, created_at)
+             VALUES (5, 'mail', '<a@example.net>', NULL, NULL, 'want', 100),
+                    (7, 'kind', NULL, 'shop@example.com', 'k1', 'side', 200),
+                    (9, 'kind', NULL, 'shop@example.com', 'k2', 'never', 300);
+             INSERT INTO assignment_exceptions VALUES (7, '<x@example.net>'), (9, '<y@example.net>');",
+        )
+        .unwrap();
+
+        let store = Store::init(conn).unwrap();
+        let rows: Vec<(i64, String, i64)> = store
+            .conn
+            .prepare("SELECT id, target, created_at FROM assignments ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (5, "for_you".to_string(), 100),
+                (7, "bundle:other".to_string(), 200),
+                (9, "bundle:promo".to_string(), 300),
+            ]
+        );
+        let exceptions: Vec<(i64, String)> = store
+            .conn
+            .prepare("SELECT assignment_id, rfc_message_id FROM assignment_exceptions ORDER BY 1")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            exceptions,
+            vec![
+                (7, "<x@example.net>".to_string()),
+                (9, "<y@example.net>".to_string())
+            ]
+        );
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version as usize, MIGRATIONS.len());
+
+        // The new constraints hold, and exceptions still follow their
+        // assignment.
+        assert!(
+            store
+                .conn
+                .execute(
+                    "INSERT INTO assignments (scope, rfc_message_id, target, created_at)
+                     VALUES ('mail', '<b@example.net>', 'want', 1)",
+                    [],
+                )
+                .is_err()
+        );
+        store.remove_assignment(7).unwrap();
+        let left: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM assignment_exceptions", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(left, 1);
+        // The unique index of kinds survived the rebuild.
+        assert!(
+            store
+                .conn
+                .execute(
+                    "INSERT INTO assignments (scope, sender, kind_key, target, created_at)
+                     VALUES ('kind', 'shop@example.com', 'k2', 'for_you', 1)",
+                    [],
+                )
+                .is_err()
+        );
+        assert_eq!(store.bundles().unwrap().len(), 6);
+    }
     use super::*;
 
     fn account(email: &str) -> Account {

@@ -13,6 +13,7 @@ import type {
   FolderRole,
   MessageSummary,
   Overview,
+  PhishingInfo,
   ServerConfig,
   SyncUpdate,
 } from './types'
@@ -126,6 +127,7 @@ function msg(
     dmarcPass?: boolean
     inReplyTo?: string
     preview?: string
+    phishing?: PhishingInfo
   } = {},
 ): MessageSummary {
   const account = accounts.find((a) => a.id === accountId)!
@@ -147,6 +149,7 @@ function msg(
     preview: opts.preview ?? previewFor(subject),
     has_attachments: /Rechnung|Vertrag/.test(subject),
     has_body: true,
+    phishing: opts.phishing ?? { level: 'none', reasons: [], acknowledged: false },
     header: {
       uid: id,
       message_id: `${id}@example.invalid`,
@@ -168,6 +171,16 @@ function msg(
     },
   }
 }
+
+// A lure built from invented parts, with the techniques of the real thing:
+// zero-width spaces inside the words of name, subject and text, an
+// organisation-like name on a random address, one short text with one button
+// whose host is written with percent-encoded characters. It is meant to be
+// held back (banner, "Heute", no notification).
+const ZW = '\u200b'
+const split = (word: string) => [...word].join(ZW)
+const LURE_URL = 'https://exa%6dple.%65xample.invalid/p/1'
+const LURE_TEXT = `Ihre ${split('Rückerstattung')} steht bereit. ${split('Bestätigen')} Sie Ihre Angaben ${split('sofort')}, sonst verfällt der Anspruch nach Ablauf der ${split('Frist')}.`
 
 const all: MessageSummary[] = [
   msg(1, ['Telekom', 'rechnung@telekom.example'], 'Ihre Rechnung für November 2026', 25 * 60),
@@ -216,6 +229,39 @@ const all: MessageSummary[] = [
     msg(3, ['Gewinnspiel', `gewinn${n}@lotto.example`], `Sie haben gewonnen! (${n})`, n * 5 * hour, {
       folder: { id: 34, path: 'Junk', name: 'Spam', role: 'junk' },
     }),
+  ),
+  msg(
+    1,
+    [`${split('BEISPIELAMT')} ${split('Erstattungsverwaltungsportal')}`, 'k7x2m9q4vb81@webmail.example.invalid'],
+    `${split('Gewerbesteuerzahlung')}: ${split('Statusabgleich')} Ihrer Zahlung`,
+    3.5 * hour,
+    {
+      dmarcPass: true,
+      preview: LURE_TEXT.replaceAll(ZW, ''),
+      phishing: {
+        level: 'phishing',
+        acknowledged: false,
+        reasons: [
+          { code: 'link_host_encoded', text: 'Ein Link versteckt sein Ziel mit kodierten Zeichen im Servernamen.' },
+          {
+            code: 'invisible_name',
+            text: 'Der Absendername enthält unsichtbare Zeichen. Das ist ein Trick, um Filter zu umgehen.',
+          },
+          {
+            code: 'invisible_subject',
+            text: 'Der Betreff enthält unsichtbare Zeichen mitten in Wörtern. So werden Stichwortfilter umgangen.',
+          },
+          {
+            code: 'official_random',
+            text: 'Der Name klingt nach einer Behörde oder einem Dienst, die Absenderadresse sieht aber zufällig erzeugt aus.',
+          },
+          {
+            code: 'lure_shape',
+            text: 'Kurze Mail mit einem Link und Druck oder Geldthema (zum Beispiel Zahlung oder Frist).',
+          },
+        ],
+      },
+    },
   ),
 ]
 
@@ -428,7 +474,9 @@ export function messageContent(id: number, allowRemote: boolean, _dark: boolean)
   const isNewsletter = !!m?.header.list_unsubscribe.length
   let body: string
   let blocked = 0
-  if (isNewsletter) {
+  if (m && m.phishing.level !== 'none') {
+    body = `<p>${escapeHtml(LURE_TEXT)}</p><p><a href="${LURE_URL}" style="display:inline-block;padding:10px 18px;background:#1698b5;color:#fff;border-radius:6px;text-decoration:none">Jetzt prüfen</a></p>`
+  } else if (isNewsletter) {
     blocked = allowRemote ? 0 : 2
     const banner = allowRemote
       ? '<img alt="Banner" src="https://picsum.photos/560/120">'
@@ -472,6 +520,27 @@ export function deleteMessages(ids: number[]): Promise<number> {
   const before = all.length
   for (let i = all.length - 1; i >= 0; i--) if (ids.includes(all[i].id)) all.splice(i, 1)
   return delay(before - all.length, 50)
+}
+
+export function moveToJunk(ids: number[]): Promise<number> {
+  let moved = 0
+  for (const m of all) {
+    if (!ids.includes(m.id) || m.folder_role === 'junk') continue
+    const junk = accounts.find((a) => a.id === m.account_id)?.folders.find((f) => f.role === 'junk')
+    if (!junk) return Promise.reject('Dieses Konto hat keinen Spam-Ordner.')
+    m.folder_id = junk.id
+    m.folder_path = junk.path
+    m.folder_name = junk.name
+    m.folder_role = 'junk'
+    moved += 1
+  }
+  return delay(moved, 50)
+}
+
+export function acknowledgePhishing(messageId: number, on: boolean): Promise<void> {
+  const m = all.find((x) => x.id === messageId)
+  if (m) m.phishing = { ...m.phishing, acknowledged: on }
+  return delay(undefined, 30)
 }
 
 export function composeReply(id: number, kind: ReplyKind) {

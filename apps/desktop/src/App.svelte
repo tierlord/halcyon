@@ -182,7 +182,10 @@
   const liveOffline = $derived(liveStates.filter((s) => s.state === 'offline'))
 
   const messagePool = $derived.by(() => {
-    if (api.isMock) return mock.allMockMessages()
+    if (api.isMock) {
+      void mockRev
+      return mock.allMockMessages()
+    }
     const byId = new Map(messages.map((m) => [m.id, m]))
     for (const m of [...caseMessages, ...replyMessages]) if (!byId.has(m.id)) byId.set(m.id, m)
     return [...byId.values()]
@@ -399,6 +402,49 @@
         selectedId = messages[Math.min(index, messages.length - 1)]?.id ?? null
       }
       refreshOverview()
+    } catch (e) {
+      errors = [...errors, String(e)]
+    }
+  }
+
+  /** Bumped after a change in the browser preview, whose sample data is not reactive. */
+  let mockRev = $state(0)
+
+  function hasJunkFolder(m: MessageSummary | null): boolean {
+    if (!m || m.folder_role === 'junk') return false
+    const account = (overview as Overview | null)?.accounts.find((a) => a.id === m.account_id)
+    return !!account?.folders.some((f) => f.role === 'junk')
+  }
+
+  /** The banner's "In den Spam-Ordner": the user asked for it, nothing moves on its own. */
+  async function junkMessage(m: MessageSummary) {
+    const index = messages.findIndex((x) => x.id === m.id)
+    try {
+      await api.moveToJunk([m.id])
+      messages = messages.filter((x) => x.id !== m.id)
+      caseMessages = caseMessages.filter((x) => x.id !== m.id)
+      if (selectedId === m.id) {
+        selectedId = messages[Math.min(index, messages.length - 1)]?.id ?? null
+      }
+      if (todayOpenId === m.id) todayOpenId = null
+      mockRev += 1
+      refreshOverview()
+      showToast({ kind: 'done', text: 'In den Spam-Ordner verschoben.' }, 3000)
+    } catch (e) {
+      errors = [...errors, String(e)]
+    }
+  }
+
+  /** "Ich kenne den Absender": kept locally, collapses the banner. */
+  async function acknowledgePhishing(m: MessageSummary, on: boolean) {
+    try {
+      await api.acknowledgePhishing(m.id, on)
+      for (const list of [messages, caseMessages, replyMessages]) {
+        for (const x of list) {
+          if (x.id === m.id) x.phishing = { ...x.phishing, acknowledged: on }
+        }
+      }
+      mockRev += 1
     } catch (e) {
       errors = [...errors, String(e)]
     }
@@ -1006,6 +1052,9 @@
             ontoggleflag={toggleFlag}
             ondelete={(m) => deleteMessage(m)}
             onreply={reply}
+            hasJunk={hasJunkFolder(todayOpen)}
+            onjunk={junkMessage}
+            onacknowledge={acknowledgePhishing}
           />
         {:else}
           <Today
@@ -1082,6 +1131,9 @@
             ontoggleflag={toggleFlag}
             ondelete={(m) => deleteMessage(m)}
             onreply={reply}
+            hasJunk={hasJunkFolder(selected)}
+            onjunk={junkMessage}
+            onacknowledge={acknowledgePhishing}
           />
         {:else}
           <CaseBoard

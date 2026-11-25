@@ -346,6 +346,9 @@ pub struct MessageSummary {
     pub preview: Option<String>,
     pub has_attachments: bool,
     pub has_body: bool,
+    /// Verdict of the phishing check (see [`crate::phishing`]).
+    #[serde(default)]
+    pub phishing: crate::phishing::PhishingInfo,
 }
 
 impl MessageSummary {

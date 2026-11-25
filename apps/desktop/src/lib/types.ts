@@ -21,6 +21,17 @@ export interface MessageHeader {
   dmarc_pass: boolean
 }
 
+export type PhishingLevel = 'none' | 'suspicious' | 'phishing'
+
+/** Verdict of the phishing check (mirrors halcyon_core::phishing::PhishingInfo). */
+export interface PhishingInfo {
+  level: PhishingLevel
+  /** Short German reasons, strongest first; empty when the level is "none". */
+  reasons: { code: string; text: string }[]
+  /** The user said "Ich kenne den Absender" (kept locally). */
+  acknowledged: boolean
+}
+
 export interface MessageSummary {
   id: number
   account_id: number
@@ -32,6 +43,7 @@ export interface MessageSummary {
   preview: string | null
   has_attachments: boolean
   has_body: boolean
+  phishing: PhishingInfo
   header: MessageHeader
 }
 

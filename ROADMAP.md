@@ -45,6 +45,9 @@
       2. Absender-Echtheit aus `Authentication-Results` (SPF, DKIM, DMARC),
          nicht passende Anzeigenamen („PayPal" von fremder Domain),
          gefälschte Links (Linktext ≠ Ziel)
+         – Phishing-Prüfung mit Begründung ist umgesetzt (`phishing.rs`,
+         Hinweis im Lesebereich, „Heute" hält Verdächtiges zurück); offen:
+         Auswertung von SPF/DKIM einzeln, Lernen aus dem Urteil des Nutzers
       3. Lokal lernender Filter (naiver Bayes über Header und Text), trainiert
          durch „Spam"/„Kein Spam" des Nutzers; Korrekturen auch per
          `$Junk`/`$NotJunk` an den Server zurückmelden

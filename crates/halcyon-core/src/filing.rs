@@ -74,10 +74,19 @@ pub struct FilingFacts {
     /// The ledger invoice made from this mail: settled or not.
     pub invoice_paid: Option<bool>,
     pub source: Option<SourceFacts>,
+    /// The user put this kind of mail into a bundle that marks mail read;
+    /// only mail newer than this time (Unix seconds) counts. Already `None`
+    /// for protected mail.
+    pub filed_since: Option<i64>,
+    /// The phishing check flagged the mail. Marking it read would make it
+    /// look dealt with, which is the opposite of what it needs.
+    pub suspicious: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FiledAs {
+    /// New mail of a kind the user put into a bundle that marks it read.
+    Unneeded,
     OrderStep,
     SettledInvoice,
     QuietSource,
@@ -89,6 +98,7 @@ pub enum Skip {
     AlreadyRead,
     NotInbox,
     BeforeStart,
+    Suspicious,
     Unauthenticated,
     OneTimeCode,
     Conversation,
@@ -122,6 +132,11 @@ pub fn decide(f: &FilingFacts, since: i64, enabled: bool) -> Verdict {
     if f.date < since {
         return Verdict::Skip(BeforeStart);
     }
+    // A verified sender only proves the domain, not the name it claims, so
+    // this comes before the sender check.
+    if f.suspicious {
+        return Verdict::Skip(Suspicious);
+    }
     // Forged mail must not look filed, and phishing is exactly what the
     // user should still see.
     if !f.dmarc_pass {
@@ -142,6 +157,11 @@ pub fn decide(f: &FilingFacts, since: i64, enabled: bool) -> Verdict {
     }
     if f.invoice_paid == Some(false) {
         return Verdict::Skip(OpenInvoice);
+    }
+    // Only mail that arrived after the decision: whatever existed before
+    // stays as it is on the server.
+    if f.filed_since.is_some_and(|at| f.date > at) {
+        return Verdict::Mark(FiledAs::Unneeded);
     }
     if matches!(
         f.order_step_of,
@@ -177,6 +197,7 @@ pub(crate) struct Candidate {
     pub source_id: Option<i64>,
     /// The case linker has looked at the mail with its text.
     pub linked: bool,
+    pub phishing_level: i64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -254,6 +275,12 @@ pub fn run(store: &mut Store, now: i64) -> Result<FilingReport> {
         judged.push((c, facts));
     }
 
+    let ids: Vec<i64> = judged.iter().map(|(c, _)| c.id).collect();
+    let marked_by_bundle = store.mark_read_assignments(&ids, now)?;
+    for (c, facts) in &mut judged {
+        facts.filed_since = marked_by_bundle.get(&c.id).copied();
+    }
+
     // The turn assessment is the costly signal: ask it only for mail that
     // would otherwise be marked, and in one call.
     let probe: Vec<i64> = judged
@@ -315,6 +342,8 @@ fn facts_of(store: &Store, c: &Candidate) -> Result<FilingFacts> {
         case_needs_you,
         invoice_paid: store.invoice_paid_of(c.id)?,
         source,
+        filed_since: None,
+        suspicious: c.phishing_level > 0,
     })
 }
 
@@ -338,6 +367,8 @@ mod tests {
             case_needs_you: false,
             invoice_paid: None,
             source: None,
+            filed_since: None,
+            suspicious: false,
         }
     }
 
@@ -376,6 +407,53 @@ mod tests {
             ..order_mail()
         };
         assert_eq!(verdict(&rejected), Verdict::Skip(Skip::NotFiled));
+    }
+
+    #[test]
+    fn never_files_suspicious_mail() {
+        // Everything else says "file it": a settled order step from a
+        // verified sender.
+        let f = FilingFacts {
+            suspicious: true,
+            ..order_mail()
+        };
+        assert_eq!(verdict(&f), Verdict::Skip(Skip::Suspicious));
+        let bundled = FilingFacts {
+            order_step_of: None,
+            filed_since: Some(SINCE + 5),
+            suspicious: true,
+            ..order_mail()
+        };
+        assert_eq!(verdict(&bundled), Verdict::Skip(Skip::Suspicious));
+    }
+
+    #[test]
+    fn files_bundle_mail_only_after_the_decision() {
+        let unneeded = |date, filed_since| FilingFacts {
+            order_step_of: None,
+            date,
+            filed_since,
+            ..order_mail()
+        };
+        assert_eq!(
+            verdict(&unneeded(SINCE + 50, Some(SINCE + 40))),
+            Verdict::Mark(FiledAs::Unneeded)
+        );
+        // Older than the decision, or the same second: left alone.
+        assert_eq!(
+            verdict(&unneeded(SINCE + 30, Some(SINCE + 40))),
+            Verdict::Skip(Skip::NotFiled)
+        );
+        assert_eq!(
+            verdict(&unneeded(SINCE + 40, Some(SINCE + 40))),
+            Verdict::Skip(Skip::NotFiled)
+        );
+        // The other guard rails still win.
+        let code = FilingFacts {
+            has_code: true,
+            ..unneeded(SINCE + 50, Some(SINCE + 40))
+        };
+        assert_eq!(verdict(&code), Verdict::Skip(Skip::OneTimeCode));
     }
 
     #[test]
@@ -778,6 +856,33 @@ mod tests {
         let again = run(&mut store, now + 60).unwrap();
         assert_eq!(again.marked, 0);
         assert!(!flags_of(&store, fresh).contains(&seen));
+    }
+
+    #[test]
+    fn the_pass_never_marks_flagged_mail_read() {
+        let (mut store, account_id, folder) = inbox_store(true);
+        let now = 10_000;
+        let plain = add_mail(&mut store, folder, 1, now + 5, "<a@shop.example.com>");
+        let flagged = add_mail(&mut store, folder, 2, now + 6, "<b@shop.example.com>");
+        for id in [plain, flagged] {
+            file_in_source(&store, id, "mute");
+        }
+        // The check ran when the body arrived; here it is set directly.
+        store
+            .conn
+            .execute(
+                "UPDATE messages SET phishing_level = 1 WHERE id = ?1",
+                [flagged],
+            )
+            .unwrap();
+
+        let report = run(&mut store, now).unwrap();
+        assert_eq!(report.marked, 1);
+        let seen = "\\Seen".to_string();
+        assert!(flags_of(&store, plain).contains(&seen));
+        assert!(!flags_of(&store, flagged).contains(&seen));
+        // Only the plain mail produced server changes (Seen + keyword).
+        assert_eq!(store.pending_ops(account_id).unwrap().len(), 2);
     }
 
     #[test]

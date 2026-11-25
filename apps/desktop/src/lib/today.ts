@@ -2,6 +2,7 @@
 // Pure functions only: the view (Today.svelte) renders, App.svelte wires actions.
 
 import type { CaseItem, CaseEvent, CaseStatus } from './cases'
+import { holdsBack } from './phishing'
 import type {
   MessageSummary,
   MessageTurnInfo,
@@ -95,8 +96,13 @@ export function relativeDays(n: number): string {
   return `vor ${n} Tagen`
 }
 
+/** Text without invisible characters: what a mail shows is not what it contains. */
+function visible(s: string): string {
+  return s.replace(/[\u00ad\u034f\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, '')
+}
+
 function senderName(m: MessageSummary): string {
-  return m.header.from_name?.trim() || m.header.from_addr?.split('@')[0] || 'Jemand'
+  return visible(m.header.from_name?.trim() || m.header.from_addr?.split('@')[0] || 'Jemand')
 }
 
 function normalizedSubject(m: MessageSummary): string {
@@ -218,6 +224,13 @@ export interface AsUsualRow {
   subject: string
 }
 
+/** Mail the phishing check holds back: not counted, not a task, no card. */
+export interface HeldBack {
+  /** "1 verdächtige Mail zurückgehalten" */
+  summary: string
+  rows: AsUsualRow[]
+}
+
 export interface TodayModel {
   dateLine: string
   greeting: string
@@ -227,6 +240,8 @@ export interface TodayModel {
   orderGroups: OrderGroup[]
   quiet: QuietItem[]
   asUsual: { summary: string; rows: AsUsualRow[] } | null
+  /** One quiet line at the very end; null when nothing is held back. */
+  held: HeldBack | null
 }
 
 export const ORDER_STEPS = ['Bestellt', 'Versendet', 'In Zustellung', 'Angekommen'] as const
@@ -391,6 +406,9 @@ export function buildToday(input: TodayInput): TodayModel {
   for (const c of cases.filter((c) => c.status === 'needs_you')) {
     const incoming = latestMessageId(c, true)
     const m = msg(incoming)
+    // A lure can look like an invoice or a deadline and make its own case;
+    // that is no task for the user.
+    if (m && holdsBack(m)) continue
     let headline: string
     let sub: string | null = c.title
     if (c.amount && (c.kind === 'invoice' || c.kind === 'contract')) {
@@ -465,6 +483,7 @@ export function buildToday(input: TodayInput): TodayModel {
       continue
     }
     if (t.status !== 'needs_you' || m.folder_role === 'sent') continue
+    if (holdsBack(m)) continue
     if (caseMsgIds.has(m.id)) continue // the case card already covers it
     const thread = `${m.header.from_addr}|${normalizedSubject(m)}`
     if (seenThreads.has(thread) || newestOfThread.get(thread)?.id !== m.id) continue
@@ -551,9 +570,24 @@ export function buildToday(input: TodayInput): TodayModel {
   }
 
   // --- Wie immer ---
-  const fresh = pool
+  const recent = pool
     .filter((m) => m.folder_role === 'inbox' && (m.header.date ?? 0) >= since)
     .sort((a, b) => (b.header.date ?? 0) - (a.header.date ?? 0))
+  // Held-back mail is neither counted nor sorted into a group: it must not
+  // look like part of the day, only be findable.
+  const fresh = recent.filter((m) => !holdsBack(m))
+  const heldMails = recent.filter((m) => holdsBack(m))
+  const held: HeldBack | null =
+    heldMails.length > 0
+      ? {
+          summary: `${heldMails.length} ${plural(heldMails.length, 'verdächtige Mail', 'verdächtige Mails')} zurückgehalten`,
+          rows: heldMails.map((m) => ({
+            message: m,
+            sender: senderName(m),
+            subject: visible(m.header.subject ?? '(kein Betreff)'),
+          })),
+        }
+      : null
   const rest = fresh.filter((m) => !shown.has(m.id))
   const counts = new Map<string, number>()
   const bump = (k: string) => counts.set(k, (counts.get(k) ?? 0) + 1)
@@ -581,7 +615,7 @@ export function buildToday(input: TodayInput): TodayModel {
           rows: rest.map((m) => ({
             message: m,
             sender: senderName(m),
-            subject: m.header.subject ?? '(kein Betreff)',
+            subject: visible(m.header.subject ?? '(kein Betreff)'),
           })),
         }
       : null
@@ -610,6 +644,7 @@ export function buildToday(input: TodayInput): TodayModel {
     orderGroups: groupOrders(orders),
     quiet,
     asUsual,
+    held,
   }
 }
 

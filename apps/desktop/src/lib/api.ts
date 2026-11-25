@@ -169,6 +169,16 @@ export function deleteMessages(ids: number[]): Promise<number> {
   return native ? invoke('delete_messages', { ids }) : mock.deleteMessages(ids)
 }
 
+/** Moves messages to the account's spam folder; rejects if the account has none. */
+export function moveToJunk(ids: number[]): Promise<number> {
+  return native ? invoke('move_to_junk', { ids }) : mock.moveToJunk(ids)
+}
+
+/** "Ich kenne den Absender": a local note on a flagged mail, never sent anywhere. */
+export function acknowledgePhishing(messageId: number, on: boolean): Promise<void> {
+  return native ? invoke('acknowledge_phishing', { messageId, on }) : mock.acknowledgePhishing(messageId, on)
+}
+
 /** Pre-filled reply, reply-all or forward for a message. */
 export function composeReply(
   id: number,

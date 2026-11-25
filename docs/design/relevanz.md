@@ -1,6 +1,6 @@
 # Relevanz lernen – Konzept
 
-Stand: 24.11.2026 · Status: Konzept
+Stand: 25.11.2026 · Status: Konzept
 
 Baut auf [Wer ist am Zug?](am-zug.md) und
 [Kategorien und Vorgänge erkennen](klassifizierung.md) auf. Dieses Konzept
@@ -47,17 +47,49 @@ Entscheidungen erspart.
 
 ## Wohin eine Mail gehören kann
 
-Das Netz sagt für jede Mail, wo sie hingehört. Die Ziele sind dieselben, die
-der Nutzer kennt:
+Vorbild ist die Benachrichtigungs-Sortierung von Android (seit Android 16
+auf Pixel-Geräten): Unwichtiges landet nach **Inhalt** in benannten,
+leisen, zusammengeklappten Bündeln – nicht stört, aber griffbereit ist.
 
-| Ziel | Bedeutung | Ansicht |
+Halcyon stellt deshalb nur eine Frage: **Wohin gehört das?** Die Antwort ist
+entweder **Für dich** oder **ein Bündel**. Bündel heißen nach dem, was drin
+ist, nicht nach einer Entscheidung; das versteht man ohne Erklärung.
+
+| Ziel | Was hinein gehört | Wie es auf „Heute" erscheint |
 |---|---|---|
-| **Für dich** | will ich sehen, will vielleicht etwas von mir | Karte unter „Für dich" |
-| **Nebenbei** | ganz nett, aber nicht dringend | Zeile unter „Läuft von allein" / „Wie immer" |
-| **Brauche ich nicht** | soll mich nicht stören | stumm, als gelesen markiert |
+| **Für dich** | will etwas von dir oder interessiert dich jetzt | Karte unter „Für dich", mit Benachrichtigung |
+| **Übersichten** | regelmäßige, persönliche Auszüge und Berichte: Kontoauszug, Depot- oder Verbrauchsübersicht, Zusammenfassung deiner Anzeigen | sichtbares, ruhiges Fach: je Absender nur der neueste Stand als kleine Kachel („Kontoauszug November liegt bereit"), ältere dahinter |
+| **Konto & Hinweise** | Ereignisse rund um deine Konten: Anmeldung, Passwort geändert, neue Bedingungen, Bestätigungen | zusammengeklappt |
+| **Newsletter & Aktuelles** | Newsletter, Blogs, Neuigkeiten von Diensten | zusammengeklappt |
+| **Werbung** | Angebote, Rabatte, Gewinnspiele | zusammengeklappt |
+| **Soziales** *(später, abschaltbar)* | Likes, Kommentare, Kontaktanfragen | zusammengeklappt |
+| **Weitere Mails** | was noch keinem Bündel zugeordnet ist | zusammengeklappt, ganz unten |
+
+- **Bündel sind immer leise**: keine Benachrichtigung, kein Zähler, kein
+  Punkt. Aufgeklappt zeigen sie ihre Mails als Karten oder Zeilen.
+- **Übersichten liegen bereit, statt zu stören.** Sie sind das einzige
+  Bündel, das nicht zusammengeklappt ist, sondern als schmales Fach mit
+  Kacheln sichtbar bleibt – wie die Bestell-Leiste. Halcyon kennt das schon
+  als Quell-Einstellung „nur Stand zeigen".
+- **Einstellungen gehören zum Bündel, nicht zur einzelnen Mail.** Zum
+  Beispiel: *Werbung* wird gleich als gelesen markiert, *Übersichten*
+  nicht. Was früher „Nebenbei" und „Brauche ich nicht" unterschied, steckt
+  jetzt in diesen Einstellungen.
+- **Anders als sonst** (siehe [am-zug.md](am-zug.md)) holt eine Mail aus
+  ihrem Bündel nach „Für dich": ein Kontoauszug mit ungewöhnlichem Betrag,
+  ein Anmelde-Hinweis von einem neuen Gerät.
+- **Bündel sind erweiterbar**: Wer mag, legt ein eigenes an (z. B. „Verein").
+  Die eingebauten Bündel bringen eine Beschreibung und Startbeispiele mit,
+  damit die Einordnung ab dem ersten Tag funktioniert.
+- **Vorsichtige Voreinstellung**: Anfangs sortiert Halcyon nur, wo es sicher
+  ist (Abmelde-Link, bekannte Quellen, Werbewörter, Konto-Hinweise); der
+  Rest bleibt in „Weitere Mails", bis du ihn zuordnest oder das Netz sicher
+  ist.
 
 Ob eine Mail eine **Antwort** von dir braucht, entscheidet weiter die
-Bewertung „wer ist am Zug". Das Netz entscheidet, ob sie dich **interessiert**.
+Bewertung „wer ist am Zug". Das Netz entscheidet, **wohin** sie gehört.
+
+Auf „Heute" ersetzen die Bündel die bisherige Zeile „Wie immer".
 
 ## Rückmeldungen
 
@@ -81,14 +113,14 @@ weiß Halcyon nur über das Gelesen-Flag des Servers.
 Am Anfang fehlen Rückmeldungen. Deshalb fragt Halcyon aktiv – aber so, dass
 es sich nicht nach Arbeit anfühlt:
 
-- **Drei einfache Antworten**, immer dieselben: *Will ich sehen* ·
-  *Nebenbei* · *Brauche ich nicht*. Keine Kategorien, keine Ordner.
-- **Ziehen und Ablegen**: Mails und Karten lassen sich auf drei Ablagezonen
-  ziehen, die beim Ziehen am Rand erscheinen. Klicken geht immer auch
-  (Tastatur, Touchpad, Barrierefreiheit).
-- **Direkt an Ort und Stelle**: Eine Mail aus „Wie immer" nach oben ziehen
-  heißt „will ich sehen", eine Karte aus „Für dich" nach unten heißt
-  „nebenbei". Jede Karte und Zeile hat dafür auch ein kleines Menü.
+- **Eine einfache Frage**: *Wohin gehört das?* Antworten sind „Für dich"
+  und die Bündel, immer dieselben, mit ihren Namen.
+- **Ziehen und Ablegen**: Mails und Karten lassen sich auf „Für dich" oder
+  ein Bündel ziehen; beim Ziehen werden die Bündel als Ablagestapel
+  sichtbar. Klicken geht immer auch (Menü, Tastatur, Barrierefreiheit).
+- **Direkt an Ort und Stelle**: Eine Mail aus einem Bündel nach oben ziehen
+  heißt „für dich", eine Karte aus „Für dich" in ein Bündel ziehen ordnet sie
+  dort ein. Jede Karte und Zeile hat dafür auch ein kleines Menü.
 - **Eine Antwort, viele Mails – mit Vorschau**: Nach der Zuordnung zeigt
   Halcyon, **welche Mails dieselbe Zuordnung bekämen**, damit „alle dieser
   Art" greifbar wird (siehe unten).
@@ -145,7 +177,8 @@ eine **Art von Mail**, und Halcyon zeigt vorher, was sie trifft.
 Keine Liste mit Häkchen, sondern eine Szene direkt an der Mail (Grundsätze
 in [design/interaktion.md](../../design/interaktion.md)):
 
-1. Du ziehst eine Mail auf „Brauche ich nicht" oder wählst es im Menü.
+1. Du ziehst eine Mail in ein Bündel (z. B. *Werbung*) oder wählst es im
+   Menü.
 2. Der Rest der Ansicht tritt leicht zurück (abgedunkelt, unscharf). Die
    Mail bleibt hervorgehoben stehen.
 3. Aus ihr heraus gleiten die **Gruppen als kleine Stapel** in einer Reihe
@@ -160,7 +193,7 @@ in [design/interaktion.md](../../design/interaktion.md)):
 6. Von Halcyon erkannte Ausnahmen liegen schon beiseite, mit ihrem Satz,
    warum.
 7. **Übernehmen**: Die ausgewählten Stapel ziehen sich zusammen und gleiten
-   in Richtung ihres Ziels (z. B. nach unten zu „Wie immer"), die Ansicht
+   in ihr Bündel, die Ansicht
    kehrt zurück. Ein Hinweis bietet „Rückgängig" an.
 8. Escape oder ein Klick daneben bricht ab; alles gleitet an seinen Platz
    zurück.
@@ -197,14 +230,14 @@ wieder; nach zwei Korrekturen fragt Halcyon dort wieder nach.
 
 Jede Entscheidung zeigt ihr „Warum?", aus einer dieser Quellen:
 
-- deine Zuordnung („Du hast Mails von X auf ‚Nebenbei' gelegt")
+- deine Zuordnung („Du hast Mails dieser Art in *Werbung* gelegt")
 - ähnliche Mails („ähnlich wie 6 Mails, die du ungelesen gelöscht hast")
 - die stärksten Merkmale („du öffnest Mails mit Terminen fast immer")
 
 ## Risiken
 
 - **Blind lernen**: Was das Netz versteckt, kann nie positiv bewertet
-  werden. Gegenmittel: unsichere Fälle bleiben sichtbar (in „Wie immer"),
+  werden. Gegenmittel: unsichere Fälle bleiben in „Weitere Mails" sichtbar,
   und gelegentlich zeigt Halcyon eine versteckte Mail als Frage.
 - **Zu viele Fragen**: Tageslimit, Stopp bei Sicherheit, abschaltbar.
 - **Veränderte Interessen**: Rückmeldungen klingen ab (Halbwertszeit wie bei
@@ -231,8 +264,8 @@ Jede Entscheidung zeigt ihr „Warum?", aus einer dieser Quellen:
 
 | # | Aufgabe | Abhängig von |
 |---|---|---|
-| R1 | Zuordnung „Will ich sehen / Nebenbei / Brauche ich nicht" pro Mail, Absender und Muster speichern; Leitplanken und Vorrang wie oben | – |
-| R2 | Oberfläche: Menü an Karten und Zeilen, Ziehen und Ablegen, Vorschau der betroffenen Mails nach Betreffmuster mit Ausnahmen | R1 |
+| R1 | Zuordnung „Für dich" oder Bündel pro Mail und Art von Mail speichern, Bündel mit Einstellungen; Leitplanken und Vorrang wie oben | – |
+| R2 | Oberfläche: Bündel auf „Heute" (statt „Wie immer"), Fach für Übersichten, Menü an Karten und Zeilen, Ziehen und Ablegen, Vorschau der betroffenen Mails mit Ausnahmen | R1 |
 | R3 | Fragerunde auf „Heute" mit Auswahl nach Nutzen, Tageslimit und Stopp bei Sicherheit | R1, R2 |
 | R4 | KI-Paket-Verwaltung (Download, Prüfsummen, Entfernen), Embedding-Modell anbinden, Vektoren berechnen | – |
 | R5 | Persönliches Netz: Training aus Rückmeldungen, Sicherheit pro Absender und Muster, „Warum?" | R1, R4 |
@@ -254,8 +287,9 @@ Jede Entscheidung zeigt ihr „Warum?", aus einer dieser Quellen:
 - Welches Embedding-Modell und welches Sprachmodell? Kandidaten mit guter
   deutscher Qualität und freier Lizenz vergleichen; Größe und Rechenzeit auf
   einem typischen Notebook messen.
-- Drei Ziele oder vier? Ein eigenes Ziel „muss ich handeln" könnte die
-  Bewertung „wer ist am Zug" ergänzen, macht die Auswahl aber schwerer.
+- Werden die Bündelnamen sofort verstanden? Mit drei, vier Leuten ohne
+  Erklärung testen: Was erwarten sie, wenn sie eine Mail dorthin ziehen?
+- Braucht es „Soziales" und eigene Bündel gleich zu Beginn, oder erst später?
 - Wie gut trennt das Embedding-Modell Arten von Mails desselben Absenders
   (Angebote, Versand, Konto)? Vor dem Bau mit dem eigenen Postfach messen;
   ohne KI-Paket bleibt das Betreffmuster plus Extraktor-Merkmale der

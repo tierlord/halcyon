@@ -12,8 +12,10 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use halcyon_core::assignments::{Assignment, AssignmentPreview, Placement, Target};
 use halcyon_core::autoconfig::{self, Candidate};
 use halcyon_core::brand::{self, BrandLogo};
+use halcyon_core::bundles::{Bundle, BundlePatch, Presentation};
 use halcyon_core::cases::{CaseStatus, CaseView};
 use halcyon_core::content::{self, Attachment, Rendered};
 use halcyon_core::imap::{self, Credentials};
@@ -1085,6 +1087,38 @@ fn delete_messages(app: AppHandle, state: State<'_, AppState>, ids: Vec<i64>) ->
     Ok(deleted)
 }
 
+/// Moves messages to the junk folder of their account. The user asked for
+/// it (banner of the phishing check); nothing moves on its own.
+#[tauri::command]
+fn move_to_junk(app: AppHandle, state: State<'_, AppState>, ids: Vec<i64>) -> CmdResult<usize> {
+    let moved = state
+        .store
+        .lock()
+        .map_err(err)?
+        .queue_move_to_junk(&ids)
+        .map_err(|e| match e {
+            halcyon_core::Error::Other(m) if m.contains("junk") => {
+                "Dieses Konto hat keinen Spam-Ordner.".to_string()
+            }
+            e => e.to_string(),
+        })?;
+    if moved > 0 {
+        schedule_flush(&app);
+    }
+    Ok(moved)
+}
+
+/// "Ich kenne den Absender": a local note on the mail, nothing is sent.
+#[tauri::command]
+fn acknowledge_phishing(state: State<'_, AppState>, message_id: i64, on: bool) -> CmdResult<()> {
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .set_phishing_acknowledged(message_id, on)
+        .map_err(err)
+}
+
 /// Sends queued local changes in the background. Calls while a run is active
 /// make it run once more instead of starting a second one.
 fn schedule_flush(app: &AppHandle) {
@@ -1282,6 +1316,24 @@ pub(crate) fn schedule_link(app: &AppHandle) {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
+            // One time only, before anything reads the verdicts: assess the
+            // existing mail of the last weeks for phishing.
+            match store.phishing_backfill(now) {
+                Ok(Some(report)) => {
+                    tracing::info!(?report, "phishing check of existing mail done");
+                    if report.flagged > 0 {
+                        let _ = app.emit(
+                            "mail-changed",
+                            watch::MailChanged {
+                                account_id: 0,
+                                new_messages: 0,
+                            },
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(error = %e, "phishing check of existing mail failed"),
+            }
             match linker::run(&mut store, now) {
                 Ok(report) if report.changed() => {
                     tracing::info!(?report, "cases updated");
@@ -1567,6 +1619,171 @@ async fn export_invoices(state: State<'_, AppState>, year: i32) -> CmdResult<Inv
     .map_err(err)?
 }
 
+// ----- assignments ("Für dich" or a bundle) and bundles ----------------------
+
+/// Where each mail belongs: what the user assigned or the bundle chosen
+/// automatically (`origin`), with its kind of mail and any reason it is
+/// protected from being bundled.
+#[tauri::command]
+async fn placements(
+    state: State<'_, AppState>,
+    message_ids: Vec<i64>,
+) -> CmdResult<Vec<Placement>> {
+    let db_path = state.db_path.clone();
+    // Own connection: grouping a sender's mail must not block other queries.
+    tauri::async_runtime::spawn_blocking(move || {
+        Store::open(&db_path)
+            .and_then(|store| store.placements(&message_ids, now_unix_secs()))
+            .map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// All mail of the sender grouped by kind, to show what "alle dieser Art"
+/// would take along before the user confirms.
+#[tauri::command]
+async fn assignment_preview(
+    state: State<'_, AppState>,
+    message_id: i64,
+    target: Target,
+) -> CmdResult<AssignmentPreview> {
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        Store::open(&db_path)
+            .and_then(|store| store.assignment_preview(message_id, target, now_unix_secs()))
+            .map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Records the assignment. `target` is `{ "kind": "for_you" }` or
+/// `{ "kind": "bundle", "bundle": "<key>" }`: for the mail alone (no `kind_keys`) or for the
+/// chosen kinds of its sender. Returns the ids for "Rückgängig".
+#[tauri::command]
+fn apply_assignment(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    message_id: i64,
+    target: Target,
+    kind_keys: Vec<String>,
+    excluded_message_ids: Vec<i64>,
+) -> CmdResult<Vec<i64>> {
+    let ids = state
+        .store
+        .lock()
+        .map_err(err)?
+        .apply_assignment(
+            message_id,
+            target,
+            &kind_keys,
+            &excluded_message_ids,
+            now_unix_secs(),
+        )
+        .map_err(err)?;
+    assignments_changed(&app);
+    Ok(ids)
+}
+
+#[tauri::command]
+fn remove_assignment(app: AppHandle, state: State<'_, AppState>, id: i64) -> CmdResult<()> {
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .remove_assignment(id)
+        .map_err(err)?;
+    assignments_changed(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn assignments(state: State<'_, AppState>) -> CmdResult<Vec<Assignment>> {
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .list_assignments()
+        .map_err(err)
+}
+
+/// All bundles in display order, `other` last.
+#[tauri::command]
+fn bundles(state: State<'_, AppState>) -> CmdResult<Vec<Bundle>> {
+    state.store.lock().map_err(err)?.bundles().map_err(err)
+}
+
+#[tauri::command]
+fn create_bundle(app: AppHandle, state: State<'_, AppState>, name: String) -> CmdResult<Bundle> {
+    let bundle = state
+        .store
+        .lock()
+        .map_err(err)?
+        .create_bundle(&name)
+        .map_err(err)?;
+    assignments_changed(&app);
+    Ok(bundle)
+}
+
+/// Changes what is given; the rest stays. `position` is the index among the
+/// bundles above `other`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn update_bundle(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    key: String,
+    name: Option<String>,
+    enabled: Option<bool>,
+    presentation: Option<Presentation>,
+    mark_read: Option<bool>,
+    position: Option<usize>,
+) -> CmdResult<Bundle> {
+    let bundle = state
+        .store
+        .lock()
+        .map_err(err)?
+        .update_bundle(
+            &key,
+            &BundlePatch {
+                name,
+                enabled,
+                presentation,
+                mark_read,
+                position,
+            },
+        )
+        .map_err(err)?;
+    assignments_changed(&app);
+    Ok(bundle)
+}
+
+/// Deletes a custom bundle; what the user put into it moves to "Weitere Mails".
+#[tauri::command]
+fn delete_bundle(app: AppHandle, state: State<'_, AppState>, key: String) -> CmdResult<()> {
+    state
+        .store
+        .lock()
+        .map_err(err)?
+        .delete_bundle(&key)
+        .map_err(err)?;
+    assignments_changed(&app);
+    Ok(())
+}
+
+/// Lists, "Heute" and the turn badges all depend on assignments and bundles.
+fn assignments_changed(app: &AppHandle) {
+    let _ = app.emit("cases-changed", ());
+    let _ = app.emit(
+        "mail-changed",
+        watch::MailChanged {
+            account_id: 0,
+            new_messages: 0,
+        },
+    );
+}
+
 /// "Von dir als erledigt entfernt": hides this mail's conversation from "Heute"
 /// until a new mail arrives in the thread.
 #[tauri::command]
@@ -1760,7 +1977,18 @@ pub fn run() {
             restore_turn,
             mask_message_preview,
             messages_by_ids,
-            sent_replies
+            sent_replies,
+            placements,
+            assignment_preview,
+            apply_assignment,
+            remove_assignment,
+            assignments,
+            bundles,
+            create_bundle,
+            update_bundle,
+            delete_bundle,
+            move_to_junk,
+            acknowledge_phishing
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Halcyon app");

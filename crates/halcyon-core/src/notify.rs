@@ -18,9 +18,46 @@ pub struct NotifyInput {
     /// Halcyon has seen this sender before (a recurring source whose mail
     /// passed DMARC, or someone you wrote to).
     pub sender_known: bool,
+    /// What the user assigned to this mail or its kind. Pass the *effective*
+    /// target (`Placement::target`), which already leaves out bundles that a
+    /// protection holds back.
+    pub assignment: Option<Assigned>,
+    /// The phishing check holds the mail back (suspicious or phishing).
+    pub suspicious: bool,
+}
+
+/// What the user decided for a mail, as far as a notification cares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Assigned {
+    /// "Für dich".
+    ForYou,
+    /// Any bundle: always quiet.
+    Bundle,
+}
+
+impl From<&crate::assignments::Target> for Assigned {
+    fn from(t: &crate::assignments::Target) -> Self {
+        match t {
+            crate::assignments::Target::ForYou => Assigned::ForYou,
+            crate::assignments::Target::Bundle { .. } => Assigned::Bundle,
+        }
+    }
 }
 
 pub fn should_notify(i: &NotifyInput) -> bool {
+    // Nothing is worth waking the user for that tries to look like someone
+    // else, whatever the sender check, an assignment or a source says.
+    if i.suspicious {
+        return false;
+    }
+    // The user's word comes first: mail in a bundle is not worth an
+    // interruption, and "Für dich" is, as long as the sender check did not
+    // fail (forged mail must not be wanted by accident).
+    match i.assignment {
+        Some(Assigned::Bundle) => return false,
+        Some(Assigned::ForYou) => return i.dmarc_pass,
+        None => {}
+    }
     // An anomaly (a bill far above the usual, say) is the one case where a
     // quiet source speaks up.
     if i.source_needs_you {
@@ -161,5 +198,58 @@ mod tests {
                 .0,
             "Neues von Anna"
         );
+    }
+
+    #[test]
+    fn suspicious_mail_never_notifies() {
+        let flagged = |base: NotifyInput| NotifyInput {
+            suspicious: true,
+            ..base
+        };
+        assert!(should_notify(&person()));
+        assert!(!should_notify(&flagged(person())));
+        // Not even when the user once assigned the kind to "Für dich" or a
+        // source needs attention.
+        assert!(!should_notify(&flagged(NotifyInput {
+            assignment: Some(Assigned::ForYou),
+            ..person()
+        })));
+        assert!(!should_notify(&flagged(NotifyInput {
+            source_needs_you: true,
+            ..person()
+        })));
+    }
+
+    #[test]
+    fn assignments_decide_before_the_rules() {
+        let with = |assignment, base: NotifyInput| NotifyInput {
+            assignment: Some(assignment),
+            ..base
+        };
+        // A bundle silences even personal mail and anomalies.
+        assert!(!should_notify(&with(Assigned::Bundle, person())));
+        assert!(!should_notify(&with(
+            Assigned::Bundle,
+            NotifyInput {
+                source_needs_you: true,
+                ..person()
+            }
+        )));
+        // "Für dich" notifies for lists and quiet sources ...
+        let quiet = NotifyInput {
+            is_list_mail: true,
+            source_mode: Some(SourceMode::Mute),
+            ..person()
+        };
+        assert!(should_notify(&with(Assigned::ForYou, quiet)));
+        // ... but not when the sender check failed.
+        assert!(!should_notify(&with(
+            Assigned::ForYou,
+            NotifyInput {
+                dmarc_pass: false,
+                sender_known: true,
+                ..quiet
+            }
+        )));
     }
 }

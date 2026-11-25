@@ -5,6 +5,7 @@
   import Icon from './Icon.svelte'
   import { initials, longDate } from './format'
   import { isAppDark } from './theme.svelte'
+  import { checkLink, holdsBack, ISSUE_TEXT, isStrong, type LinkIssue } from './phishing'
   import { isFlagged, isSeen, type MaskedPreview, type MessageSummary, type MessageView } from './types'
 
   let {
@@ -13,6 +14,9 @@
     ontoggleflag,
     ondelete,
     onreply,
+    hasJunk = false,
+    onjunk,
+    onacknowledge,
     embedded = false,
   }: {
     message: MessageSummary | null
@@ -20,6 +24,11 @@
     ontoggleflag: (m: MessageSummary) => void
     ondelete: (m: MessageSummary) => void
     onreply: (m: MessageSummary, kind: 'reply' | 'reply_all' | 'forward') => void
+    /** The account has a spam folder: the phishing banner offers to move the mail there. */
+    hasJunk?: boolean
+    onjunk?: (m: MessageSummary) => void
+    /** "Ich kenne den Absender" (or taking it back); a local note only. */
+    onacknowledge?: (m: MessageSummary, on: boolean) => void
     /** Inside another card (Heute): no pane chrome, compact toolbar, scrolls within its own max height. */
     embedded?: boolean
   } = $props()
@@ -29,7 +38,14 @@
   let error = $state('')
   let allowRemote = $state(false)
   let notice = $state('')
-  let linkWarning = $state<{ shown: string; target: string } | null>(null)
+  /** A link waiting for the user's decision: the real host, never just the text. */
+  let linkWarning = $state<{
+    href: string
+    host: string
+    claimed: string | null
+    issues: LinkIssue[]
+    heldMail: boolean
+  } | null>(null)
   let frame: HTMLIFrameElement | undefined = $state()
   let otpCopied = $state(false)
   let maskedPreview = $state<MaskedPreview | null>(null)
@@ -56,6 +72,7 @@
     return false
   }
 
+  const flagged = $derived(!!message && message.phishing.level !== 'none')
   const isNewsletter = $derived(!!message && message.header.list_unsubscribe.length > 0)
   const files = $derived(view?.attachments.filter((a) => !a.inline) ?? [])
   const canReplyAll = $derived(message ? hasOtherRecipients(message) : false)
@@ -167,21 +184,6 @@
     loadImages()
   }
 
-  function hostOf(url: string): string | null {
-    try {
-      return new URL(url).hostname.replace(/^www\./, '').toLowerCase()
-    } catch {
-      return null
-    }
-  }
-
-  /** The domain a link text pretends to lead to, e.g. "paypal.com/login". */
-  function shownHost(text: string): string | null {
-    const t = text.trim()
-    const m = t.match(/^(?:https?:\/\/)?((?:[a-z0-9-]+\.)+[a-z]{2,})(?:[/:?#]\S*)?$/i)
-    return m ? m[1].replace(/^www\./, '').toLowerCase() : null
-  }
-
   function openLink(url: string) {
     api.openLink(url).catch((e) => (notice = String(e)))
   }
@@ -198,10 +200,12 @@
       e.preventDefault()
       const href = a.getAttribute('href') ?? ''
       if (!href) return
-      const real = hostOf(href)
-      const shown = shownHost(a.textContent ?? '')
-      if (shown && real && shown !== real && !real.endsWith(`.${shown}`)) {
-        linkWarning = { shown: a.textContent?.trim() ?? shown, target: href }
+      // Percent-encoded hosts are decoded before comparing with the text,
+      // and a disguised target asks first even when the text shows no address.
+      const check = checkLink(href, a.textContent ?? '')
+      const heldMail = !!message && holdsBack(message)
+      if (check && (check.claimed || check.issues.some(isStrong) || heldMail)) {
+        linkWarning = { href, host: check.host, claimed: check.claimed, issues: check.issues, heldMail }
         return
       }
       openLink(href)
@@ -310,6 +314,50 @@
           <span>Maskiert</span>
         </button>
       </div>
+      {#if flagged}
+        {#if message.phishing.acknowledged}
+          <div class="phish phish-note" role="note">
+            <Icon name="warning" size={16} />
+            <span>
+              {message.phishing.level === 'phishing'
+                ? 'Du kennst den Absender, die Mail bleibt aber zurückgehalten. Links fragen weiter nach.'
+                : 'Du kennst den Absender. Links fragen weiter nach.'}
+            </span>
+            {#if onacknowledge}
+              <button type="button" class="small-btn" onclick={() => onacknowledge(message, false)}>
+                Hinweis wieder zeigen
+              </button>
+            {/if}
+          </div>
+        {:else}
+          <div class="phish" class:strong={message.phishing.level === 'phishing'} role="alert">
+            <div class="phish-head">
+              <Icon name="warning" size={18} />
+              <strong>
+                {message.phishing.level === 'phishing'
+                  ? 'Vorsicht: Das sieht nach Phishing aus'
+                  : 'Diese Mail wirkt verdächtig'}
+              </strong>
+            </div>
+            <ul class="phish-reasons">
+              {#each message.phishing.reasons as r (r.code)}<li>{r.text}</li>{/each}
+            </ul>
+            <p class="phish-foot">Links in dieser Mail fragen vor dem Öffnen nach.</p>
+            <div class="hint-actions">
+              {#if hasJunk && onjunk && message.folder_role !== 'junk'}
+                <button type="button" class="small-btn primary" onclick={() => onjunk(message)}>
+                  In den Spam-Ordner
+                </button>
+              {/if}
+              {#if onacknowledge}
+                <button type="button" class="small-btn" onclick={() => onacknowledge(message, true)}>
+                  Ich kenne den Absender
+                </button>
+              {/if}
+            </div>
+          </div>
+        {/if}
+      {/if}
       <h1>{h.subject ?? '(kein Betreff)'}</h1>
 
       {#if view?.otp_code}
@@ -509,6 +557,8 @@
     {/if}
 
     {#if linkWarning}
+      {@const w = linkWarning}
+      {@const disguised = w.issues.some(isStrong)}
       <div class="warn-backdrop" role="presentation" onclick={() => (linkWarning = null)}>
         <div
           class="warn-box"
@@ -518,27 +568,53 @@
           onclick={(e) => e.stopPropagation()}
           onkeydown={(e) => e.key === 'Escape' && (linkWarning = null)}
         >
-          <h2 id="link-warn-title"><Icon name="warning" /> Link führt woanders hin</h2>
-          <p>Angezeigt wird <strong>{linkWarning.shown}</strong>, tatsächlich öffnet sich:</p>
-          <p class="target">{linkWarning.target}</p>
+          <h2 id="link-warn-title">
+            <Icon name="warning" />
+            {#if disguised}
+              Der Link verbirgt sein Ziel
+            {:else if w.claimed}
+              Link führt woanders hin
+            {:else}
+              Link in einer verdächtigen Mail
+            {/if}
+          </h2>
+          {#if w.host}
+            <p>Der Link öffnet:</p>
+            <p class="real-host">{w.host}</p>
+          {/if}
+          {#if w.claimed}
+            <p>Angezeigt wird dagegen <strong>{w.claimed}</strong>.</p>
+          {/if}
+          {#if w.issues.length}
+            <ul class="issues">
+              {#each w.issues as issue (issue)}<li>{ISSUE_TEXT[issue]}</li>{/each}
+            </ul>
+          {/if}
+          <p class="target">{w.href}</p>
           <p class="muted">
-            So arbeiten Phishing-Mails. Öffne den Link nur, wenn du dem Absender vertraust.
+            {#if w.heldMail && !disguised && !w.claimed}
+              Diese Mail wirkt verdächtig. Öffne den Link nur, wenn du dem Absender traust.
+            {:else}
+              So arbeiten Phishing-Mails. Öffne den Link nur, wenn du dem Absender vertraust.
+            {/if}
           </p>
           <div class="warn-actions">
             <button type="button" class="small-btn primary" onclick={() => (linkWarning = null)}>
               Nicht öffnen
             </button>
-            <button
-              type="button"
-              class="small-btn"
-              onclick={() => {
-                const t = linkWarning?.target
-                linkWarning = null
-                if (t) openLink(t)
-              }}
-            >
-              Trotzdem öffnen
-            </button>
+            {#if !w.issues.includes('script')}
+              <button
+                type="button"
+                class="small-btn"
+                onclick={() => {
+                  const t = linkWarning?.href
+                  linkWarning = null
+                  if (t) openLink(t)
+                }}
+              >
+                Trotzdem öffnen
+              </button>
+            {/if}
           </div>
         </div>
       </div>
@@ -834,6 +910,71 @@
   .warn-box p {
     margin: 6px 0;
     font-size: 13px;
+  }
+  .real-host {
+    margin: 2px 0 6px;
+    font-size: 17px !important;
+    font-weight: 650;
+    overflow-wrap: anywhere;
+  }
+  .issues {
+    margin: 6px 0;
+    padding-left: 18px;
+    font-size: 13px;
+  }
+  .issues li {
+    margin: 2px 0;
+  }
+  /* Warning banner of the phishing check: ochre like the other hints (an
+     area with a second feature, here the heading and the edge), not a red wall. */
+  .phish {
+    margin-bottom: 14px;
+    padding: 12px 14px;
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--ochre) 20%, transparent);
+    border: 1px solid color-mix(in srgb, var(--ochre) 55%, transparent);
+    border-left-width: 4px;
+    font-size: 13px;
+  }
+  .phish.strong {
+    background: color-mix(in srgb, var(--ochre) 28%, transparent);
+    border-color: var(--ochre);
+  }
+  .phish-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 15px;
+  }
+  .phish-head :global(svg) {
+    flex: none;
+    color: var(--ochre);
+  }
+  .phish-reasons {
+    margin: 8px 0 6px;
+    padding-left: 22px;
+  }
+  .phish-reasons li {
+    margin: 3px 0;
+  }
+  .phish-foot {
+    margin: 0 0 10px;
+    color: var(--text-muted);
+  }
+  .phish-note {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 10px;
+    align-items: center;
+    padding: 6px 12px;
+  }
+  .phish-note :global(svg) {
+    flex: none;
+    color: var(--ochre);
+  }
+  .phish-note span {
+    flex: 1 1 220px;
+    min-width: 0;
   }
   .target {
     font-family: ui-monospace, monospace;

@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use chrono::{Local, TimeZone};
 use clap::{Parser, Subcommand};
+use halcyon_core::assignments::{BundleSurvey, SurveyScope, SurveyStats};
 use halcyon_core::autoconfig::{self, Candidate};
 use halcyon_core::imap::{self, Credentials};
 use halcyon_core::model::{
@@ -51,6 +52,41 @@ enum Command {
     },
     /// Run local case/source analysis and print privacy-preserving numbers only.
     Stats,
+    /// How well mail of one sender falls into kinds ("Arten von Mails").
+    /// Reads only; nothing is written to the database.
+    Kinds {
+        /// Look at the senders with the most mail.
+        #[arg(long, default_value_t = 15)]
+        top: usize,
+        /// Only this sender address.
+        #[arg(long)]
+        sender: Option<String>,
+        /// Numbers for all senders, without any subject or address, so the
+        /// result can be shared.
+        #[arg(long)]
+        stats: bool,
+        /// Also senders that never passed DMARC (mostly spam).
+        #[arg(long)]
+        all: bool,
+    },
+    /// Where inbox mail of the last 90 days would go on its own ("Bündel").
+    /// Reads only; nothing is written to the database.
+    Bundles {
+        /// Numbers only, without any subject, so the result can be shared.
+        #[arg(long)]
+        stats: bool,
+    },
+    /// Mail the phishing check flagged in the last days, with the reasons.
+    /// Reads only; nothing is written beyond what opening the database does.
+    Phishing {
+        /// Look this many days back.
+        #[arg(long, default_value_t = 90)]
+        days: i64,
+        /// Numbers only (per level and per reason), without any sender or
+        /// subject, so the result can be shared.
+        #[arg(long)]
+        stats: bool,
+    },
     /// Print the invoice ledger (all invoices, or those of one year).
     Invoices {
         #[arg(long)]
@@ -178,7 +214,229 @@ async fn main() -> Result<()> {
             let mut store = Store::open(&db_path)?;
             print_invoices(&mut store, year)
         }
+        Command::Kinds {
+            top,
+            sender,
+            stats,
+            all,
+        } => {
+            // Opening would create an empty database; there is nothing to measure then.
+            if !db_path.exists() {
+                bail!("keine Datenbank unter {}", db_path.display());
+            }
+            let store = Store::open(&db_path)?;
+            print_kinds(&store, top, sender, stats, all)
+        }
+        Command::Phishing { days, stats } => {
+            // Opening would create an empty database; there is nothing to list then.
+            if !db_path.exists() {
+                bail!("keine Datenbank unter {}", db_path.display());
+            }
+            let store = Store::open(&db_path)?;
+            print_phishing(&store, days, stats)
+        }
+        Command::Bundles { stats } => {
+            // Opening would create an empty database; there is nothing to measure then.
+            if !db_path.exists() {
+                bail!("keine Datenbank unter {}", db_path.display());
+            }
+            let store = Store::open(&db_path)?;
+            let survey = store.survey_bundles(Local::now().timestamp(), BUNDLE_DAYS, !stats)?;
+            print_bundles(&survey);
+            Ok(())
+        }
     }
+}
+
+/// Text for the terminal: no control or invisible characters, which a
+/// phishing mail may well use to garble the output.
+fn plain(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_control() && !halcyon_core::phishing::is_invisible(*c))
+        .collect()
+}
+
+fn print_phishing(store: &Store, days: i64, stats: bool) -> Result<()> {
+    use halcyon_core::phishing::Level;
+    let now = Local::now().timestamp();
+    let mails = store.phishing_flagged(now - days.max(1) * 86_400, 10_000)?;
+    if !store.phishing_backfill_done()? {
+        eprintln!(
+            "Hinweis: Die Prüfung vorhandener Mails läuft erst beim nächsten Start von Halcyon; \
+             hier stehen bisher nur Mails, die seit der Aktualisierung eingetroffen sind."
+        );
+    }
+    let count = |level| mails.iter().filter(|m| m.phishing.level == level).count();
+    if stats {
+        println!("Markierte Mails der letzten {days} Tage: {}", mails.len());
+        println!("  {:>5}  Phishing", count(Level::Phishing));
+        println!("  {:>5}  verdächtig", count(Level::Suspicious));
+        let mut by_reason: std::collections::BTreeMap<&str, usize> = Default::default();
+        for m in &mails {
+            for r in &m.phishing.reasons {
+                *by_reason.entry(r.code.as_str()).or_default() += 1;
+            }
+        }
+        let mut by_reason: Vec<_> = by_reason.into_iter().collect();
+        by_reason.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        println!("Gründe:");
+        for (code, n) in by_reason {
+            println!("  {n:>5}  {code}");
+        }
+        return Ok(());
+    }
+    if mails.is_empty() {
+        println!("Keine markierten Mails in den letzten {days} Tagen.");
+        return Ok(());
+    }
+    for m in &mails {
+        let h = &m.header;
+        let level = match m.phishing.level {
+            Level::Phishing => "PHISHING",
+            _ => "verdächtig",
+        };
+        let when = h
+            .date
+            .and_then(|d| Local.timestamp_opt(d, 0).single())
+            .map(|d| d.format("%d.%m.%Y %H:%M").to_string())
+            .unwrap_or_default();
+        let name = h.from_name.as_deref().map(plain).unwrap_or_default();
+        println!(
+            "{when}  {level}  {name} <{}>",
+            plain(h.from_addr.as_deref().unwrap_or("?"))
+        );
+        println!(
+            "    {}",
+            plain(h.subject.as_deref().unwrap_or("(kein Betreff)"))
+        );
+        for r in &m.phishing.reasons {
+            println!("    - {}", r.text);
+        }
+    }
+    println!(
+        "\n{} Mails ({} Phishing, {} verdächtig)",
+        mails.len(),
+        count(Level::Phishing),
+        count(Level::Suspicious)
+    );
+    Ok(())
+}
+
+/// Mail of this many days is looked at by `halcyon bundles`.
+const BUNDLE_DAYS: i64 = 90;
+
+fn print_bundles(s: &BundleSurvey) {
+    println!(
+        "Posteingang der letzten {BUNDLE_DAYS} Tage: {} Mails",
+        s.total
+    );
+    println!("Von selbst eingeordnet:");
+    let mut bundled = 0;
+    for b in &s.bundles {
+        // A bundle that is off and empty is not worth a line.
+        if !b.enabled && b.mails == 0 {
+            continue;
+        }
+        bundled += b.mails;
+        println!("  {:>5}  {}", b.mails, b.name);
+        for e in &b.examples {
+            println!("           · {e}");
+        }
+    }
+    println!("  {bundled:>5}  zusammen");
+    println!("  {:>5}  davon unbestätigte Absender", s.unverified);
+    println!("Nicht eingeordnet:");
+    println!("  {:>5}  bleibt bei „Für dich“ (Regeln)", s.stays_visible);
+    println!("  {:>5}  von dir eingeordnet", s.assigned);
+}
+
+fn print_kinds(
+    store: &Store,
+    top: usize,
+    sender: Option<String>,
+    stats: bool,
+    all: bool,
+) -> Result<()> {
+    let scope = SurveyScope {
+        // The numbers are about the whole mailbox; the listing about a few senders.
+        top: (!stats && sender.is_none()).then_some(top),
+        sender,
+        examples: !stats,
+        include_unverified: all,
+    };
+    let survey = store.survey_kinds(Local::now().timestamp(), &scope)?;
+    if !stats {
+        for s in &survey.senders {
+            println!(
+                "{} ({} Mails, {} Gruppen)",
+                s.sender,
+                s.mails,
+                s.groups.len()
+            );
+            for g in &s.groups {
+                let features = if g.features.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", g.features.join(", "))
+                };
+                let protected = if g.protected > 0 {
+                    format!(", davon {} geschützt", g.protected)
+                } else {
+                    String::new()
+                };
+                println!("  {:>5}×  {}{features}{protected}", g.mails, g.label);
+                for e in &g.examples {
+                    println!("           · {e}");
+                }
+            }
+            println!();
+        }
+        return Ok(());
+    }
+    print_kind_stats(&survey.stats);
+    Ok(())
+}
+
+/// Numbers only: no subject, no address.
+fn print_kind_stats(s: &SurveyStats) {
+    let share = |part: usize, whole: usize| {
+        if whole == 0 {
+            0.0
+        } else {
+            part as f64 * 100.0 / whole as f64
+        }
+    };
+    println!("Absender:                         {}", s.senders);
+    println!("Mails (ohne Spam, Entwürfe):      {}", s.mails);
+    println!("Gruppen je Absender:");
+    let mut beyond = 0;
+    for (groups, senders) in &s.groups_per_sender {
+        if *groups >= 8 {
+            beyond += senders;
+        } else {
+            println!("  {groups} Gruppe(n): {senders}");
+        }
+    }
+    if beyond > 0 {
+        println!("  8 Gruppen oder mehr: {beyond}");
+    }
+    println!(
+        "Mails in „Sonstiges“:             {:.1} %",
+        share(s.other_mails, s.mails)
+    );
+    println!(
+        "Absender mit mehr als 1 Gruppe:   {:.1} %",
+        share(s.multi_group_senders, s.senders)
+    );
+    println!(
+        "  nur Absender mit 10+ Mails:     {:.1} % von {}",
+        share(s.busy_multi_group_senders, s.busy_senders),
+        s.busy_senders
+    );
+    println!(
+        "Geschützte Mails:                 {:.1} %",
+        share(s.protected_mails, s.mails)
+    );
 }
 
 fn print_invoices(store: &mut Store, year: Option<i32>) -> Result<()> {

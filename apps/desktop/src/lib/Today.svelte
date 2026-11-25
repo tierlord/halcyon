@@ -49,6 +49,7 @@
 
   let logoVersion = $state(0)
   let asUsualOpen = $state(false)
+  let heldOpen = $state(false)
   let root: HTMLElement | undefined = $state()
   /** Company key of the order group whose details are open below the strip. */
   let openGroupKey = $state<string | null>(null)
@@ -607,6 +608,34 @@
         </div>
       {/if}
       </div>
+
+      {#if model.held}
+        <!-- Quiet on purpose: no badge, no colour, one line at the very end. -->
+        <section class="block held" aria-label="Zurückgehaltene Mails">
+          <button
+            type="button"
+            class="held-toggle"
+            aria-expanded={heldOpen}
+            onclick={() => (heldOpen = !heldOpen)}
+          >
+            <span class="chev"><Icon name={heldOpen ? 'chevronDown' : 'chevronRight'} size={14} /></span>
+            <span>{model.held.summary}</span>
+          </button>
+          {#if heldOpen}
+            <ul class="held-list" transition:slide={{ duration: EXPAND_MS }}>
+              {#each model.held.rows as r (r.message.id)}
+                <li>
+                  <button type="button" class="usual-row" onclick={() => onopen(r.message.id)}>
+                    <span class="u-sender">{r.sender}</span>
+                    <span class="u-dot" aria-hidden="true">·</span>
+                    <span class="u-subject">{r.subject}</span>
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </section>
+      {/if}
     </div>
   </div>
 
@@ -1494,6 +1523,35 @@
     display: inline-flex;
     flex: none;
   }
+  /* "N verdächtige Mails zurückgehalten": smaller and softer than the rest */
+  .held {
+    margin: 8px 0 0;
+  }
+  .held-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 40px;
+    padding: 6px 12px;
+    border: 0;
+    border-radius: 12px;
+    background: none;
+    font-size: 13px;
+    color: var(--text-soft);
+    transition: background 0.16s ease, color 0.16s ease;
+  }
+  .held-toggle:hover {
+    background: color-mix(in srgb, var(--text) 6%, transparent);
+    color: var(--text);
+  }
+  .held-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .held-list .usual-row {
+    padding-left: 32px;
+  }
   .usual-list {
     list-style: none;
     margin: 2px 0 0;
@@ -1548,6 +1606,7 @@
     .fill,
     .quiet-list li,
     .usual-toggle,
+    .held-toggle,
     .usual-row {
       transition: none;
     }

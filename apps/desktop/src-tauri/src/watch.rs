@@ -280,6 +280,13 @@ fn matters(
         .from_addr
         .as_deref()
         .is_some_and(|a| correspondents.contains(&a.to_ascii_lowercase()));
+    // What the user assigned wins; protected mail has no bundle target here.
+    let assignment = store
+        .placements(&[m.id], now)
+        .ok()
+        .and_then(|p| p.into_iter().next())
+        .and_then(|p| p.target)
+        .map(|t| halcyon_core::notify::Assigned::from(&t));
     should_notify(&NotifyInput {
         is_list_mail: h.list_id.is_some() || !h.list_unsubscribe.is_empty(),
         source_mode: source.map(|(mode, _)| mode),
@@ -288,6 +295,8 @@ fn matters(
         // Sources are only recorded for mail that passed DMARC, so having
         // one means the sender has been seen before.
         sender_known: source.is_some() || from_known_correspondent,
+        assignment,
+        suspicious: m.phishing.level.is_flagged(),
     })
 }
 
