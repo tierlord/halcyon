@@ -386,8 +386,8 @@ mod tests {
     #[test]
     fn extracts_root_domain_from_subdomains() {
         assert_eq!(
-            extract_brand_domain("r92q123@mail.kleinanzeigen.de").as_deref(),
-            Some("kleinanzeigen.de")
+            extract_brand_domain("conv-1111@reply.kleinmarkt.example").as_deref(),
+            Some("kleinmarkt.example")
         );
         assert_eq!(
             extract_brand_domain("billing@news.shop.co.uk").as_deref(),

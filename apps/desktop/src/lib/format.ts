@@ -40,7 +40,7 @@ const INITIAL_STOP_WORDS = new Set([
   'das',
 ])
 
-/** "Max Muster" → "MM", "Sensonics über Kleinanzeigen" → "SK", "rechnung@telekom.de" → "R". */
+/** "Max Muster" → "MM", "Lena über Kleinmarkt" → "LK", "rechnung@telekom.de" → "R". */
 export function initials(name: string | null, addr: string | null): string {
   const source = (name ?? addr ?? '?').trim()
   const words = source.split(/\s+/).filter((w) => /\p{L}/u.test(w))
