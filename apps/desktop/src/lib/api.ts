@@ -34,7 +34,9 @@ import type {
 } from './bundles'
 import { createMockCases, fromCaseView, type AsideCategory, type CaseItem, type CaseStatus, type CaseView } from './cases'
 
-const native = isTauri()
+// VITE_HALCYON_MOCK=1 shows the built-in test data even inside the app,
+// e.g. for a first run on a phone without any account.
+const native = isTauri() && import.meta.env.VITE_HALCYON_MOCK !== '1'
 
 export const isMock = !native
 

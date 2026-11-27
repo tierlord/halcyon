@@ -43,7 +43,9 @@ export interface InvoiceExportReport {
   without_proof: number
 }
 
-const native = isTauri()
+// VITE_HALCYON_MOCK=1 shows the built-in test data even inside the app,
+// e.g. for a first run on a phone without any account.
+const native = isTauri() && import.meta.env.VITE_HALCYON_MOCK !== '1'
 
 // ---------------------------------------------------------------- mock data
 

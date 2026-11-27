@@ -1,6 +1,10 @@
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 import { defineConfig } from 'vite'
 
+// Set by `tauri android dev` / `tauri ios dev`: the phone or emulator loads
+// the dev server over the network, so it must listen beyond localhost.
+const host = process.env.TAURI_DEV_HOST
+
 // Tauri expects a fixed port and must see Rust errors in the terminal.
 export default defineConfig(({ command }) => ({
   plugins: [
@@ -28,6 +32,8 @@ export default defineConfig(({ command }) => ({
   server: {
     port: 5173,
     strictPort: true,
+    host: host || false,
+    hmr: host ? { protocol: 'ws', host, port: 5174 } : undefined,
     watch: { ignored: ['**/src-tauri/**'] },
     // Transform the app before the window asks for it.
     warmup: { clientFiles: ['./src/main.ts', './src/App.svelte'] },

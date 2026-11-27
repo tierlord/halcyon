@@ -33,5 +33,6 @@ parallel dazu laufen können.
 | 03 | [Einmalcodes und Sendungsnummern erkennen](03-extractors.md) | erledigt (mit Review-Fixes) |
 | 04 | [Bösartige HTML-Mails als Testkorpus](04-hostile-html.md) | erledigt (5 Lücken gefunden und behoben) |
 | 05 | [Antworten, Allen antworten, Weiterleiten](05-reply-logic.md) | erledigt (1 Review-Fix) |
+| 06 | [Android-Versuchsbau](06-android-spike.md) | offen (anderer Rechner, Branch `android/spike`) |
 
 Reihenfolge ist frei; jede Aufgabe ist für sich abgeschlossen.
