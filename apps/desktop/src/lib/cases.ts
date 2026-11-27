@@ -464,12 +464,12 @@ export function createMockSources(messages: MessageSummary[]): SourceRecord[] {
     make(1, 'Shop Wochenpost', 'shop.example', 'bundle', true),
     make(2, 'Streamingdienst', 'stream.example', 'mute', true),
     make(3, 'GitHub', 'github.example', 'bundle', false),
-    make(4, 'PayPal', 'paypal.example', 'latest_only', false),
-    make(5, 'Kleinanzeigen', 'kleinanzeigen.example', 'show', false),
-    make(6, 'Telekom', 'telekom.example', 'show', false, {
+    make(4, 'Zahlfix', 'zahlfix.example', 'latest_only', false),
+    make(5, 'Kleinmarkt', 'kleinmarkt.example', 'show', false),
+    make(6, 'Mobilfunk Nord', 'mobilfunk-nord.example', 'show', false, {
       kind: 'unusual_amount',
       needs_you: true,
-      reason: 'Die Telekom-Rechnung ist diesmal 12 € höher als sonst',
+      reason: 'Die Mobilfunk-Rechnung ist diesmal 12 € höher als sonst',
     }),
   ]
 }

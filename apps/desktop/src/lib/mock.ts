@@ -183,12 +183,12 @@ const LURE_URL = 'https://exa%6dple.%65xample.invalid/p/1'
 const LURE_TEXT = `Ihre ${split('Rückerstattung')} steht bereit. ${split('Bestätigen')} Sie Ihre Angaben ${split('sofort')}, sonst verfällt der Anspruch nach Ablauf der ${split('Frist')}.`
 
 const all: MessageSummary[] = [
-  msg(1, ['Telekom', 'rechnung@telekom.example'], 'Ihre Rechnung für November 2026', 25 * 60),
-  msg(3, ['Kleinanzeigen', 'noreply@kleinanzeigen.example'], 'Nutzer-Anfrage zu deiner Anzeige "Rennrad 28 Zoll"', 2 * hour),
-  msg(3, ['Kleinanzeigen', 'noreply@kleinanzeigen.example'], 'Neue Nachricht zu "Rennrad 28 Zoll"', 3 * hour, { seen: true }),
+  msg(1, ['Mobilfunk Nord', 'rechnung@mobilfunk-nord.example'], 'Ihre Rechnung für November 2026', 25 * 60),
+  msg(3, ['Kleinmarkt', 'noreply@kleinmarkt.example'], 'Nutzer-Anfrage zu deiner Anzeige "Rennrad 28 Zoll"', 2 * hour),
+  msg(3, ['Kleinmarkt', 'noreply@kleinmarkt.example'], 'Neue Nachricht zu "Rennrad 28 Zoll"', 3 * hour, { seen: true }),
   msg(2, ['Sabine Kranz', 'kranz@zulieferer.example'], 'Angebot Ersatzteile – bitte bis Freitag bestätigen', 5 * hour),
-  msg(1, ['PayPal', 'service@paypal.example'], 'Dein Bestätigungscode: 482913', 6 * hour, { seen: true }),
-  msg(3, ['DHL Paket', 'noreply@dhl.example'], 'Ihre Sendung kommt heute zwischen 14:00 und 16:00', 8 * hour),
+  msg(1, ['Zahlfix', 'service@zahlfix.example'], 'Dein Bestätigungscode: 482913', 6 * hour, { seen: true }),
+  msg(3, ['Paketdienst Nord', 'noreply@paketdienst.example'], 'Ihre Sendung kommt heute zwischen 14:00 und 16:00', 8 * hour),
   msg(1, ['Stadtwerke', 'kundenservice@stadtwerke.example'], 'Abschlagsrechnung Strom', 1 * day + 2 * hour, { seen: true, dmarcPass: true }),
   msg(3, ['Shop Wochenpost', 'news@shop.example'], 'Nur heute: 20 % auf alles ☀', 1 * day + 5 * hour, { list: true, dmarcPass: true }),
   msg(2, ['Jonas Becker', 'jonas@muster-werkstatt.example'], 'Re: Dienstplan Dezember', 2 * day, { seen: true }),
@@ -198,9 +198,9 @@ const all: MessageSummary[] = [
   msg(2, [null, 'buchhaltung@muster-werkstatt.example'], 'Rechnung 2026-0417 Werkzeugbedarf', 9 * day, { seen: true }),
   msg(3, ['Streamingdienst', 'info@stream.example'], 'Neu diesen Monat', 12 * day, { seen: true, list: true, dmarcPass: true }),
   msg(1, ['Online-Banking', 'hinweis@bank.example'], 'Neue Dokumente in Ihrem Postfach', 20 * day, { seen: true, dmarcPass: true }),
-  msg(3, ['Kleinanzeigen', 'noreply@kleinanzeigen.example'], 'Deine Anzeige "Rennrad 28 Zoll" ist online', 26 * day, { seen: true }),
+  msg(3, ['Kleinmarkt', 'noreply@kleinmarkt.example'], 'Deine Anzeige "Rennrad 28 Zoll" ist online', 26 * day, { seen: true }),
   msg(2, ['Sabine Kranz', 'kranz@zulieferer.example'], 'Lieferung KW 44', 40 * day, { seen: true }),
-  msg(1, ['Telekom', 'rechnung@telekom.example'], 'Ihre Rechnung für Oktober 2026', 31 * day, { seen: true }),
+  msg(1, ['Mobilfunk Nord', 'rechnung@mobilfunk-nord.example'], 'Ihre Rechnung für Oktober 2026', 31 * day, { seen: true }),
   msg(3, ['Fotobuch Studio', 'hallo@fotobuch.example'], 'Dein Fotobuch wurde versendet', 400 * day, { seen: true, dmarcPass: true }),
   msg(1, ['Max Mustermann', 'max@mail.example.org'], 'Re: Angebot Ersatzteile', 3 * hour, {
     seen: true,
@@ -211,7 +211,7 @@ const all: MessageSummary[] = [
   }),
   msg(3, ['Max Mustermann', 'max.muster@example.net'], 'Re: Nutzer-Anfrage zu deiner Anzeige "Rennrad 28 Zoll"', 2.5 * hour, {
     seen: true,
-    to: ['noreply@kleinanzeigen.example'],
+    to: ['noreply@kleinmarkt.example'],
     inReplyTo: '3@example.invalid',
     preview: 'Ja, das Rennrad ist noch da. Samstag um 11 Uhr passt mir gut!',
     folder: { id: 31, path: 'Sent', name: 'Gesendet', role: 'sent' },
@@ -497,7 +497,7 @@ export function deleteAccount(id: number): Promise<void> {
 
 function previewFor(subject: string): string {
   if (/Rechnung/.test(subject)) return 'Guten Tag, anbei erhalten Sie Ihre aktuelle Rechnung als PDF. Der Betrag wird am 15. abgebucht.'
-  if (/Kleinanzeigen|Anzeige/.test(subject)) return 'Hallo, ist das Rennrad noch zu haben? Ich könnte es am Samstag abholen.'
+  if (/Kleinmarkt|Anzeige/.test(subject)) return 'Hallo, ist das Rennrad noch zu haben? Ich könnte es am Samstag abholen.'
   if (/Code/.test(subject)) return 'Gib diesen Code ein, um die Anmeldung zu bestätigen. Er ist 10 Minuten gültig.'
   return 'Hallo Max, kurze Info vorab – Details findest du weiter unten.'
 }

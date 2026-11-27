@@ -20,6 +20,19 @@ Ruhe im Posteingang.
 > **Status:** Prototyp in aktiver Entwicklung, bisher nur unter Linux
 > getestet. Rust-Kern + Tauri 2 + Svelte 5.
 
+<p align="center">
+  <img src="images/screenshots/heute-hell.png" alt="Die Startseite „Heute“ im hellen Design: Begrüßung, Bestellungen als Kacheln, Karten unter „Für dich“, daneben „Läuft von allein“ und die Übersichten" width="49%">
+  <img src="images/screenshots/heute-dunkel.png" alt="Die Startseite „Heute“ im dunklen Design mit farbigen Karten in der Farbe des jeweiligen Absenders" width="49%">
+</p>
+
+<p align="center">
+  <img src="images/screenshots/zuordnen.png" alt="Zuordnen: Halcyon zeigt die Mails eines Absenders in Gruppen – Angebote, Versandbestätigungen, Nachrichten – bevor die Zuordnung für alle dieser Art gilt" width="32%">
+  <img src="images/screenshots/rechnungen.png" alt="Die Rechnungsliste mit offenen Rechnungen, Fälligkeit, privat oder geschäftlich und Link ins Kundenportal" width="32%">
+  <img src="images/screenshots/phishing.png" alt="Eine als Phishing erkannte Mail mit Warnhinweis und den Gründen" width="32%">
+</p>
+
+<p align="center"><sub>Alle Bilder zeigen die eingebauten Testdaten, keine echten Mails.</sub></p>
+
 ## Was Halcyon macht
 
 **„Heute" statt Posteingang**
