@@ -65,7 +65,10 @@ dist-ssr/
 coverage/
 
 # --- Tauri ------------------------------------------------------------------
-apps/desktop/src-tauri/gen/
+# The generated Android project is committed on purpose (as Tauri recommends);
+# the rest of gen/ (e.g. schemas) stays ignored. Android spike, 2026-11-28.
+apps/desktop/src-tauri/gen/*
+!apps/desktop/src-tauri/gen/android
 apps/desktop/src-tauri/target/
 
 # --- Local AI agent settings and scratch files ------------------------------

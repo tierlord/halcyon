@@ -137,11 +137,80 @@ tatsächlichen Befund notieren:
 
 ## Ergebnis
 
-*Von der ausführenden Session auszufüllen.*
+Ausgeführt am 2026-11-28 auf dem Notebook (Debian 13, 9,5 GB RAM) durch Claude.
 
-- **Rechner / Werkzeuge:** Android-Studio-, NDK-, JDK-, Rust-Version
-- **Hat „Heute" mit Testdaten im Emulator funktioniert?**
-- **Befunde je Hürde** (Fehlermeldung, Ursache, kleinste Abhilfe):
+- **Rechner / Werkzeuge:** Android-SDK per Kommandozeile in `~/android-sdk`
+  (Plattform 35–37, Build-Tools 34/37, Emulator 37.2, AVD `skyq-pixel`,
+  Android 35 x86_64 mit Google APIs, 1080×2400), NDK 29.0.14206865
+  (clang 21), JDK 21, Rust 1.100.1 (rustup, minimal + 4 Android-Ziele),
+  Node 20, pnpm 12.23, Gradle 9.6.1 (vom Wrapper geladen).
+  Emulator lief ohne Fenster (`-no-window -gpu swiftshader_indirect`).
+- **Hat „Heute" mit Testdaten im Emulator funktioniert?** **Ja**, nach einer
+  Korrektur (Datenbankpfad, siehe unten). Die App startet, „Heute" zeigt
+  die Testdaten (Begrüßung, Rechnungskarte, Personen-Kreise).
+  Bildschirmfoto: nur lokal beim Ausführenden, nicht im Repo.
+- **Befunde je Hürde:**
+  1. *Werkzeuge:* Rust und NDK fehlten, pnpm war nur ein veralteter
+     Corepack-Shim (sucht `pnpm.cjs`, pnpm 12 liefert `pnpm.mjs`).
+     Abhilfe: rustup, `sdkmanager "ndk;29.0.14206865"`, Wrapper-Skript
+     `~/.local/bin/pnpm`. `ANDROID_HOME`/`NDK_HOME`/`PATH` müssen gesetzt sein
+     (`NDK_HOME` zeigt auf die NDK-Version, nicht auf `ndk/`).
+  2. *Emulator und KVM:* „This user doesn't have permissions to use KVM", weil
+     eine ältere Shell die Gruppe `kvm` nicht kannte. Abhilfe: `sg kvm -c
+     "emulator ..."` oder neu anmelden. Der Emulator liegt nicht im `PATH`
+     von `env.sh` (nur `platform-tools`).
+  3. *`.gitignore`:* `apps/desktop/src-tauri/gen/` war ignoriert, obwohl der
+     Android-Ordner committet werden soll. Geändert auf `gen/*` mit Ausnahme
+     `!gen/android`.
+  4. *`tauri android init --ci`:* ohne Warnungen durchgelaufen.
+  5. *Datenbankpfad (Verdächtiger 1) – bestätigt:* Absturz beim Start,
+     `panicked at src-tauri/src/lib.rs:1916: could not open the Halcyon
+     database: ... CannotOpen ... "unable to open database file: halcyon.db"`.
+     Ursache: `ProjectDirs` liefert auf Android nichts, `halcyon.db` wird im
+     schreibgeschützten Arbeitsverzeichnis geöffnet. Abhilfe im Versuch:
+     auf Android `/data/data/<Paketname>/files/halcyon.db`, Paketname aus
+     `/proc/self/cmdline`. Sauber wäre `app.path().app_data_dir()` in `setup`
+     (Store dort statt vor dem Builder anlegen), das ist ein größerer Umbau.
+  6. *`aws-lc-rs` (Verdächtiger 4):* baut mit dem NDK-Compiler durch, kein
+     `cmake` nötig. Kompletter Rust-Build (x86_64, Debug, kalt): 6 min 53 s.
+  7. *Passwortspeicher `keyring` (Verdächtiger 2):* baut für Android. Beim
+     Start kein Zugriff und kein Fehler; das Verhalten beim ersten echten
+     Zugriff ist **ungeprüft** (ohne Konto nicht auslösbar). Vermutung:
+     ohne Android-Backend (Keystore) schlägt das Speichern fehl.
+  8. *Zertifikate (Verdächtiger 3):* beim Start kein Fehler. Die
+     JNI-Initialisierung von `rustls-platform-verifier` greift vermutlich
+     erst bei der ersten Verbindung; **ungeprüft**.
+  9. *`watch.rs` (Verdächtiger 5):* ohne Konten keine Fehler beim Start.
+     Dauerhafte IMAP-Verbindungen im Hintergrund brauchen auf Android einen
+     Vordergrunddienst, sonst beendet das System sie.
+  10. *Dateien (Verdächtiger 6):* beim Start keine Auffälligkeit,
+      `reveal_item_in_dir` und Download-Ordner nicht geprüft.
+  11. *Berechtigungen:* in der Konsole `notification.is_permission_granted
+      not allowed`. Für das Benachrichtigungs-Plugin fehlt unter
+      `capabilities/` die Erlaubnis für Mobil (kleine Ergänzung nötig).
+  12. *Gradle-Warnungen:* nur Veraltet-Hinweise (Java-Ziel 8, `onBackPressed`),
+      kein Fehler.
+  13. *Lauf ohne Testdaten (Schritt 5):* **nicht durchgeführt**, weil der
+      Emulator überlastet war (siehe Offene Fragen).
 - **Geänderte Dateien** und warum:
-- **Was auf dem schmalen Bildschirm nicht passt:**
+  `apps/desktop/src-tauri/src/lib.rs` (Datenbankpfad auf Android, mit
+  Kommentar), `.gitignore` (Android-Ordner nicht ignorieren),
+  `apps/desktop/src-tauri/gen/android/` (neu, von Tauri erzeugt),
+  diese Notiz.
+- **Was auf dem schmalen Bildschirm nicht passt** (aus einem einzigen
+  Bildschirmfoto, 1080×2400):
+  - Die Seitenleiste steht dauerhaft als etwa 44 % breite Spalte neben dem
+    Inhalt, statt als ausfahrbare Leiste; Beschriftungen werden abgeschnitten
+    („Vorgänge & Quel…").
+  - Der Inhalt wird dadurch sehr schmal (Rechnungskarte bricht Zeile für Zeile
+    um, Suchfeld läuft rechts aus dem Bild).
+  - Statusleiste und Kopfzeile überlappen (Uhrzeit über dem Logo): es fehlen
+    die Sicherheitsabstände (`env(safe-area-inset-*)`).
+  - Ziehen und Hinweise beim Überfahren (Hover) nicht geprüft.
 - **Offene Fragen:**
+  - Emulator war mit 4 GB frei, Software-GPU und laufendem Gradle-Daemon
+    überlastet („System UI isn't responding"). Weitere Bildschirmfotos und
+    der Lauf ohne Testdaten stehen aus; besser mit mehr RAM oder
+    Hardware-GPU wiederholen.
+  - Soll der Datenbankpfad sauber über `app_data_dir()` gelöst werden?
+  - Wie soll der Passwortspeicher auf Android aussehen (Keystore)?

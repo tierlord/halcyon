@@ -1898,6 +1898,22 @@ fn default_db_path() -> PathBuf {
     if let Some(p) = std::env::var_os("HALCYON_DB") {
         return p.into();
     }
+    // Android spike (2026-11-28): `ProjectDirs` yields nothing there (no HOME), so
+    // "halcyon.db" was opened relative to the read-only cwd and `Store::open(..).expect`
+    // aborted the app at startup. Smallest fix: the app-private files dir, with the
+    // package name read from the process command line. The proper fix is
+    // `app.path().app_data_dir()` in Tauri's `setup`, which needs the store to be
+    // created there instead of before the builder.
+    #[cfg(target_os = "android")]
+    if let Some(pkg) = std::fs::read("/proc/self/cmdline").ok().and_then(|b| {
+        let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+        String::from_utf8(b[..end].to_vec()).ok()
+    }) {
+        return PathBuf::from("/data/data")
+            .join(pkg)
+            .join("files")
+            .join("halcyon.db");
+    }
     directories::ProjectDirs::from("", "", "halcyon")
         .map(|d| d.data_dir().join("halcyon.db"))
         .unwrap_or_else(|| PathBuf::from("halcyon.db"))
